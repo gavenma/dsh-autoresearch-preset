@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "generation": "73dba5793f85",
+  "aggregateId": "ce73dad00474fc2e39819272fdf143082ab2b3fbef5027b1af469bd586af1246",
+  "aggregateScope": [
+    "tools/autoresearch-core-73dba5793f85.mjs",
+    "tools/linear-client.mjs",
+    "tools/research-web-fetch.mjs",
+    "tools/byte-utils.mjs"
+  ],
+  "entries": {
+    "orchestrator": "tools/research-orchestrator-73dba5793f85.mjs",
+    "linear": "tools/linear-73dba5793f85.mjs",
+    "core": "tools/autoresearch-core-73dba5793f85.mjs"
+  },
+  "files": {
+    "tools/autoresearch-core-73dba5793f85.mjs": "d285140210d6e0d3db6e4f846b230a1e829f01a2973335a126373f477d0f2702",
+    "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
+    "tools/research-web-fetch.mjs": "de7b9c64c916f2ecb3cabca0ae6b11543da8899ee83729316e20fe947d181332",
+    "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
+    "tools/research-orchestrator-73dba5793f85.mjs": "6098fde37499919a9cc00c85e852107202c0017012d35ba9f0925d59bcb4ab66",
+    "tools/linear-73dba5793f85.mjs": "df0760b50a70e1e9bbf26f6b6a978c7a87cb98b8dd30cdbe8be1a20cd150db64",
+    "config.default.json": "288a56bff8413061f3ab368010c4b12b05007ab4825a27b9e60b4af9be8bb7ea",
+    "agent.cordis.yml": "5ac4ba3378a5ab0266dc1f89d9a0a192e67a7a6af48fcb38be4884bb25ad3837",
+    "preset.yml": "260c2617a7e525324c3f7f44cda98b211846f129dcc2cb0a552449b63f6d4f63",
+    "roles/research_planner.md": "64939c9c918366a622eda00a98b5a97ed9857f9ee22ce740c0be9cd364336ca6",
+    "skills/research-project/SKILL.md": "bbe21c5d57b5a49d4eb62ddeef63b747bb65c38a6e2b3a0a8b6adb5a319c8ef4",
+    "skills/research-outline-project/SKILL.md": "e8c56a48f9e428a7ba5fb0b261e0da6d749370b968bd4c4607faff6cf9c37dff",
+    "roles/research_abstract_writer.md": "6ea56ff0d188574ff87799742dc561ccf3829e286bc5d90813bb0aced0bcb2cd",
+    "roles/research_coder.md": "7c1e8f57e6f59441a8b543a5d16a7a8bc63d8313f95b2d668ca146da4ddec359",
+    "roles/research_experiments_commentator.md": "ec65cfe7ad15d0caf7e2cff299c0fdc70ffe8d8deda41e2662a30a60f080d6db",
+    "roles/research_integration_editor.md": "bbcf05ae8270caaf94c4526638ee8430d1196e5b87636a87ee623b87ef98bc16",
+    "roles/research_integration_verifier.md": "2a563ceed33a04f7fee3a0431c9ca363c066ace1042edfd0ecaaaef8c56a3ee0",
+    "roles/research_literature_writer.md": "68fdbc6c3827de976d25d4d7798190bb40587b224103303d1d2018f3fe5d9e55",
+    "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346"
+  },
+  "generatedAt": "2026-08-20T14:20:06.000Z"
+}

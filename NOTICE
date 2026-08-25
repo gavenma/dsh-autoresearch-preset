@@ -1,0 +1,16 @@
+AutoResearch DSH Preset
+Copyright (c) 2026 Gaven Ma
+
+This repository is a source-controlled snapshot of an AutoResearch preset for
+DeepSeek Harness (DSH). It requires a compatible DSH installation at runtime.
+DSH is a separate project distributed under the MIT License.
+
+Third-party component
+---------------------
+The repository vendors PDF.js legacy build artifacts in
+`tools/vendor/pdfjs-dist/legacy/build/`. PDF.js is Copyright 2024 Mozilla
+Foundation and is distributed under the Apache License, Version 2.0. The
+license notice embedded at the head of each vendored artifact is retained.
+
+The MIT license in LICENSE applies only to original material in this
+repository and does not replace licenses for third-party material.

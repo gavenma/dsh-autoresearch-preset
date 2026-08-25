@@ -1,0 +1,31 @@
+# DSH and AutoResearch runtime state
+.research-agent/
+.dsh/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.tmp/
+tmp/
+
+# Logs and editor metadata
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Python and OS caches
+__pycache__/
+*.py[cod]

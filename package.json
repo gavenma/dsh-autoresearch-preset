@@ -1,0 +1,23 @@
+{
+  "name": "dsh-autoresearch-preset",
+  "version": "0.1.0",
+  "private": false,
+  "description": "A source-controlled AutoResearch Project Mode preset for DeepSeek Harness.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "verify:snapshot": "node scripts/verify-snapshot.mjs",
+    "check": "npm run verify:snapshot",
+    "install:preset": "node scripts/install-preset.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "autoresearch",
+    "research-agent",
+    "agent-preset"
+  ]
+}
