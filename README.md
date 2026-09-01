@@ -1,26 +1,95 @@
-# AutoResearch DSH Preset
+# AutoResearch — a research project agent for DeepSeek Harness
 
-A source-controlled **AutoResearch Project Mode** preset for [DeepSeek Harness
-(DSH)](https://github.com/deepseek-ai/DeepSeek-Harness). It coordinates
-structured, evidence-grounded research through an approved DAG, independent
-role subagents, an AutoReason-style A/B/AB refinement loop, blind Borda judging,
-acceptance receipts, and final integration.
+This repository is a preset for [DeepSeek Harness
+(DSH)](https://github.com/deepseek-ai/DeepSeek-Harness) that turns DSH into a
+research project team. Give it a research question — "write an
+evidence-grounded review of X" — and it plans the project with you, does the
+work step by step with a team of specialized AI roles, checks every piece of
+work before accepting it, traces failures back to where they started, and
+hands you a finished report. If you use Linear, the whole project is mirrored
+there as issues you can watch move from *todo* to *done*.
 
-The repository started as a snapshot of the installed, runnable preset
-(generation `73dba5793f85`, kept traceable in `tools/build-manifest.json`).
-It now carries the editable build source under `src/`: every runtime
-generation is rebuilt from it with `npm run build:preset`, and the current
-generation, entry hashes, and aggregate build identity are recorded in
-`tools/build-manifest.json`.
+## What it can do
 
-## Status
+- **Plan a research project from a short brief.** You write a few paragraphs
+  describing the question (or hand over your own outline); the agent proposes
+  a plan: every step, what it will produce, which steps it depends on, and a
+  checklist of what "done" means for each one.
+- **Execute the plan without you babysitting it.** Each step is done by fresh,
+  single-purpose AI workers — evidence gatherers, drafters, critics, judges,
+  editors — so no step inherits another step's mistakes or context.
+- **Verify work at every level.** Drafts are critiqued and revised until they
+  hold up, competing drafts are ranked blindly, evidence claims must carry
+  real sources, and the final document is assembled and re-checked as a whole,
+  figures included.
+- **Explain what went wrong, causally.** When a step fails its checks, the
+  agent looks for the responsible upstream step instead of papering over the
+  symptom.
+- **Mirror progress into Linear (optional).** Each plan step becomes an issue,
+  so the project reads like a normal Linear board.
 
-The runtime snapshot is usable with a compatible DSH installation. Causal
-upstream backtracking v1 is implemented and defaults to `backtracking.mode:
-"observe"`: it records only strict, disk-verified, same-pass quorum hypotheses.
-`"enforce"` must be explicitly configured and treats a reopen as a bounded repair
-experiment, not proof that an upstream node caused a defect. See
-`docs/causal-backtracking-plan.zh-CN.md` for the protocol and test requirements.
+## How a project runs
+
+**1. You set the goal; the agent proposes the plan.** The agent turns your
+brief into a map of the work: "gather evidence for A", "write section B
+(uses A's findings)", "draft the abstract (uses B)", and so on, ending in a
+final assembly step. Each step carries a checklist of concrete acceptance
+criteria — things like "every claim cites a real URL" or "stays within the
+word budget". **Nothing executes before you approve the plan.** Once approved,
+the plan is frozen: the agent will surface drift, never rewrite it behind your
+back.
+
+**2. Each step runs in dependency order, one role at a time.** A step like
+"write section B" is not one monolithic model call. The agent first sends out
+*scouts* that gather evidence in parallel (web pages, papers, PDFs); a
+*writer* drafts from that evidence; a *critic* attacks the draft for real
+problems rather than style nitpicks; *judges* compare the candidate versions
+and rank them. Every worker is fresh and confined: it sees only the inputs
+its role needs, writes only into its own step's folder, and returns when done.
+
+**3. Draft → critique → revise, until the work converges.** Each step runs a
+bounded refinement loop: draft, critique, revise, re-critique. The loop stops
+when the critique finds nothing real left to fix (convergence) or when the
+step's attempt budget is spent. When a step ends with several surviving
+candidates, the judges rank them **blind** — they do not know which version is
+the original, the revision, or who produced it — and the best one is promoted.
+This is what keeps "more iterations" from silently degrading quality.
+
+**4. Failures are traced to their cause.** If a later step can't meet its
+checklist, the agent doesn't just retry or patch the symptom. It looks for
+mechanically checkable traces pointing upstream — a requirement the upstream
+step was allowed to skip, a piece of work the upstream step never delivered —
+and attributes the problem to the step that plausibly caused it. These
+attributions are always recorded as **bounded hypotheses, together with the
+exact evidence behind them**, never as proof. The default `observe` mode only records them, so you
+can see where your projects tend to break. The optional `enforce` mode lets
+the agent reopen the responsible step for a bounded repair attempt — with hard
+caps on how many times any step may be reopened — and re-verify the downstream
+work afterwards.
+
+**5. The final document is assembled, then re-verified as a whole.** When
+every content step is done, an *integration* pass merges the pieces: it checks
+that every planned contribution is present, fixes editorial issues in place
+(shortening, formatting, moving material to an appendix), and — for
+substantive problems or conflicts between pieces — bounces the problem back to
+the step that owns it instead of silently rewriting someone's work. A visual
+check inspects figures and tables in the assembled document, and the finished
+deliverable is published to `outputs/`.
+
+**6. Where things live.** All internal work — the approved plan, per-step
+checklists, drafts, evidence, and a journal of what was verified when — stays
+in a hidden `.research-agent/` folder in your project workspace. Only finished,
+user-facing deliverables are published to `outputs/`. The plan is immutable
+after approval and the journal is append-only, so you can always reconstruct
+what happened and why.
+
+**7. Linear is a window, not the engine.** If you connect Linear (see Quick
+start), each plan step gets an issue that the agent updates as work
+progresses, so a human can follow the project on a board like any other Linear
+work. The mirror is one-directional by design: the files from step 6 are the
+source of truth, and the project never blocks on or trusts a Linear state. If
+the two disagree, the agent surfaces the drift instead of silently reconciling
+it.
 
 ## Quick start
 
@@ -39,7 +108,7 @@ every fresh deployment has to make:
 1. **Models.** Every research role ships on `deepseek-official/deepseek-v4-flash`
    — the right default for DeepSeek Harness users. Accept it, or pick a
    different model per role from your deployment's catalog.
-2. **Linear (optional).** If you want the preset to mirror research nodes into
+2. **Linear (optional).** If you want the preset to mirror project steps into
    Linear, paste your API key. It is verified against Linear right away, and on
    success stored in the DSH credentials store (`$DSH_HOME/.credentials.yaml`,
    mode 0600) — never in this repository.
@@ -65,25 +134,24 @@ npm run install:preset -- "$HOME/.dsh/.agent-presets/research" --apply-local
 
 Start a new DSH session afterwards (see Install below for the restart rule).
 
-## What it provides
+## What's in this repository
 
-- `preset.yml` and `agent.cordis.yml`: the DSH preset metadata and composition.
-- `roles/`: confined role prompts for planning, evidence, authoring, critique,
-  judging, reporting, implementation, and integration.
-- `skills/`: standard and outline-led project workflows.
-- `tools/`: the versioned AutoResearch core, orchestrator, Linear adapter,
-  bounded web/PDF fetch provider, and build manifest.
-- `briefs/demo-brief.md`: synthetic local example input.
-
-The workflow uses an immutable approved `plan.json`, a mutable receipt-journal
-`state.json`, and Linear only as a derived view. It does not treat Linear as the
-source of truth for dependency completion.
+- `roles/` — the instructions for each worker role: planner, evidence scout,
+  writer, critic, judge, reporter, coder, and the integration editor/verifier.
+- `skills/` — the two entry points you would actually use: `research-project`
+  (open brief) and `research-outline-project` (your own outline).
+- `tools/` — the runtime the preset runs on: the project orchestrator, the
+  core engine, the Linear adapter, and a bounded web/PDF fetcher.
+- `src/` — the editable source of the runtime, with the build and test
+  tooling in `scripts/` and `tests/`.
+- `briefs/demo-brief.md` — a synthetic example brief you can point the agent at
+  to see a project run end to end without any real material.
 
 ## Requirements
 
-- A compatible DSH installation. This snapshot was recorded with
-  `@deepseek-ai/dsh` `0.1.1-rc.2` available locally; pin and test the DSH version
-  in your own deployment before production use.
+- A compatible DSH installation. The preset was recorded and tested with
+  `@deepseek-ai/dsh` `0.1.1-rc.2`; pin and test the DSH version in your own
+  deployment before production use.
 - Node.js 20 or later for the verification and installation scripts.
 - Optional: a Linear credential exposed to DSH as `LINEAR_API_KEY` for Linear
   workflows (`npm run init` stores it for you). Local-only projects do not
@@ -94,7 +162,7 @@ source of truth for dependency completion.
 
 ## Install
 
-First inspect the snapshot locally:
+First check the build locally:
 
 ```bash
 npm run verify:snapshot
@@ -108,13 +176,13 @@ npm run install:preset -- "$HOME/.dsh/.agent-presets/research"
 ```
 
 When replacing a preset that is already mounted, **restart the DSH process**
-before starting a new research session. Standing preset mounts are retained for
-the process lifetime; otherwise an old provider can collide with the replacement
-generation during remount.
+before starting a new research session: DSH keeps a mounted preset in memory
+for the life of the process, so a running process will keep serving the old
+version until it is restarted.
 
-For safer evaluation, use a distinct preset id and target directory rather than
-overwriting a working preset. The composition and its runtime entries are
-self-contained relative to the preset root.
+For safer evaluation, install into a distinct preset id and target directory
+rather than overwriting a working preset; everything a preset needs lives
+inside its own directory.
 
 ### The installer's promise about your config
 
@@ -158,20 +226,19 @@ no longer in the shipped recognized-model list.
   deployment-specific tuning applied to the installed preset under
   `~/.dsh/.agent-presets/` after installation.
 
-## Validate the baseline
+## Verify the build
 
 ```bash
 npm run check
 ```
 
-The check is offline. It confirms every manifest-listed file hash, recomputes
-the aggregate build ID, verifies the embedded entry identities, and checks the
-required preset assets. It does not invoke a model, DSH server, Linear, or web
-fetch.
+The check is offline: it re-hashes every runtime file against the build
+manifest and verifies the preset's internal consistency. It calls nothing —
+no models, no DSH server, no Linear, no network — and takes seconds.
 
-A full DSH runtime validation should also mount the copied preset and invoke its
-`autoresearch_build_probe` and `linear_build_probe`; both must report the same
-aggregate ID and `graphMatches: true`.
+A full runtime validation should also mount the installed preset in DSH and run
+its built-in self-checks (`autoresearch_build_probe` and `linear_build_probe`);
+both should report a healthy project graph before you start real work.
 
 ## Configuration and operation
 
@@ -194,8 +261,8 @@ defaults before use:
   refuses cross-origin redirects. Remote sources remain untrusted input.
 
 Use the `research-project` skill for an open research brief and
-`research-outline-project` for a substantial user-provided outline. Both lead to
-the same approved plan, node execution, integration, and finalization flow.
+`research-outline-project` for a substantial user-provided outline. Both lead
+to the same flow: approve the plan, execute the steps, integrate, finalize.
 
 ## Data handling
 
@@ -213,9 +280,11 @@ model output may contain prompt injection or sensitive data.
 
 This repository is the editable source and build authority for the preset. Make
 runtime changes in `src/`, then run `npm run build:preset`; it emits a new
-versioned generation, updates the composition and manifest, and retains the
-baseline generation only for regression tests. Do not edit generated entries in
-`tools/` by hand. Run `npm test` before installation or deployment.
+versioned generation (the initial public snapshot was generation
+`73dba5793f85`), updates the composition and manifest, and records the current
+generation, entry hashes, and aggregate build identity in
+`tools/build-manifest.json`. Do not edit the generated entries in `tools/` by
+hand. Run `npm test` before installation or deployment.
 
 See `CONTRIBUTING.md` for test and data rules, `SECURITY.md` for reporting and
 operational boundaries, and `NOTICE` for third-party attribution. The project is
