@@ -367,7 +367,9 @@ function printManualSteps(defaultConfig) {
   console.log('     version: 1')
   console.log('     refs:')
   console.log('       LINEAR_API_KEY: <your lin_api_... key>')
-  console.log('3) Then run: npm run verify:snapshot && npm run install:preset')
+  console.log('3) Then run: npm run verify:snapshot && npm run install:preset -- <target>')
+  console.log('   The installer never touches a config.default.json that already exists at the target;')
+  console.log('   pass --apply-local to explicitly layer your config.local.json into it.')
   console.log('   (or re-run `npm run init` from an interactive terminal)')
   console.log('Recognized models in the shipped config: ' + (defaultConfig._recognizedModels ?? []).join(', '))
 }
@@ -401,9 +403,15 @@ async function main() {
   await linearStep()
   rl.close()
 
+  const localOverrides = fs.existsSync(localConfigPath)
   console.log(bold('\nDone. Next steps:'))
   console.log('  1. npm run verify:snapshot        # offline integrity check of the built preset')
-  console.log('  2. npm run install:preset         # install into ' + path.join(dshHome, '.agent-presets', 'research'))
+  console.log('  2. npm run install:preset -- ' + path.join(dshHome, '.agent-presets', 'research') + (localOverrides ? ' --apply-local' : ''))
+  if (localOverrides) {
+    console.log('     --apply-local explicitly layers your config.local.json into the installed preset.')
+  }
+  console.log('     Note: the installer never touches a config.default.json that already exists at')
+  console.log('     the target, so re-installing after an update can never change your setup.')
   console.log('  3. Start a NEW DSH session (restart the DSH process if the preset is already mounted)')
   console.log('Then open a research session in a project workspace and use the research-project skill.')
 }

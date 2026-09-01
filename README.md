@@ -24,26 +24,43 @@ experiment, not proof that an upstream node caused a defect. See
 
 ## Quick start
 
+When you clone this repository, **the first thing to run is the initialization
+script**:
+
 ```bash
 git clone https://github.com/gavenma/dsh-autoresearch-preset.git
 cd dsh-autoresearch-preset
 npm run init
 ```
 
-`npm run init` is the first-run initializer: it checks your Node.js and DSH
-installation, walks through model setup (every research role ships on
-`deepseek-official/deepseek-v4-flash`), and optionally sets up your Linear
-account — verifying the API key against Linear and storing it in the DSH
-credentials store (`$DSH_HOME/.credentials.yaml`), never in this repository.
-Model choices that differ from the shipped defaults are written to a
-git-ignored `config.local.json`. It also prints the exact manual steps when
-run from a non-interactive terminal.
+`npm run init` is a guided setup that walks you through the two decisions
+every fresh deployment has to make:
+
+1. **Models.** Every research role ships on `deepseek-official/deepseek-v4-flash`
+   — the right default for DeepSeek Harness users. Accept it, or pick a
+   different model per role from your deployment's catalog.
+2. **Linear (optional).** If you want the preset to mirror research nodes into
+   Linear, paste your API key. It is verified against Linear right away, and on
+   success stored in the DSH credentials store (`$DSH_HOME/.credentials.yaml`,
+   mode 0600) — never in this repository.
+
+Anything personal stays out of the repository: model choices that differ from
+the shipped defaults are written to a git-ignored `config.local.json`. In a
+non-interactive terminal the script prints the same information as manual
+steps instead of prompting.
 
 Then verify and install:
 
 ```bash
 npm run verify:snapshot
-npm run install:preset
+npm run install:preset -- "$HOME/.dsh/.agent-presets/research"
+```
+
+If `npm run init` wrote overrides to `config.local.json`, add `--apply-local`
+to the install command so they are layered into the installed preset:
+
+```bash
+npm run install:preset -- "$HOME/.dsh/.agent-presets/research" --apply-local
 ```
 
 Start a new DSH session afterwards (see Install below for the restart rule).
@@ -99,21 +116,34 @@ For safer evaluation, use a distinct preset id and target directory rather than
 overwriting a working preset. The composition and its runtime entries are
 self-contained relative to the preset root.
 
-### Re-installing never rewrites your config
+### The installer's promise about your config
 
-Updating the code and installing again must not change a working deployment.
-The installer therefore treats `config.default.json` as layered configuration,
-merged into the installed preset — later layers win:
+The installer copies the preset's runtime code — the composition, role prompts,
+skills, and generated tools — into the target directory. For configuration it
+makes one simple promise:
 
-1. the shipped defaults in this repository (new keys and roles appear here),
-2. the deployment's existing installed config (everything you already set is
-   preserved, never silently replaced),
-3. `config.local.json` — the git-ignored local overrides `npm run init` writes.
+> **A `config.default.json` that already exists at the target is never
+> touched.** No merging, no overwriting, no backfilling of new keys.
+> Re-installing after a code update leaves your working deployment's
+> configuration byte-for-byte identical, so an update can never silently change
+> how your deployment behaves.
 
-Model choices are never auto-migrated: a model outside the shipped
-recognized-model list is preserved as-is and reported. The repository itself is
-never rewritten by the installer. Pass `--fresh-config` to skip both local
-layers and install the shipped defaults verbatim.
+Two explicit command-line flags are the only way the installer writes that
+file, and only because you told it to:
+
+- `--apply-local` — layer your git-ignored `config.local.json` overrides
+  (created by `npm run init`) into the target config. Without the flag,
+  `config.local.json` is simply ignored.
+- `--replace-config` — reset the target config to the shipped defaults. Combine
+  with `--apply-local` to reset and then re-apply your overrides.
+
+The one exception that needs no instruction: a first install into a target
+that has no config yet receives the shipped `config.default.json`, because a
+mounted preset cannot run without one. If a future release adds new
+configuration keys, they stay out of your file until you deliberately pick them
+up (for example `--replace-config` + `--apply-local`, or by hand). The
+installer also *reports* — without changing anything — any role model that is
+no longer in the shipped recognized-model list.
 
 ## What ships vs what stays local
 
@@ -122,7 +152,8 @@ layers and install the shipped defaults verbatim.
   role defaults, role prompts, skills, generated tools, and the build/test
   tooling. No API keys, no personal provider catalogs, no runtime state.
 - **Stays local, never committed**: `config.local.json` (per-deployment model
-  choices and overrides, git-ignored), `$DSH_HOME/.credentials.yaml` (API keys,
+  choices and overrides, git-ignored; applied only when you explicitly pass
+  `--apply-local` to the installer), `$DSH_HOME/.credentials.yaml` (API keys,
   DSH-owned, mode 0600), `.research-agent/` runtime state, and any
   deployment-specific tuning applied to the installed preset under
   `~/.dsh/.agent-presets/` after installation.
@@ -146,8 +177,9 @@ aggregate ID and `graphMatches: true`.
 
 `config.default.json` seeds configuration for new project workspaces. The
 precedence is: workspace `.research-agent/config.json` > installed preset
-config (shipped defaults + `config.local.json`) > built-in defaults. Review the
-shipped defaults before use:
+config (the shipped defaults, optionally layered with `config.local.json` via
+the installer's `--apply-local`) > built-in defaults. Review the shipped
+defaults before use:
 
 - The baseline includes `linear.approval: "auto"`; set a stricter approval mode
   in your deployment if side effects should require confirmation.
