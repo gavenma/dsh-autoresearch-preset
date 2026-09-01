@@ -191,7 +191,16 @@ export function apply(ctx, config = {}) {
   if (!Number.isInteger(resolved.maxAttempts) || resolved.maxAttempts < 1) throw new Error('maxAttempts must be a positive integer')
   const web = ctx.get('web')
   if (!web) throw new Error('web service is required')
-  web.registerFetchProvider(new ResearchFetchProvider(resolved))
+  // Presets can be mounted beside an existing research session. The web
+  // registry is process-scoped, so reuse the already-installed provider rather
+  // than failing a later preset mount with WEB_DUPLICATE_PROVIDER.
+  if (web.fetchProviders instanceof Map && web.fetchProviders.has('research-http-pdf')) return
+  try {
+    web.registerFetchProvider(new ResearchFetchProvider(resolved))
+  } catch (error) {
+    if (error?.code === 'WEB_DUPLICATE_PROVIDER' || String(error?.message ?? '').includes('already registered')) return
+    throw error
+  }
 }
 
 export { ResearchFetchProvider }

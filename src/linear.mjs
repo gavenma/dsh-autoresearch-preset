@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation 73dba5793f85. Do not edit by hand.
-import * as core from "./autoresearch-core-73dba5793f85.mjs"
+// Source entry for the AutoResearch Linear adapter. The build script emits a versioned runtime bundle.
+import * as core from "./autoresearch-core.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -732,8 +732,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = '73dba5793f85'
-export const EMBEDDED_BUILD_ID = 'ce73dad00474fc2e39819272fdf143082ab2b3fbef5027b1af469bd586af1246'
+export const EMBEDDED_GENERATION = '__AUTORESEARCH_GENERATION__'
+export const EMBEDDED_BUILD_ID = '__AUTORESEARCH_BUILD_ID__'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
@@ -902,12 +902,15 @@ const LINEAR_PLUGIN = {
     // prose.
     async function loadApprovedPlan(fops, baseDir, autoresearchProjectId) {
       if (!fops) throw new Error('fs service unavailable; cannot load the approved plan from the workspace')
-      const planPath = absPath(baseDir, '.research-agent/projects/' + autoresearchProjectId + '/plan.json')
-      const plan = await fops.readJson(planPath)
-      if (!util.isPlainObject(plan)) {
-        throw new Error('Approved plan not readable at ' + planPath + '; Linear projection is blocked (plan §4.5).')
+      const candidates = [
+        absPath(baseDir, 'research-agent/projects/' + autoresearchProjectId + '/plan.json'),
+        absPath(baseDir, '.research-agent/projects/' + autoresearchProjectId + '/plan.json'),
+      ]
+      for (const planPath of candidates) {
+        const plan = await fops.readJson(planPath)
+        if (util.isPlainObject(plan)) return plan
       }
-      return plan
+      throw new Error('Approved plan not readable at ' + candidates.join(' or ') + '; Linear projection is blocked (plan §4.5).')
     }
 
     function registerTool(definition) {
@@ -928,10 +931,22 @@ const LINEAR_PLUGIN = {
       if (process.env.DSH_LINEAR_APPROVAL === 'ask') return 'ask'
       if (subprocess === undefined) return 'auto'
       try {
+        const configCandidates = ['research-agent/config.json', '.research-agent/config.json']
+        let configPath = absPath(baseDir, configCandidates[0])
+        for (const candidate of configCandidates) {
+          const path = absPath(baseDir, candidate)
+          try {
+            const value = await fs.readText(await fs.resolve(path, { cwd: baseDir }))
+            JSON.parse(value)
+            configPath = path
+            break
+          } catch {
+          }
+        }
         const node = await subprocess.resolveExecutable('node')
         const script = "const fs=require('fs');try{const c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(JSON.stringify(c&&c.linear&&typeof c.linear.approval==='string'?c.linear.approval:'auto'))}catch(e){console.log('auto')}"
         const handle = subprocess.spawn({
-          argv: [node, '-e', script, absPath(baseDir, '.research-agent/config.json')],
+          argv: [node, '-e', script, configPath],
           cwd: baseDir,
           stdio: {
             stdin: { data: '' },

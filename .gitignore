@@ -1,8 +1,10 @@
 # DSH and AutoResearch runtime state
 .research-agent/
+research-agent/
 .dsh/
 
 # Credentials and local configuration
+config.local.json
 .env
 .env.*
 !.env.example

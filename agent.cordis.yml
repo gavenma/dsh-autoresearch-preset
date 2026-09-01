@@ -27,9 +27,9 @@
     text: >-
       You are a research coordinator powered by the {{model}} model, running the AutoResearch mode on the DeepSeek Harness. Your working directory is {{cwd}}.
 
-      You orchestrate evidence-grounded research through AutoResearch Project Mode. Planning may use either the standard vague-brief skill or the outline-led planning skill; both must produce an approved plan DAG and then share the same execution: plan-mode approval, one Linear issue per node, one independent AutoReason loop per node in dependency order, then merge and re-verify all leaf finals in an integration loop before the project final. Fresh, confined role subagents (scout/verifier/author/critic/synthesizer/judge/reporter) flow through an AutoReason A/B/AB refinement loop with blind Borda judging. Artifacts on disk under .research-agent/ are the source of truth; keep your context thin and checkpoint after every saved artifact. Roles run through autoresearch_run_role; never hand them your own tools. Never fabricate sources, and redact-check output before posting. plan.json is the immutable approved spec; state.json is the receipt journal; Linear is a derived view — surface drift, never rewrite the plan.
+      You orchestrate evidence-grounded research through AutoResearch Project Mode. Planning may use either the standard vague-brief skill or the outline-led planning skill; both must produce an approved plan DAG and then share the same execution: plan-mode approval, one Linear issue per node, one independent AutoReason loop per node in dependency order, then merge and re-verify all leaf finals in an integration loop before the project final. Fresh, confined role subagents (scout/verifier/author/critic/synthesizer/judge/reporter) flow through an AutoReason A/B/AB refinement loop with blind Borda judging. Internal artifacts on disk under .research-agent/ are the source of truth; only completed user-facing deliverables are published under outputs/; legacy research-agent/ remains readable. Keep your context thin and checkpoint after every promoted artifact. Roles run through autoresearch_run_role; never hand them your own tools. Never fabricate sources, and redact-check output before posting. plan.json is the immutable approved spec; state.json is the receipt journal; Linear is a derived view — surface drift, never rewrite the plan.
 
-      Bash compatibility for get-codex/gpt-5.6-sol: on ordinary Bash calls, omit sandbox_permissions and justification entirely. Supply those fields only when retrying the exact command after a sandbox denial, using a strictly wider mode and a non-empty one-sentence justification. Never request escalation speculatively.
+      Bash sandbox discipline: on ordinary Bash calls, omit sandbox_permissions and justification entirely. Supply those fields only when retrying the exact command after a sandbox denial, using a strictly wider mode and a non-empty one-sentence justification. Never request escalation speculatively.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
@@ -152,12 +152,8 @@
       name: '@deepseek-ai/dsh-compaction-basic'
       config:
         modelPolicies:
-          - provider: local-qwen-fp8
-            model: qwen3.8-27b-fp8
-            thresholdRatio: 0.6
-            retainRatio: 0.12
-          - provider: local-qwen-uncensored
-            model: qwen3.8-27b-uncensored
+          - provider: deepseek-official
+            model: deepseek-v4-flash
             thresholdRatio: 0.6
             retainRatio: 0.12
 
@@ -288,8 +284,8 @@
 # Both rows consume host services only (fs/web/subagents/agents/credentials/
 # subprocess) and publish nothing, so they need no isolate realm.
 - id: tool-autoresearch
-  name: ./tools/research-orchestrator-73dba5793f85.mjs
+  name: ./tools/research-orchestrator-85e3543270af.mjs
 
 - id: tool-linear
-  name: ./tools/linear-73dba5793f85.mjs
+  name: ./tools/linear-85e3543270af.mjs
 

@@ -1,21 +1,38 @@
 {
-  "_help": "AutoResearch preset default config (seeds .research-agent/config.json in NEW workspaces; an existing workspace file wins). MODEL ASSIGNMENT IS CENTRALIZED IN roleProfiles BELOW: every role has exactly one entry there and its model is chosen in that one place. There is no separate roleModels bucket and no per-role tool list here — per-role tools are fixed by the built-in role manifest (the integration editor already carries read_image there). judgePanel is an optional per-judge override and only takes effect when research_judge.model is omitted. _recognizedModels is the pick list of valid 'provider/model' strings (refresh with autoresearch_list_models; unrecognized strings are flagged by autoresearch_dependency_check). The integration editor must use a multimodal model for visual inspection — the local-qwen-* providers below accept image input.",
+  "_help": "AutoResearch preset default config keeps internal plans, receipts, packets, and run artifacts in hidden .research-agent/; completed user-facing deliverables are published under outputs/. Legacy visible research-agent/ and legacy .research-agent/ projects remain readable; an existing workspace file wins. MODEL ASSIGNMENT IS CENTRALIZED IN roleProfiles BELOW: every role has exactly one entry there and its model is chosen in that one place. An optional roleProfiles.<role>.modelFallbacks array is an ordered handoff chain: when a model fails with a provider/route error the role runner steps to the next entry, and a per-workspace breaker (<artifactRoot>/model-breaker.json, cooldown roleExecution.modelFallbackCooldownMs) makes later role runs skip a rate-limited model until the cooldown expires; a success on a model clears its entry. There is no separate roleModels bucket and no per-role tool list here — per-role tools are fixed by the built-in role manifest (the integration editor already carries read_image there). judgePanel is an optional per-judge override and only takes effect when research_judge.model is omitted. _recognizedModels is the pick list of valid 'provider/model' strings (refresh with autoresearch_list_models; unrecognized strings are flagged by autoresearch_dependency_check). The integration editor must use a multimodal model for visual inspection — if the default model in your deployment is text-only, point research_integration_editor at a multimodal model via the workspace config or config.local.json. The shipped defaults run every role on deepseek-official/deepseek-v4-flash; use `npm run init` to customize per deployment.",
   "_recognizedModels": [
     "deepseek-official/deepseek-v4-flash",
-    "deepseek-official/deepseek-v4-pro",
-    "xai/grok-4.6",
-    "xai/grok-4.5",
-    "openai/gpt-5.6-luna",
-    "openai/gpt-5.6-sol",
-    "local-qwen-fp8/qwen3.8-27b-fp8"
+    "deepseek-official/deepseek-v4-pro"
   ],
   "numScouts": 2,
   "numJudges": 2,
   "maxPasses": 2,
   "convergenceThreshold": 2,
   "externalResearch": true,
+  "artifactRoot": ".research-agent",
+  "outputRoot": "outputs",
   "linear": {
     "approval": "auto"
+  },
+  "backtracking": {
+    "mode": "observe",
+    "quorumJudges": 2,
+    "maxReopensPerUpstream": 2,
+    "maxReopensPerPair": 2,
+    "maxEpochs": 3,
+    "maxContextUpstreams": 8,
+    "maxExplanationLength": 500,
+    "maxObservations": 50,
+    "requireEvidenceFileHash": true
+  },
+  "roleExecution": {
+    "maxAttempts": 3,
+    "maxAttemptsCeiling": 5,
+    "retryDelayMs": 0,
+    "timeoutMs": 0,
+    "leaseMs": 900000,
+    "maxTokens": null,
+    "modelFallbackCooldownMs": 600000
   },
   "planning": {
     "numJudges": 2,
@@ -25,49 +42,49 @@
   "judgePanel": [],
   "roleProfiles": {
     "research_planner": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_scout": {
-      "model": "local-qwen-fp8/qwen3.8-27b-fp8"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "evidence_verifier": {
-      "model": "deepseek-official/deepseek-v4-pro"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_author": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_critic": {
-      "model": "deepseek-official/deepseek-v4-pro"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_synthesizer": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_judge": {
-      "model": "deepseek-official/deepseek-v4-pro"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_reporter": {
-      "model": "local-qwen-fp8/qwen3.8-27b-fp8"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_coder": {
-      "model": "local-qwen-fp8/qwen3.8-27b-fp8"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_unit_tester": {
-      "model": "local-qwen-fp8/qwen3.8-27b-fp8"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_literature_writer": {
-      "model": "deepseek-official/deepseek-v4-pro"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_abstract_writer": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_experiments_commentator": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_integration_editor": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_integration_verifier": {
-      "model": "deepseek-official/deepseek-v4-pro"
+      "model": "deepseek-official/deepseek-v4-flash"
     }
   }
 }

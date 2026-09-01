@@ -1,38 +1,49 @@
 {
   "schemaVersion": 2,
-  "generation": "73dba5793f85",
-  "aggregateId": "ce73dad00474fc2e39819272fdf143082ab2b3fbef5027b1af469bd586af1246",
+  "generation": "85e3543270af",
+  "aggregateId": "5e8583d69b0fac74baa9923388f59437252b4a9e4bf263e36c36b34a1487838e",
   "aggregateScope": [
-    "tools/autoresearch-core-73dba5793f85.mjs",
+    "tools/autoresearch-core-85e3543270af.mjs",
+    "tools/byte-utils.mjs",
     "tools/linear-client.mjs",
     "tools/research-web-fetch.mjs",
-    "tools/byte-utils.mjs"
+    "tools/vendor/pdfjs-dist/legacy/build/pdf.mjs",
+    "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs"
   ],
   "entries": {
-    "orchestrator": "tools/research-orchestrator-73dba5793f85.mjs",
-    "linear": "tools/linear-73dba5793f85.mjs",
-    "core": "tools/autoresearch-core-73dba5793f85.mjs"
+    "core": "tools/autoresearch-core-85e3543270af.mjs",
+    "orchestrator": "tools/research-orchestrator-85e3543270af.mjs",
+    "linear": "tools/linear-85e3543270af.mjs"
   },
   "files": {
-    "tools/autoresearch-core-73dba5793f85.mjs": "d285140210d6e0d3db6e4f846b230a1e829f01a2973335a126373f477d0f2702",
-    "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
-    "tools/research-web-fetch.mjs": "de7b9c64c916f2ecb3cabca0ae6b11543da8899ee83729316e20fe947d181332",
-    "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
-    "tools/research-orchestrator-73dba5793f85.mjs": "6098fde37499919a9cc00c85e852107202c0017012d35ba9f0925d59bcb4ab66",
-    "tools/linear-73dba5793f85.mjs": "df0760b50a70e1e9bbf26f6b6a978c7a87cb98b8dd30cdbe8be1a20cd150db64",
-    "config.default.json": "288a56bff8413061f3ab368010c4b12b05007ab4825a27b9e60b4af9be8bb7ea",
-    "agent.cordis.yml": "5ac4ba3378a5ab0266dc1f89d9a0a192e67a7a6af48fcb38be4884bb25ad3837",
+    "agent.cordis.yml": "e7321ebe330f973577d5e1b3ed85e8e2ab0c8c95db2b7537c5366ba938be514b",
+    "config.default.json": "f01ec912b8267257cfc2cf6125fce9480a8d9e288355131ef325697d8d14a27f",
     "preset.yml": "260c2617a7e525324c3f7f44cda98b211846f129dcc2cb0a552449b63f6d4f63",
-    "roles/research_planner.md": "64939c9c918366a622eda00a98b5a97ed9857f9ee22ce740c0be9cd364336ca6",
-    "skills/research-project/SKILL.md": "bbe21c5d57b5a49d4eb62ddeef63b747bb65c38a6e2b3a0a8b6adb5a319c8ef4",
-    "skills/research-outline-project/SKILL.md": "e8c56a48f9e428a7ba5fb0b261e0da6d749370b968bd4c4607faff6cf9c37dff",
+    "roles/evidence_verifier.md": "bef5eb24ee3e6e4184ab21a27a8ea9893cddca17c6b0e6ef346d084ee8857fd4",
     "roles/research_abstract_writer.md": "6ea56ff0d188574ff87799742dc561ccf3829e286bc5d90813bb0aced0bcb2cd",
+    "roles/research_author.md": "6f555b1bc2243faebbe62a9ea2c3f678fdb7922fc324c114b2a1b95320b54d24",
     "roles/research_coder.md": "7c1e8f57e6f59441a8b543a5d16a7a8bc63d8313f95b2d668ca146da4ddec359",
+    "roles/research_critic.md": "4c56cf4132f689fbd5dde1ad2ef3570f1c30708fe6cbdb37a8e696e6e74363b5",
     "roles/research_experiments_commentator.md": "ec65cfe7ad15d0caf7e2cff299c0fdc70ffe8d8deda41e2662a30a60f080d6db",
     "roles/research_integration_editor.md": "bbcf05ae8270caaf94c4526638ee8430d1196e5b87636a87ee623b87ef98bc16",
     "roles/research_integration_verifier.md": "2a563ceed33a04f7fee3a0431c9ca363c066ace1042edfd0ecaaaef8c56a3ee0",
+    "roles/research_judge.md": "29d88639ff8cab4713b6d2b1b3fe34641869ef41f83f66791dd05c70182d42fc",
     "roles/research_literature_writer.md": "68fdbc6c3827de976d25d4d7798190bb40587b224103303d1d2018f3fe5d9e55",
-    "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346"
+    "roles/research_planner.md": "64939c9c918366a622eda00a98b5a97ed9857f9ee22ce740c0be9cd364336ca6",
+    "roles/research_reporter.md": "5d9984a6b01a858d19490ee6c0a9aedb5453fb5938b8f738c570de06753449e1",
+    "roles/research_scout.md": "c97127a8cebd086764a9d578ebdf444419b64fc543d7923b0eb112369a74d1ee",
+    "roles/research_synthesizer.md": "10ad11454c5314bec98a6160bddc776e7837ffe8af48ed7bd3fa88fca126b2b9",
+    "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346",
+    "skills/research-outline-project/SKILL.md": "e8c56a48f9e428a7ba5fb0b261e0da6d749370b968bd4c4607faff6cf9c37dff",
+    "skills/research-project/SKILL.md": "034aeb3b3394697724437ee84b4ea52ccdc8291e9ede235091cc4eaf00bf0191",
+    "tools/autoresearch-core-85e3543270af.mjs": "9d0a26e1bd0b6cbd30e0648921d81f4e1ad923a9284596cb0ecaa7647cbc1c72",
+    "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
+    "tools/linear-85e3543270af.mjs": "840706546fda9ae5dd266a946d98751bb337fc7f3db761c3ba7edf8828bc16e2",
+    "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
+    "tools/research-orchestrator-85e3543270af.mjs": "c6bfc9cf6211a0961df9a052ec1c21b7afa9ad5b58ab47c8c5c6eb44496f6ff5",
+    "tools/research-web-fetch.mjs": "a30f6c6c88a9c37768a1682daa54728eb6bacd36c4141820e065dd1c5f339b22",
+    "tools/vendor/pdfjs-dist/legacy/build/pdf.mjs": "081d3b6f426d38a8029766f8839f505e9cbf2c81a71d62c26eada142e6c21ae4",
+    "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs": "5e9f76bd5e65fbd1602b29fc50e50490aeeacd34a715b2282b73f7e8029242e0"
   },
-  "generatedAt": "2026-08-20T14:20:06.000Z"
+  "generatedAt": "2026-09-01T06:18:57.687Z"
 }

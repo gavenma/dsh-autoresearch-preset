@@ -6,7 +6,18 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
+    "init": "node scripts/init.mjs",
+    "build:preset": "node scripts/build-preset.mjs",
     "verify:snapshot": "node scripts/verify-snapshot.mjs",
+    "test:baseline": "node tests/baseline-revision-request.test.mjs",
+    "test:role-runner": "node tests/role-runner.test.mjs",
+    "test:web-fetch": "node tests/web-fetch-provider.test.mjs",
+    "test:visible-deliverables": "node tests/visible-deliverables.test.mjs",
+    "test:causal": "node tests/causal-core-and-parser.test.mjs",
+    "test:revision": "node tests/revision-request-wiring.test.mjs",
+    "test:causal-routing": "node tests/causal-routing-e2e.test.mjs",
+    "test:causal-mounted": "node tests/causal-mounted-adversarial-e2e.test.mjs",
+    "test": "npm run build:preset && npm run verify:snapshot && npm run test:role-runner && npm run test:baseline && npm run test:causal && npm run test:web-fetch && npm run test:visible-deliverables && npm run test:revision && npm run test:causal-routing && npm run test:causal-mounted",
     "check": "npm run verify:snapshot",
     "install:preset": "node scripts/install-preset.mjs"
   },

@@ -77,9 +77,11 @@ not the source of the AutoResearch skill or tool implementation.
   verifies). Local-only projects work without Linear: keep `plan.teamId`
   absent and skip Linear steps — `autoresearch_project_status` still drives
   the DAG.
-- Artifact root: `.research-agent/` with `.research-agent/projects/<id>/`
-  holding the two project files (below), and `.research-agent/runs/<issueId>/<runId>/`
-  holding each node's AutoReason run.
+- Artifact root: new workspaces keep internal plans, receipts, packets, and runs
+  under hidden `.research-agent/`; completed user-facing deliverables are published
+  under `outputs/<issueId>/`. Legacy `research-agent/` and `.research-agent/`
+  projects remain readable. The selected internal root is recorded in run metadata
+  and status; the visible output directory is created only when a run finalizes.
 
 ## Authority model (settled policy — never deviate)
 
@@ -334,10 +336,12 @@ editorial|substantive|conflict) and kick-backs are listed in
 `integration-notes.json` for coordinator routing.
 
 Note: visual inspection requires the integration editor to run on a multimodal
-model; the preset's `config.default.json` assigns it a multimodal local-qwen
-model and the built-in role manifest grants it `read_image`. Existing workspaces
-with their own `.research-agent/config.json` may still pin a text-only model or
-a narrowed tool list for `research_integration_editor`; update that entry (or
+model. The shipped default runs it on `deepseek-official/deepseek-v4-flash`,
+and the built-in role manifest grants it `read_image`; if your deployment's
+default model is text-only, point `research_integration_editor` at a multimodal
+model via the workspace config or `config.local.json`. Existing workspaces with
+their own `.research-agent/config.json` may still pin a text-only model or a
+narrowed tool list for `research_integration_editor`; update that entry (or
 delete it to fall back to the preset default) and re-run
 `autoresearch_list_role_profiles` to confirm.
 
@@ -477,6 +481,15 @@ Do not spawn any role until the user confirms.
    - `autoresearch_parse_ranking` per judge → `autoresearch_score_borda`
      (records the tied set, configured priority, selected entry/index, and
      fallback status) → write `pass_N/result.json`.
+   - Parse critic and judge responses with `autoresearch_parse_attribution`.
+     Preserve only a strict fenced block with its run-relative transcript path,
+     SHA-256, pass, judge index, valid-ranking result, and shared task context
+     digest. Do not infer attribution from prose.
+   - When a same-pass quorum names one strict upstream ancestor with current
+     receipt/ledger evidence, call `autoresearch_revision_request` with the
+     consumer `nodeId`, `pass`, and verified `attributions`. The tool reads
+     `backtracking.mode` from config: `observe` records without resetting nodes;
+     `enforce` retargets through canonical revision routing.
    - Update `history.json` + incumbent + consecutive-A-wins; checkpoint.
 5. Stop when stop criteria are met (consecutive-A-wins ≥ convergenceThreshold,
    or pass ≥ maxPasses).
@@ -496,19 +509,24 @@ Do not spawn any role until the user confirms.
    then `autoresearch_validate_resume(runDir)` before touching artifacts.
 3. Before role work: `autoresearch_dependency_check`, then
    `autoresearch_list_role_profiles` once per node.
-4. Before each role: `autoresearch_spawn_role(role, task)` for the audit, then
-   `autoresearch_run_role(role, task)` to execute. Roles are intentionally
-   read-only: they must return the complete requested artifact body, and the
-   coordinator writes it. Both tools inject the workspace root and absolute run
-   artifact root; paths beginning `evidence/`, `pass_*`, `packets/`, or run
-   metadata names resolve under the run root, not the workspace root.
+4. Before each role, construct a stable `logicalGroupKey` from run/step/pass,
+   role, packet hash, contract digest, and selected route. Call
+   `autoresearch_spawn_role(role, task)` for the audit, then call
+   `autoresearch_run_role` exactly once. The runner owns fresh spawn, the role's
+   read-only tool ceiling/persona, same-route bounded retry, complete attempt
+   persistence, cancellation, and disposal. It returns a bounded preview plus
+   `outputRef`; the coordinator must verify `outputRef.complete === true` and
+   promote it with `autoresearch_promote_artifact` instead of copying reply text.
+   Both tools inject the workspace root and absolute run artifact root; paths
+   beginning `evidence/`, `pass_*`, `packets/`, or run metadata names resolve
+   under the run root, not the workspace root.
 5. Parallel scouts and judges: emit all N `autoresearch_run_role` calls in ONE
    message; collect all N results in the next step. Never background scoring.
-6. After every saved artifact, call `autoresearch_checkpoint`.
+6. After every promoted artifact, call `autoresearch_checkpoint`.
 7. Never manually invent Borda scores, anonymization maps, or stop conditions
    when tools exist.
-8. On `stopReason !== "completed"` from `run_role`: retry once; for judges, stop
-   if fewer than 2 valid rankings remain; otherwise surface partial output.
+8. The runner owns bounded retry. Do not launch a second coordinator-level role call for the same `logicalGroupKey`. for judges, stop
+   if fewer than 2 valid rankings remain; otherwise surface the runner failure and never accept partial output.
 9. Never fabricate sources; `autoresearch_redact_check` before posting.
 
 ### Config and role tuning
