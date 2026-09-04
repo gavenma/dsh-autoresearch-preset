@@ -101,12 +101,16 @@ your editorial fixes.
 
 ## integration-coverage.json
 A JSON object with:
-- "claims": one record per substantive span — claimId, texAnchor (exact
-  substring in final.tex), paragraph anchor, span, sourceContributionIds
-  ("<nodeId>:<contributionId>"), evidenceReferences, transform
+- "claims": one record per substantive span — claimId, texAnchor (a stable
+  sentence of the span; must be at least 20 normalized chars and match
+  final.tex verbatim or by sentence/paragraph containment), paragraph
+  anchor, span, sourceContributionIds ("<nodeId>:<unitId>" — the contribution
+  unit ids from each node's node-output.json ledger; see the "Contribution
+  IDs and the node-output.json ledger" section of skills/research-project/
+  SKILL.md), evidenceReferences, transform
   (verbatim|paraphrase|merge|derived-synthesis).
-- "dispositions": for every required contribution — contributionId and one of
-  included|merged|superseded|waived.
+- "dispositions": for every required contribution — contributionId
+  ("<nodeId>:<unitId>") and one of included|merged|superseded|waived.
 - "editorialParagraphs": records with "anchor" for paragraphs that are pure
   editorial transitions (no substantive content).
 - "visualFindings": one record per visual defect — page, kind, severity, anchor,

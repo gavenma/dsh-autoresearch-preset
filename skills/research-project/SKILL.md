@@ -232,6 +232,31 @@ certificate, not the product). Strict TeX validation (static rules +
 -recorder`, never `-f`) runs at node acceptance, not only at integration. A
 nonzero compiler exit can never pass.
 
+### Contribution IDs and the node-output.json ledger
+
+`node-output.json` is **mechanically derived by
+`autoresearch_record_acceptance`** — it is not a manual step. For TeX
+artifacts, each contribution unit is a top-level section of `output.tex`
+(the first present level of `\chapter`/`\section`; `\section*` and
+`\section[short]{long}` forms are supported), and the unit `id` is the
+normalized slug of the heading (comments and TeX glue stripped, lowercased,
+dash-joined; empty or colliding slugs fall back to `slug-<sha1(heading)[:6]>`).
+Sectionless outputs (fragments, abstracts) and markdown artifacts get a
+single unit `main`. Each unit records `importance: "required"`,
+`mutability: "editable"`, `evidence` (the PASSed acceptance criterion ids),
+and a `texAnchor` — the first normalized sentence of the section that is at
+least 20 chars after normalization; sections without a usable sentence carry
+no anchor and are flagged `anchorMissing: true`. Re-accepting an unchanged
+artifact is idempotent: an existing ledger with the same `outputHash` +
+`nodeRevision` is kept as is.
+
+**Cross-node contribution ids are `<nodeId>:<unitId>`**, where `unitId` is
+the `id` of a contribution unit in that node's ledger (the heading slug).
+These ids are what `integration-coverage.json` uses in `sourceContributionIds`
+and `dispositions`, and what revision requests reference. Slugs survive
+reordering and heading-preserving edits, so a reference like
+`GAV-83:methods` stays valid across node revisions.
+
 ### state.json schema (schemaVersion 1)
 
 ```json

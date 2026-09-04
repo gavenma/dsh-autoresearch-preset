@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation 8b5b962223b1. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-8b5b962223b1.mjs"
+// AUTO-GENERATED orchestrator entry, generation 401271f51f45. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-401271f51f45.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -3574,8 +3574,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = '8b5b962223b1'
-export const EMBEDDED_BUILD_ID = 'fa136636973605075ae79a5853692aa55582869e4b59cac94b5ade3e2a564936'
+export const EMBEDDED_GENERATION = '401271f51f45'
+export const EMBEDDED_BUILD_ID = '5c43c9e36a1ebf2c9a046e1beacac0bdeab3b417bdcb5d8dd9271d66f0ed63cd'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -3962,6 +3962,133 @@ async function resolveTexInputs(fops, runDir, mainRel, opts = {}) {
     }
   }
   return { files, unresolved }
+}
+
+// ── contribution ledger derivation (plan WS2, GRF-2026 SOD #8/#9/#10/#21) ──
+// record_acceptance materializes node-output.json mechanically: contribution
+// units are the top-level sections of the accepted artifact with stable
+// heading slugs, so <nodeId>:<unitId> references survive reordering and
+// heading-preserving edits across revisions.
+
+// Heading → slug (plan WS2.1): comments stripped, macros keep their name
+// minus the backslash, TeX glue characters removed, lowercased, dash-joined.
+function normalizeHeadingText(heading) {
+  return core.stripTexComments(String(heading ?? '').trim())
+    .replace(/\\([A-Za-z@]+)\*?/g, ' $1 ')
+    .replace(/[{}$&~^_]/g, ' ')
+    .toLowerCase()
+}
+
+function slugHeading(heading) {
+  const words = normalizeHeadingText(heading).split(/[^a-z0-9]+/).filter(Boolean)
+  return words.join('-')
+}
+
+function normalizedSentence(text) {
+  return core.stripTexComments(String(text ?? '')).replace(/\s+/g, ' ').trim()
+}
+
+function splitLedgerSentences(text) {
+  return String(text ?? '')
+    .split(/(?<=[.!?])\s+(?=[A-Z\\\[{("'])/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+}
+
+// First sentence of the section body that survives normalization at ≥ 20
+// chars (plan WS2.1); null when the section has no usable sentence.
+function firstUsableSentence(body) {
+  for (const raw of splitLedgerSentences(core.stripTexComments(String(body ?? '')))) {
+    const norm = normalizedSentence(raw)
+    if (norm.length >= 20) return norm
+  }
+  return null
+}
+
+// Top-level sections: the first present level of \chapter/\section
+// (chapters win when present). Supports \section* and \section[short]{long}.
+// Returns null when the document has no sections at that level.
+function parseTexSections(text) {
+  const source = core.stripTexComments(String(text ?? ''))
+  const re = /\\(chapter|section)\s*\*?\s*(\[[^\]]*\])?\s*(\{((?:[^{}]|\{[^{}]*\})*)\})?/g
+  const level = /\\chapter\b/.test(source) ? 'chapter' : 'section'
+  const headings = []
+  let match
+  while ((match = re.exec(source)) !== null) {
+    if (match[1] !== level) continue
+    const long = (match[4] ?? '').trim()
+    const short = match[2] ? match[2].slice(1, -1).trim() : ''
+    if (!long && !short) continue
+    headings.push({ heading: long || short, start: match.index, bodyStart: re.lastIndex })
+  }
+  if (headings.length === 0) return null
+  return headings.map((entry, index) => ({
+    heading: entry.heading,
+    body: source.slice(entry.bodyStart, index + 1 < headings.length ? headings[index + 1].start : undefined),
+  }))
+}
+
+// Deterministic contribution derivation (plan WS2.1). Pure: everything it
+// needs is already computed at acceptance time, so the backfill script can
+// reuse the exact same function.
+function deriveNodeOutputDocument(params) {
+  const contract = util.isPlainObject(params.contract) ? params.contract : {}
+  const artifactFormat = contract.artifactFormat === 'markdown' ? 'markdown' : 'tex'
+  const outputText = String(params.outputText ?? '')
+  const nodeRevision = Number.isInteger(params.nodeRevision) && params.nodeRevision > 0 ? params.nodeRevision : 1
+  const passIds = (Array.isArray(params.criteria) ? params.criteria : [])
+    .filter((entry) => entry?.result === 'PASS')
+    .map((entry) => entry?.id)
+    .filter(Boolean)
+  const units = []
+  const usedSlugs = new Map()
+  const reserveSlug = (slug, fallback) => {
+    let candidate = slug
+    if (candidate === '' || usedSlugs.has(candidate)) candidate = fallback
+    if (usedSlugs.has(candidate)) {
+      let n = 2
+      while (usedSlugs.has(candidate + '-' + n)) n += 1
+      candidate += '-' + n
+    }
+    usedSlugs.set(candidate, (usedSlugs.get(candidate) ?? 0) + 1)
+    return candidate
+  }
+  const makeUnit = (id, title, body) => {
+    const anchor = firstUsableSentence(body)
+    const unit = {
+      id,
+      importance: 'required',
+      mutability: 'editable',
+      evidence: [...passIds],
+    }
+    if (typeof title === 'string' && title.trim() !== '') unit.title = title.trim()
+    if (anchor !== null) {
+      unit.texAnchor = anchor
+    } else {
+      unit.anchorMissing = true
+    }
+    units.push(unit)
+    return unit
+  }
+  const sections = artifactFormat === 'tex' ? parseTexSections(outputText) : null
+  if (sections === null || sections.length === 0) {
+    makeUnit('main', '', outputText)
+  } else {
+    for (const section of sections) {
+      const slug = slugHeading(section.heading)
+      const fallback = 'slug-' + core.sha256Text(section.heading).slice(0, 6)
+      makeUnit(reserveSlug(slug, fallback), section.heading, section.body)
+    }
+  }
+  return {
+    ledgerVersion: 1,
+    nodeId: String(params.nodeId ?? contract.nodeId ?? ''),
+    outputHash: String(params.outputHash ?? ''),
+    nodeRevision,
+    contractDigest: String(params.contractDigest ?? contract.digest ?? ''),
+    artifactFormat,
+    contributions: units,
+  }
 }
 
 // Node-level strict TeX validation: static rules first, then a strict build
@@ -6303,10 +6430,36 @@ const ORCHESTRATOR_PLUGIN = {
         warnings: texWarnings,
       })
       await fops.writeJson(pathutil.resolveInside(runDir, 'acceptance.json'), receipt)
+      // Contribution ledger (plan WS2): derived from exactly the data
+      // computed at acceptance time. Idempotent on same-hash replay — an
+      // existing ledger with the same outputHash + nodeRevision is kept as
+      // is (hand-annotated ledgers are not clobbered by re-acceptance).
+      const ledgerPath = pathutil.resolveInside(runDir, 'node-output.json')
+      const nodeRevisionValue = typeof args.nodeRevision === 'number' ? args.nodeRevision : 1
+      const existingLedger = await fops.readJson(ledgerPath)
+      let nodeOutput = null
+      let ledgerAction = 'written'
+      if (util.isPlainObject(existingLedger) && existingLedger.outputHash === outputHash && existingLedger.nodeRevision === nodeRevisionValue) {
+        nodeOutput = existingLedger
+        ledgerAction = 'current'
+      } else {
+        nodeOutput = deriveNodeOutputDocument({
+          contract,
+          outputText: await readFileSafe(fops, pathutil.resolveInside(runDir, outputName)),
+          outputHash,
+          nodeRevision: nodeRevisionValue,
+          nodeId: contract.nodeId,
+          contractDigest: contract.digest,
+          criteria: args.criteria ?? [],
+        })
+        await fops.writeJson(ledgerPath, nodeOutput)
+      }
       return {
         ok: true,
         receipt,
-        instruction: 'Acceptance receipt bound to contract digest ' + contract.digest + '. The run may finalize while this receipt is current.',
+        nodeOutput,
+        ledgerAction,
+        instruction: 'Acceptance receipt bound to contract digest ' + contract.digest + '. Contribution ledger (' + ledgerAction + ') in node-output.json. The run may finalize while this receipt is current.',
       }
     })
 
@@ -6992,5 +7145,9 @@ export const createLibraries = {
     listPassTexCandidates,
     isTexSystemInput,
     resolveTexInputs,
+    deriveNodeOutputDocument,
+    slugHeading,
+    parseTexSections,
+    firstUsableSentence,
   },
 }

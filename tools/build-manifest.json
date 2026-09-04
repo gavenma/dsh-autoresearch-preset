@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "generation": "8b5b962223b1",
-  "aggregateId": "fa136636973605075ae79a5853692aa55582869e4b59cac94b5ade3e2a564936",
+  "generation": "401271f51f45",
+  "aggregateId": "5c43c9e36a1ebf2c9a046e1beacac0bdeab3b417bdcb5d8dd9271d66f0ed63cd",
   "aggregateScope": [
-    "tools/autoresearch-core-8b5b962223b1.mjs",
+    "tools/autoresearch-core-401271f51f45.mjs",
     "tools/byte-utils.mjs",
     "tools/linear-client.mjs",
     "tools/research-web-fetch.mjs",
@@ -11,12 +11,12 @@
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs"
   ],
   "entries": {
-    "core": "tools/autoresearch-core-8b5b962223b1.mjs",
-    "orchestrator": "tools/research-orchestrator-8b5b962223b1.mjs",
-    "linear": "tools/linear-8b5b962223b1.mjs"
+    "core": "tools/autoresearch-core-401271f51f45.mjs",
+    "orchestrator": "tools/research-orchestrator-401271f51f45.mjs",
+    "linear": "tools/linear-401271f51f45.mjs"
   },
   "files": {
-    "agent.cordis.yml": "eaacf7af729b348656666cb86644d810ecc68c98cce5170f5bb0b47d1a27b85a",
+    "agent.cordis.yml": "8bb9c19b1abba78c2776248f90639bb6129d2b5f8b60d90fbef500f845975191",
     "config.default.json": "f01ec912b8267257cfc2cf6125fce9480a8d9e288355131ef325697d8d14a27f",
     "preset.yml": "260c2617a7e525324c3f7f44cda98b211846f129dcc2cb0a552449b63f6d4f63",
     "roles/evidence_verifier.md": "bef5eb24ee3e6e4184ab21a27a8ea9893cddca17c6b0e6ef346d084ee8857fd4",
@@ -25,7 +25,7 @@
     "roles/research_coder.md": "7c1e8f57e6f59441a8b543a5d16a7a8bc63d8313f95b2d668ca146da4ddec359",
     "roles/research_critic.md": "4c56cf4132f689fbd5dde1ad2ef3570f1c30708fe6cbdb37a8e696e6e74363b5",
     "roles/research_experiments_commentator.md": "ec65cfe7ad15d0caf7e2cff299c0fdc70ffe8d8deda41e2662a30a60f080d6db",
-    "roles/research_integration_editor.md": "bbcf05ae8270caaf94c4526638ee8430d1196e5b87636a87ee623b87ef98bc16",
+    "roles/research_integration_editor.md": "6f54a2ef13c9206ae90d077155946c821d4a6f320a7abdd11d0a5fab61f284fc",
     "roles/research_integration_verifier.md": "2a563ceed33a04f7fee3a0431c9ca363c066ace1042edfd0ecaaaef8c56a3ee0",
     "roles/research_judge.md": "29d88639ff8cab4713b6d2b1b3fe34641869ef41f83f66791dd05c70182d42fc",
     "roles/research_literature_writer.md": "68fdbc6c3827de976d25d4d7798190bb40587b224103303d1d2018f3fe5d9e55",
@@ -35,15 +35,15 @@
     "roles/research_synthesizer.md": "10ad11454c5314bec98a6160bddc776e7837ffe8af48ed7bd3fa88fca126b2b9",
     "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346",
     "skills/research-outline-project/SKILL.md": "e8c56a48f9e428a7ba5fb0b261e0da6d749370b968bd4c4607faff6cf9c37dff",
-    "skills/research-project/SKILL.md": "034aeb3b3394697724437ee84b4ea52ccdc8291e9ede235091cc4eaf00bf0191",
-    "tools/autoresearch-core-8b5b962223b1.mjs": "707f6b4522b566394167c72b3dc49e55932d73a0a189bf7133ac3367f93c2663",
+    "skills/research-project/SKILL.md": "836b8457ef6bc3f7281aa953b643441f13d9af65587332fb395a48a641f71fbc",
+    "tools/autoresearch-core-401271f51f45.mjs": "db6128f395af51e5ed366794437b04dd0f8faa2cfa7d9401aad0dc52fd8c505b",
     "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
-    "tools/linear-8b5b962223b1.mjs": "2fbe948ac63a63d757426cf9c52df6fffc5cad2ecd0dbbdbcc7d23ecb4e686c3",
+    "tools/linear-401271f51f45.mjs": "03cd10aaecb5478182c0f2a2a733f9df0150c341091fae39d70e97382685f058",
     "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
-    "tools/research-orchestrator-8b5b962223b1.mjs": "8051afcdf9932694b9fd5b1fcfcdc3bb18fac930b55815827c1b81a4196f9114",
+    "tools/research-orchestrator-401271f51f45.mjs": "09df27ec185e9829e498eff49585fdf78b1f7e966b78ede0858ed57625a0100f",
     "tools/research-web-fetch.mjs": "a30f6c6c88a9c37768a1682daa54728eb6bacd36c4141820e065dd1c5f339b22",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.mjs": "081d3b6f426d38a8029766f8839f505e9cbf2c81a71d62c26eada142e6c21ae4",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs": "5e9f76bd5e65fbd1602b29fc50e50490aeeacd34a715b2282b73f7e8029242e0"
   },
-  "generatedAt": "2026-09-04T03:34:33.874Z"
+  "generatedAt": "2026-09-04T03:51:05.275Z"
 }

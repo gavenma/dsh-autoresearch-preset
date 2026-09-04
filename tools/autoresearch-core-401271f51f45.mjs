@@ -1886,8 +1886,8 @@ export function validateCoverage(coverage, finalTex, opts = {}) {
     }
     if (!isNonEmptyString(record.texAnchor)) {
       errors.push('Claim ' + record.claimId + ': a texAnchor is required.')
-    } else if (text.indexOf(record.texAnchor) === -1) {
-      errors.push('Claim ' + record.claimId + ': texAnchor not found verbatim in final.tex.')
+    } else if (!anchorMatchesFinal(record.texAnchor, text)) {
+      errors.push('Claim ' + record.claimId + ': texAnchor not found in final.tex (no verbatim, sentence, or paragraph match; anchors under 20 normalized chars can never validate).')
     }
   }
   const editorialParagraphs = new Set(
@@ -1928,6 +1928,45 @@ function splitTexSentences(paragraph) {
     .split(/(?<=[.!?])\s+(?=[A-Z\\\[{])/)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0)
+}
+
+// Tolerant anchor matching (GRF-2026 SOD #21, plan WS2.3). Whitespace-
+// normalized and length-guarded: the legacy verbatim containment stays first;
+// a match also counts when the anchor is contained in a sentence, or a
+// sentence is contained in an anchor of at least 20 normalized chars. The
+// paragraph-level containment fallback applies only to anchors of at least 40
+// normalized chars. Tiny anchors ("the", "e.g.") can never validate. Per-
+// sentence splitting for the unsupported-span report is a separate concern
+// and is unchanged.
+function normalizeForAnchor(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim()
+}
+
+export function anchorMatchesFinal(anchor, finalTex) {
+  const rawAnchor = String(anchor ?? '')
+  const normAnchor = normalizeForAnchor(rawAnchor)
+  const text = String(finalTex ?? '')
+  if (normAnchor.length < 20) return false
+  if (text.indexOf(rawAnchor) !== -1) return true
+  const sentences = []
+  const paragraphs = []
+  for (const paragraph of splitTexParagraphs(text)) {
+    const normParagraph = normalizeForAnchor(paragraph)
+    if (normParagraph.length > 0) paragraphs.push(normParagraph)
+    for (const sentence of splitTexSentences(paragraph)) {
+      const normSentence = normalizeForAnchor(sentence)
+      if (normSentence.length > 0) sentences.push(normSentence)
+    }
+  }
+  for (const sentence of sentences) {
+    if (sentence.includes(normAnchor) || normAnchor.includes(sentence)) return true
+  }
+  if (normAnchor.length >= 40) {
+    for (const paragraph of paragraphs) {
+      if (paragraph.includes(normAnchor) || normAnchor.includes(paragraph)) return true
+    }
+  }
+  return false
 }
 
 export function isSubstantiveSpan(span) {
