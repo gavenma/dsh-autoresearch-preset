@@ -171,7 +171,7 @@ v2 revision.
   "integrationId": "integration",
   "projectContract": {
     "goal": "<one-sentence project goal>",
-    "deliverables": ["final.tex", "final.pdf"],
+    "deliverables": ["final.tex", "final.pdf", "references.bib", "process-issues.md"],
     "acceptance": [
       { "id": "PAC-01", "text": "<mechanical project criterion>", "required": true, "check": { "type": "all-current-node-receipts" } }
     ],
@@ -213,5 +213,11 @@ whole. The assembly node's `outputContract` must set `"texMode": "standalone"`
 derivation defaults omitted assembly texMode to standalone, but write it
 explicitly so the plan documents the choice). Prefer TeX artifacts for every
 node; `artifactFormat: "markdown"` is an explicit non-TeX exception that must
-be justified in the rationale.
+be justified in the rationale. `projectContract.deliverables` is the one
+declarative list of user-facing files: include every requested companion
+(e.g. `references.bib`, `process-issues.md`, `figure-dossier.tex`) as safe
+relative file paths — no globs or directories, and no `companions.json` or
+filename-pattern discovery exists; finalize publishes exactly this list plus
+the build-derived rebuild closure to `outputs/<projectId>/` (see the output
+policy in skills/research-project/SKILL.md).
 

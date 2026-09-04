@@ -79,7 +79,13 @@ deliverable is published to `outputs/`.
 **6. Where things live.** All internal work — the approved plan, per-step
 checklists, drafts, evidence, and a journal of what was verified when — stays
 in a hidden `.research-agent/` folder in your project workspace. Only finished,
-user-facing deliverables are published to `outputs/`. The plan is immutable
+user-facing deliverables are published to `outputs/`, and a project publishes
+exactly one folder: `outputs/<projectId>/`. It holds the primary
+`final.pdf`/`final.tex`, every companion the project contract declares
+(`references.bib`, `process-issues.md`, …), the fragments and graphics needed
+to rebuild the PDF, an `audit/` folder with the acceptance receipts,
+contribution ledgers, and the audit certificate, and a `MANIFEST.json` that
+attributes every published file with its source and hash. The plan is immutable
 after approval and the journal is append-only, so you can always reconstruct
 what happened and why.
 

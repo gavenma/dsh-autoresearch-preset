@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation 681104ee93d2. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-681104ee93d2.mjs"
+// AUTO-GENERATED orchestrator entry, generation 1a81c859108c. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-1a81c859108c.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -512,7 +512,7 @@ Standards: (1) one node = one self-contained work item with one explicit purpose
 
 Node roles are drawn from the 7 pipeline roles only (research_scout, evidence_verifier, research_author, research_critic, research_synthesizer, research_judge, research_reporter, plus configured roleProfiles — not research_planner).
 
-Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, deliverables, acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
+Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, deliverables (safe relative file paths of EVERY user-facing file, including requested companions like references.bib or process-issues.md — no globs, no companions.json, no filename-pattern discovery; finalize publishes this list plus the build-derived rebuild closure to outputs/<projectId>/), acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
 `,
 
     research_scout: `You are a research scout.
@@ -3592,8 +3592,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = '681104ee93d2'
-export const EMBEDDED_BUILD_ID = '7ce47151c01727d9cb46f3b267b5a35d70e171f2ba8f1721465ebc15322aad35'
+export const EMBEDDED_GENERATION = '1a81c859108c'
+export const EMBEDDED_BUILD_ID = '831fe8a5d9b5de5422a358a13c99e8a0e779b012562eda0ea94d1470ddb10b76'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -4776,13 +4776,476 @@ async function publishFinalDeliverables(fops, baseDir, runDir, run, contractFile
   return published
 }
 
-// ── finalize_run override: v2 acceptance gate (plan §4.3) ──────────────────
+// ── output policy v5 (plan WS4; GRF-2026 SOD #23/#24/#25 + user review) ────
+// finalize is one self-consistent finish step:
+//   1. Journal sync — after the acceptance gate passes, MERGE into the
+//      state.json node entry (status done, runDir, runStatus complete,
+//      receipts triple, updatedAt). Every other field is preserved; the write
+//      is idempotent (only on change).
+//   2. Project-level publish to outputs/<projectId>/ — the explicit
+//      projectContract.deliverables list plus the build-derived closure
+//      (accepted final.fls, or the shared resolver when the recorder is
+//      missing/stale), the .bib union across resolved inputs, the
+//      deterministic denylist, and the audit/ evidence set. MANIFEST.json is
+//      written last and every path is attributable (declared|fls|bib|resolver
+//      |primary|audit|receipt|ledger) with a SHA-256 hash.
+//   3. Per-issue outputs/<issueId>/ publishing applies to unbound/legacy runs
+//      only. A bound v2 non-integration run creates no visible folder; its
+//      artifact, receipt, and ledger stay in the hidden run directory until
+//      integration consumes them.
+// All new behavior is gated on the bound v2 contract; legacy runs keep the
+// old publish shape byte-for-byte.
+
+const PUBLISH_DENYLIST_EXT = ['.aux', '.log', '.fls', '.out', '.toc', '.bbl', '.blg', '.fdb_latexmk', '.synctex.gz']
+const BINARY_PUBLISH_EXT = /\.(pdf|png|jpe?g|gz)$/i
+
+// Build byproducts, previews, and candidate trees never enter the product set.
+function isDenylistedRelPath(rel) {
+  const segments = String(rel).split('/')
+  if (segments.some((segment) => /^pass_\d{2,}$/.test(segment))) return true
+  const basename = segments[segments.length - 1]
+  if (basename === 'preview.tex' || basename === 'preview.pdf') return true
+  const lower = basename.toLowerCase()
+  return PUBLISH_DENYLIST_EXT.some((ext) => lower.endsWith(ext))
+}
+
+// Safe relative file paths only: no globs, traversal, absolutes, or backslashes.
+function isSafeRelPath(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false
+  const normalized = value.trim()
+  if (normalized.startsWith('/') || pathutil.isAbsolute(normalized)) return false
+  if (normalized.includes('\\')) return false
+  return normalized.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+}
+
+// Relative path of absPath under rootAbs, or null when not underneath.
+function relUnder(rootAbs, absPath) {
+  const normalized = pathutil.normalize(absPath)
+  const root = pathutil.normalize(rootAbs)
+  if (normalized === root) return ''
+  if (!normalized.startsWith(root + '/')) return null
+  return normalized.slice(root.length + 1)
+}
+
+function relUnderAny(absPath, roots) {
+  for (const root of roots) {
+    const rel = relUnder(root, absPath)
+    if (rel !== null && rel !== '') return rel
+  }
+  return null
+}
+
+// Parse the INPUT lines of an accepted latexmk -recorder .fls. Entries are
+// normalized against the run directory; system TeX paths and paths outside
+// the allowed roots are reported separately.
+function parseFlsInputs(flsText, runDirAbs, allowedRoots) {
+  const seen = new Set()
+  const inputs = []
+  const system = []
+  const outside = []
+  for (const line of String(flsText ?? '').split('\n')) {
+    if (!line.startsWith('INPUT ')) continue
+    const raw = line.slice(6).trim()
+    if (!raw || seen.has(raw)) continue
+    seen.add(raw)
+    const abs = pathutil.normalize(pathutil.isAbsolute(raw) ? raw : pathutil.join(runDirAbs, raw))
+    if (isTexSystemInput(abs)) {
+      system.push(raw)
+      continue
+    }
+    if (!allowedRoots.some((root) => relUnder(root, abs) !== null)) {
+      outside.push(raw)
+      continue
+    }
+    inputs.push({ raw, abs })
+  }
+  return { inputs, system, outside }
+}
+
+// Explicit bibliography sources from \bibliography{...} and
+// \addbibresource[...]{...} across the resolved TeX inputs (BibTeX may log
+// final.bbl without ever logging references.bib).
+function extractBibSources(texts) {
+  const names = []
+  const seen = new Set()
+  const push = (name) => {
+    const trimmed = String(name ?? '').trim()
+    if (!trimmed || seen.has(trimmed)) return
+    seen.add(trimmed)
+    names.push(trimmed)
+  }
+  for (const text of texts) {
+    for (const match of String(text).matchAll(/\\bibliography\s*\{([^}]*)\}/g)) {
+      for (const part of match[1].split(',')) push(part)
+    }
+    for (const match of String(text).matchAll(/\\addbibresource\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)) {
+      for (const part of match[1].split(',')) push(part)
+    }
+  }
+  return names
+}
+
+// Pure publish-set computation (plan WS4 item 2). Reads only; the copier is
+// a separate step so a failed preflight never touches the destination.
+// Returns { ok, errors, warnings, closureSource, entries: [{dest, sourceAbs, rule, hash}] }.
+async function computePublishSet(params) {
+  const { fops, baseDir, runDirAbs, nodeRunDirs, deliverables, isTex } = params
+  const errors = []
+  const warnings = []
+  const entries = []
+  const destIndex = new Map() // dest -> { sourceAbs, hash, rule }
+  const primaryDest = new Set(isTex ? ['final.tex', 'final.pdf'] : ['final.md'])
+
+  const roots = [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir]
+
+  const regularFile = async (abs) => {
+    try {
+      const info = typeof fops.lstat === 'function' ? await fops.lstat(abs) : null
+      if (info && info.type === 'symlink') return false
+      const statInfo = typeof fops.stat === 'function' ? await fops.stat(abs) : null
+      if (statInfo && typeof statInfo.isDirectory === 'function') return !statInfo.isDirectory()
+      if (await fops.exists(abs)) return true
+      return false
+    } catch {
+      return false
+    }
+  }
+
+  const addEntry = async (dest, sourceAbs, rule, { silentDuplicate = false } = {}) => {
+    const hash = await hashFile(fops, sourceAbs)
+    if (hash === '') {
+      errors.push('cannot hash publish source: ' + dest + ' (' + pathutil.relativePath(baseDir, sourceAbs) + ')')
+      return
+    }
+    const existing = destIndex.get(dest)
+    if (existing) {
+      if (existing.hash === hash) {
+        if (!silentDuplicate && existing.sourceAbs !== sourceAbs) {
+          warnings.push('duplicate ' + dest + ' resolved to identical content in multiple locations; published once')
+        }
+        return
+      }
+      errors.push('conflicting publish source for ' + dest + ': different content at ' + pathutil.relativePath(baseDir, existing.sourceAbs) + ' and ' + pathutil.relativePath(baseDir, sourceAbs))
+      return
+    }
+    destIndex.set(dest, { sourceAbs, hash, rule })
+    entries.push({ dest, sourceAbs, rule, hash })
+  }
+
+  // (a) Primary product artifacts always publish at the project root.
+  const primaryNames = isTex ? ['final.tex', 'final.pdf'] : ['final.md']
+  for (const name of primaryNames) {
+    const abs = pathutil.join(runDirAbs, name)
+    if (!await regularFile(abs)) {
+      errors.push('primary artifact missing: ' + name + ' (expected at ' + pathutil.relativePath(baseDir, abs) + ')')
+      continue
+    }
+    await addEntry(name, abs, deliverables.map((value) => value.trim()).includes(name) ? 'declared' : 'primary')
+  }
+
+  // (b) Build-derived closure: accepted final.fls first, resolver fallback.
+  let closureSource = 'none'
+  const closureTexts = []
+  if (isTex) {
+    let flsText = null
+    try {
+      const flsAbs = pathutil.join(runDirAbs, 'final.fls')
+      if (await fops.exists(flsAbs)) flsText = await fops.readText(flsAbs)
+    } catch {
+      flsText = null
+    }
+    let flsInputs = null
+    if (flsText !== null) {
+      const parsed = parseFlsInputs(flsText, runDirAbs, roots)
+      if (parsed.outside.length > 0) {
+        warnings.push('final.fls references workspace-external inputs (skipped): ' + parsed.outside.slice(0, 5).join(', '))
+      }
+      const mainAbs = pathutil.normalize(pathutil.join(runDirAbs, 'final.tex'))
+      flsInputs = parsed.inputs.filter((item) => item.abs !== mainAbs)
+      const flsCoversMain = parsed.inputs.some((item) => item.abs === mainAbs)
+      if (flsCoversMain) {
+        closureSource = 'fls'
+      } else {
+        closureSource = 'resolver'
+        warnings.push('final.fls is missing or does not cover final.tex (stale recorder); using the shared TeX resolver for the rebuild closure')
+      }
+    } else {
+      closureSource = 'resolver'
+      warnings.push('final.fls missing; using the shared TeX resolver for the rebuild closure')
+    }
+    const finalTexText = await (async () => {
+      try { return await fops.readText(pathutil.join(runDirAbs, 'final.tex')) } catch { return '' }
+    })()
+    closureTexts.push(finalTexText)
+    if (closureSource === 'fls') {
+      for (const item of flsInputs) {
+        if (!await regularFile(item.abs)) {
+          errors.push('missing closure input from final.fls: ' + item.raw)
+          continue
+        }
+        const rel = relUnderAny(item.abs, roots)
+        if (rel === null || isDenylistedRelPath(rel)) continue
+        closureTexts.push(await (async () => {
+          try { return await fops.readText(item.abs) } catch { return '' }
+        })())
+        const silent = relUnder(runDirAbs, item.abs) !== null
+        await addEntry(rel, item.abs, 'fls', { silentDuplicate: silent })
+      }
+    } else {
+      const resolved = await resolveTexInputs(fops, runDirAbs, 'final.tex')
+      if (resolved.unresolved.length > 0) {
+        for (const target of resolved.unresolved) {
+          errors.push('missing closure input: ' + target + ' (referenced by final.tex but absent from the integration run directory)')
+        }
+      }
+      for (const file of resolved.files) {
+        const abs = pathutil.join(runDirAbs, file.relPath)
+        if (isDenylistedRelPath(file.relPath)) continue
+        closureTexts.push(file.text)
+        await addEntry(file.relPath, abs, 'resolver')
+      }
+    }
+  }
+
+  // (c) Bibliography sources across final.tex and its resolved inputs.
+  if (isTex) {
+    const bibNames = extractBibSources(closureTexts)
+    const bibRoots = [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir]
+    for (const name of bibNames) {
+      const candidates = name.toLowerCase().endsWith('.bib') ? [name] : [name, name + '.bib']
+      const matches = []
+      for (const root of bibRoots) {
+        for (const candidate of candidates) {
+          if (!isSafeRelPath(candidate)) continue
+          const abs = pathutil.join(root, candidate)
+          if (await regularFile(abs)) matches.push(abs)
+        }
+      }
+      const unique = [...new Set(matches)]
+      if (unique.length === 0) {
+        errors.push('declared bibliography source not found: ' + name + ' (looked in the integration run dir, node run dirs, and the workspace root)')
+        continue
+      }
+      const hashes = new Set()
+      for (const abs of unique) hashes.add(await hashFile(fops, abs))
+      if (hashes.size > 1) {
+        errors.push('conflicting bibliography source ' + name + ': different content at ' + unique.map((abs) => pathutil.relativePath(baseDir, abs)).join(' and '))
+        continue
+      }
+      const chosen = unique[0]
+      if (unique.length > 1) warnings.push('bibliography source ' + name + ' found in multiple locations with identical content; published once')
+      const rel = relUnderAny(chosen, bibRoots)
+      await addEntry(rel ?? pathutil.basename(chosen), chosen, 'bib')
+    }
+  }
+
+  // (d) Explicitly declared deliverables (safe relative file paths only).
+  const declaredNames = deliverables.map((value) => value.trim())
+  for (const rel of new Set(declaredNames)) {
+    if (!isSafeRelPath(rel)) {
+      errors.push('declared deliverable is not a safe relative file path: ' + rel + ' (globs, directories, traversal, and absolute paths are rejected)')
+      continue
+    }
+    if (isDenylistedRelPath(rel)) {
+      errors.push('declared deliverable matches the publish denylist: ' + rel + ' (build byproducts, previews, and pass_* candidate files are never published)')
+      continue
+    }
+    if (isTex && (rel === 'output.tex' || rel === 'output.pdf')) {
+      errors.push('declared deliverable ' + rel + ' is the audit certificate: it publishes automatically as audit/audit-certificate.* — remove it from projectContract.deliverables')
+      continue
+    }
+    const matches = []
+    for (const root of roots) {
+      const abs = pathutil.join(root, rel)
+      if (await regularFile(abs)) matches.push(abs)
+    }
+    const unique = [...new Set(matches)]
+    if (unique.length === 0) {
+      errors.push('declared deliverable not found: ' + rel + ' (looked in ' + [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir].map((root) => pathutil.relativePath(baseDir, root) || root).join(', ') + ')')
+      continue
+    }
+    const hashes = new Set()
+    for (const abs of unique) hashes.add(await hashFile(fops, abs))
+    if (hashes.size > 1) {
+      errors.push('conflicting declared deliverable ' + rel + ': different content at ' + unique.map((abs) => pathutil.relativePath(baseDir, abs)).join(' and '))
+      continue
+    }
+    if (unique.length > 1) warnings.push('declared deliverable ' + rel + ' found in multiple locations with identical content; published once')
+    const silent = primaryDest.has(rel)
+    await addEntry(rel, unique[0], 'declared', { silentDuplicate: silent })
+  }
+
+  // (e) Audit carve-out: the integration certificate and every node's
+  //     receipt + ledger publish under audit/ whenever project publishing
+  //     succeeds.
+  // TeX only: on the integration node output.tex/output.pdf are the audit
+  // certificate (the product is final.tex/final.pdf). Markdown runs have no
+  // separate certificate: final.md is both the product and the node artifact.
+  const certificateSources = isTex ? [['output.tex', 'audit/audit-certificate.tex'], ['output.pdf', 'audit/audit-certificate.pdf']] : []
+  for (const [sourceName, dest] of certificateSources) {
+    const abs = pathutil.join(runDirAbs, sourceName)
+    if (await regularFile(abs)) {
+      await addEntry(dest, abs, 'audit')
+    } else if (sourceName === 'output.tex') {
+      warnings.push('audit certificate source missing: output.tex')
+    }
+  }
+  for (const item of nodeRunDirs) {
+    const nodeId = util.safeSegment(item.nodeId)
+    const acceptanceAbs = pathutil.join(item.runDirAbs, 'acceptance.json')
+    if (await regularFile(acceptanceAbs)) {
+      await addEntry('audit/acceptance/' + nodeId + '.json', acceptanceAbs, 'receipt')
+    } else if (item.runDirAbs === pathutil.normalize(runDirAbs)) {
+      warnings.push('no acceptance receipt for the integration node: acceptance.json missing')
+    }
+    const ledgerAbs = pathutil.join(item.runDirAbs, 'node-output.json')
+    if (await regularFile(ledgerAbs)) {
+      await addEntry('audit/ledgers/' + nodeId + '.json', ledgerAbs, 'ledger')
+    } else if (await regularFile(acceptanceAbs)) {
+      warnings.push('accepted node ' + nodeId + ' has no contribution ledger: node-output.json missing')
+    }
+  }
+
+  entries.sort((a, b) => (a.dest < b.dest ? -1 : a.dest > b.dest ? 1 : 0))
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    closureSource,
+    entries: entries.map((entry) => ({ dest: entry.dest, sourceAbs: entry.sourceAbs, rule: entry.rule, hash: entry.hash })),
+  }
+}
+
+// Hash-checked copier (plan WS4 item 4): preflight validates every source
+// hash and every destination before anything is written; only managed paths
+// are copied; MANIFEST.json is written last; unrelated destination files are
+// never pruned or overwritten with different content.
+async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, computed) {
+  const fail = (errors) => ({ ok: false, errors, warnings: computed.warnings, published: [] })
+  if (!computed.ok) return fail(computed.errors)
+  const outputDir = pathutil.resolve(baseDir, outputRoot, util.safeSegment(projectId))
+  if (typeof fops.ensureDir === 'function') await fops.ensureDir(outputDir)
+  const manifestPath = pathutil.join(outputDir, 'MANIFEST.json')
+  let priorManifest = null
+  try { priorManifest = await fops.readJson(manifestPath) } catch { priorManifest = null }
+  const priorEntries = util.isPlainObject(priorManifest) && Array.isArray(priorManifest.entries) ? priorManifest.entries : []
+  const managedDest = new Set(priorEntries.filter((entry) => typeof entry?.path === 'string').map((entry) => entry.path))
+
+  // Preflight: destination symlinks, unmanaged occupancy, source hashes.
+  for (const entry of computed.entries) {
+    const destAbs = pathutil.join(outputDir, entry.dest)
+    const destInfo = typeof fops.lstat === 'function' ? await fops.lstat(destAbs) : null
+    if (destInfo?.type === 'symlink') return fail(['destination is a symbolic link: ' + entry.dest])
+    if (destInfo && !managedDest.has(entry.dest)) {
+      const existingHash = await hashFile(fops, destAbs)
+      if (existingHash !== '' && existingHash !== entry.hash) {
+        return fail(['destination ' + entry.dest + ' is occupied by an unmanaged file with different content; remove it or publish it via the project deliverables list first'])
+      }
+    }
+    const sourceHash = await hashFile(fops, entry.sourceAbs)
+    if (sourceHash !== entry.hash) {
+      return fail(['source changed between preflight and computation: ' + entry.dest + ' (' + pathutil.relativePath(baseDir, entry.sourceAbs) + ')'])
+    }
+  }
+
+  // Copy (skip same-hash destinations: no content or timestamp churn).
+  const published = []
+  const copied = []
+  for (const entry of computed.entries) {
+    const destAbs = pathutil.join(outputDir, entry.dest)
+    await fops.ensureDir(pathutil.dirname(destAbs))
+    const existingHash = await hashFile(fops, destAbs)
+    if (existingHash !== entry.hash) {
+      if (BINARY_PUBLISH_EXT.test(entry.dest)) {
+        if (typeof fops.copy !== 'function') return fail(['binary deliverable copy is unavailable: ' + entry.dest])
+        await fops.copy(entry.sourceAbs, destAbs)
+      } else {
+        const text = await fops.readText(entry.sourceAbs)
+        await fops.writeText(destAbs, text)
+      }
+      const verified = await hashFile(fops, destAbs)
+      if (verified !== entry.hash) return fail(['published deliverable hash mismatch: ' + entry.dest])
+      copied.push(entry.dest)
+    }
+    published.push({ path: entry.dest, sourcePath: pathutil.relativePath(baseDir, entry.sourceAbs), sourceRule: entry.rule, hash: entry.hash, idempotent: existingHash === entry.hash })
+  }
+
+  // MANIFEST.json last, idempotent (stable comparison ignores generatedAt).
+  const manifest = {
+    schemaVersion: 1,
+    kind: 'project-publish-manifest',
+    projectId,
+    closureSource: computed.closureSource,
+    warnings: computed.warnings,
+    entries: computed.entries.map((entry) => ({ path: entry.dest, sourcePath: pathutil.relativePath(baseDir, entry.sourceAbs), sourceRule: entry.rule, hash: entry.hash })),
+  }
+  const stableCompare = (value) => {
+    const copy = { ...value }
+    delete copy.generatedAt
+    return core.stableStringify(copy)
+  }
+  let manifestChanged = !util.isPlainObject(priorManifest) || !Array.isArray(priorManifest.entries)
+  if (!manifestChanged) manifestChanged = stableCompare(priorManifest) !== stableCompare(manifest)
+  if (manifestChanged) {
+    await fops.writeJson(manifestPath, { ...manifest, generatedAt: new Date().toISOString() })
+  }
+  return {
+    ok: true,
+    errors: [],
+    warnings: computed.warnings,
+    closureSource: computed.closureSource,
+    outputDir: pathutil.relativePath(baseDir, outputDir),
+    published,
+    copied,
+    manifestWritten: manifestChanged,
+  }
+}
+
+// Journal sync (plan WS4 item 1): merge the final state into the node entry,
+// preserving every other field. Idempotent — write only on change.
+async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptance, outputHash) {
+  const artifactRoot = typeof contractFile.artifactRoot === 'string' && contractFile.artifactRoot ? contractFile.artifactRoot : 'research-agent'
+  const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, artifactRoot)
+  if (!loadedPlan.ok) {
+    return { ok: true, action: 'skipped', reason: 'plan-unavailable: ' + loadedPlan.error }
+  }
+  const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+  const state = loadedState.state
+  const existing = util.isPlainObject(state.nodes?.[contractFile.nodeId])
+    ? state.nodes[contractFile.nodeId]
+    : projectstate.emptyState(loadedPlan.plan).nodes[contractFile.nodeId]
+  const desiredRest = {
+    status: 'done',
+    runDir: pathutil.relativePath(baseDir, runDirAbs),
+    runStatus: 'complete',
+    receipts: [
+      typeof acceptance?.receiptHash === 'string' ? acceptance.receiptHash : '',
+      typeof outputHash === 'string' ? outputHash : '',
+      pathutil.relativePath(baseDir, pathutil.join(runDirAbs, 'acceptance.json')),
+    ],
+  }
+  // Idempotent: repeat finalize with an already-final entry is a no-op
+  // (updatedAt only moves when something else changes).
+  const alreadyCurrent = Object.keys(desiredRest).every((key) => core.stableStringify(existing[key]) === core.stableStringify(desiredRest[key]))
+  if (alreadyCurrent) {
+    return { ok: true, action: 'current', nodeId: contractFile.nodeId }
+  }
+  const merged = { ...existing, ...desiredRest, updatedAt: new Date().toISOString() }
+  state.nodes[contractFile.nodeId] = merged
+  await projectstate.saveState(fops, baseDir, contractFile.projectId, state, loadedPlan.artifactRoot, loadedState.path)
+  return { ok: true, action: 'merged', nodeId: contractFile.nodeId, path: pathutil.relativePath(baseDir, loadedState.path) }
+}
+
+// ── finalize_run override: v2 acceptance gate + output policy (plan §4.3, WS4) ──
 
 const _finalizeRun = lifecycle.finalizeRun
 lifecycle.finalizeRun = async function (fops, params) {
   const baseDir = pathutil.resolve(params.baseDir ?? '.')
   const runDir = pathutil.resolve(params.runDir)
   const contractFile = await loadRunContract(fops, runDir)
+  let journalSync = null
+  let projectPublish = null
+  let deliverables = []
   if (contractFile) {
     const acceptance = await loadAcceptance(fops, runDir)
     const outputName = contractFile.artifactFormat === 'tex' ? 'output.tex' : 'final.md'
@@ -4790,14 +5253,60 @@ lifecycle.finalizeRun = async function (fops, params) {
     if (!core.acceptanceIsCurrent(acceptance, contractFile.contractDigest, outputHash)) {
       throw new Error('v2 run cannot finalize without a current successful acceptance receipt bound to the node-contract digest (plan §4.3). Call autoresearch_record_acceptance and retry.')
     }
+    // WS4 item 1: journal sync (merge/patch, never replace).
+    journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash)
+    const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
+    const outputRoot = typeof run?.outputRoot === 'string' && run.outputRoot.trim()
+      ? run.outputRoot
+      : typeof run?.config?.outputRoot === 'string' && run.config.outputRoot.trim()
+        ? run.config.outputRoot
+        : 'outputs'
+    // WS4 item 3: bound v2 runs never create per-issue output folders.
+    const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+    if (!loadedPlan.ok) {
+      projectPublish = { ok: false, skipped: true, errors: ['cannot resolve the project plan for ' + contractFile.projectId + ': ' + loadedPlan.error] }
+    } else if ((loadedPlan.plan.integrationId ?? 'integration') !== contractFile.nodeId) {
+      projectPublish = { ok: true, skipped: true, reason: 'non-integration node: the project-level publish happens when the integration node finalizes' }
+    } else {
+      // WS4 item 2: project-level publish for the integration node.
+      const rawDeliverables = loadedPlan.plan.projectContract?.deliverables
+      const deliverableList = (Array.isArray(rawDeliverables) ? rawDeliverables : ['final.tex', 'final.pdf']).filter((value) => typeof value === 'string').map((value) => value.trim()).filter(Boolean)
+      if (deliverableList.length === 0) {
+        projectPublish = { ok: true, skipped: true, reason: 'projectContract.deliverables is explicitly empty: no project publish', outputRoot: null }
+      } else {
+        const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+        const nodeRunDirs = [{ nodeId: contractFile.nodeId, runDirAbs: pathutil.normalize(runDir) }]
+        for (const node of loadedPlan.plan.nodes ?? []) {
+          if (node.id === contractFile.nodeId) continue
+          const stateEntry = loadedState.state?.nodes?.[node.id]
+          if (stateEntry && typeof stateEntry.runDir === 'string' && stateEntry.runDir) {
+            const abs = pathutil.resolve(baseDir, pathutil.resolveInside(baseDir, stateEntry.runDir))
+            nodeRunDirs.push({ nodeId: node.id, runDirAbs: pathutil.normalize(abs) })
+          }
+        }
+        const computed = await computePublishSet({
+          fops,
+          baseDir,
+          runDirAbs: pathutil.normalize(runDir),
+          nodeRunDirs,
+          deliverables: deliverableList,
+          isTex: contractFile.artifactFormat === 'tex',
+        })
+        projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed)
+      }
+    }
+  } else {
+    // Legacy unbound run: today's outputs/<issueId>/ behavior, byte-for-byte.
+    const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
+    deliverables = await publishFinalDeliverables(fops, baseDir, runDir, run, contractFile)
   }
-  const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
-  const deliverables = await publishFinalDeliverables(fops, baseDir, runDir, run, contractFile)
   const result = await _finalizeRun(fops, params)
   return {
     ...result,
     deliverables,
     v2: contractFile ? { bound: true, gate: 'passed', contractDigest: contractFile.contractDigest, artifactFormat: contractFile.artifactFormat } : { bound: false, gate: 'legacy' },
+    journalSync,
+    projectPublish,
   }
 }
 
@@ -5959,7 +6468,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 12. finalize_run (v2 acceptance gate) ──────────────────────────────
 
-    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete, publish its final deliverables under outputs/<issueId>/, update resume.md, and release the issue lock when it points at this run. Returns published paths and a posting intent for Linear runs. Contract-bound (v2) runs are rejected without a current successful acceptance receipt bound to the node-contract digest.', {
+    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent output policy (plan WS4). Unbound/legacy runs publish their final deliverables under outputs/<issueId>/ as before. Bound v2 runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes exactly one folder, outputs/<projectId>/: the primary final.tex/final.pdf (or final.md), the explicit projectContract.deliverables list (including requested companions such as process-issues.md — no companions.json or filename-pattern discovery exists), the build-derived rebuild closure from the accepted final.fls (resolver fallback when the recorder is missing/stale, recorded in MANIFEST.json as closureSource), the .bib union, the audit/ evidence set (audit-certificate.* renamed from output.*, per-node acceptance receipts and ledgers), and MANIFEST.json attributing every path with a SHA-256 hash. Missing or conflicting declared/closure files fail before anything is written. Returns the published paths, journalSync, and projectPublish results. Contract-bound (v2) runs are rejected without a current successful acceptance receipt bound to the node-contract digest.', {
       type: 'object', additionalProperties: true,
       properties: {
         runDir: { type: 'string', description: 'Run directory path.' },
@@ -7218,5 +7727,10 @@ export const createLibraries = {
     slugHeading,
     parseTexSections,
     firstUsableSentence,
+    computePublishSet,
+    parseFlsInputs,
+    extractBibSources,
+    isSafeRelPath,
+    isDenylistedRelPath,
   },
 }

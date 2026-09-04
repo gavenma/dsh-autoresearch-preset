@@ -124,3 +124,15 @@ A JSON object with:
 ## integration-notes.json
 Open questions, known limitations, and any kick-back findings that need
 coordinator routing (owning node + affected contribution ids + required change).
+
+## Project companions (output policy)
+
+Every user-facing file the project needs beyond the master document
+(`references.bib`, `process-issues.md`, `figure-dossier.tex`, …) must be
+staged in a node run directory before acceptance AND listed in
+`projectContract.deliverables` as a safe relative path. There is no
+`companions.json` and no filename-pattern discovery: anything not in the
+declared list is not published. Finalize publishes the declared list plus the
+build-derived rebuild closure to `outputs/<projectId>/` and the evidence set
+under `audit/` — see the "Output policy (finalize, v5)" section of
+skills/research-project/SKILL.md.

@@ -461,6 +461,56 @@ workspace and session, not just the one where they were first hit:
    condition, and never silently edit a protected file to "fix" it — surface it
    for explicit authorization.
 
+## Output policy (finalize, v5 — single source of truth)
+
+`autoresearch_finalize_run` is one self-consistent finish step; the output
+policy it applies is:
+
+- **`outputs/<projectId>/` is the only user-facing publish target for a v2
+  project.** Bound v2 runs never create per-issue folders (`GAV-*` style
+  `outputs/<issueId>/` is unbound/legacy behavior only). Intermediate node
+  artifacts stay hidden in `.research-agent/runs/…` and reach the user only as
+  resolved inputs of the project-level set.
+- **The publish set is explicit plus build-derived.** `projectContract.deliverables`
+  is the one declarative list of user-facing files and must include every
+  requested companion (e.g. `final.tex`, `final.pdf`, `references.bib`,
+  `process-issues.md`, `figure-dossier.tex`) — safe relative file paths only;
+  no globs, no directory recursion. There is **no `companions.json` and no
+  filename-pattern discovery**: stage a companion in a node run directory
+  before acceptance and list it in the contract. For TeX, finalize also
+  derives the rebuild closure from the accepted `final.fls` (or the shared
+  resolver when the recorder is missing/stale — `closureSource: "resolver"` in
+  the manifest) and unions `\bibliography`/`\addbibresource` sources across the
+  resolved inputs, so fragments, graphics, styles, and `.bib` files cannot be
+  forgotten.
+- **Naming rule:** `output.tex` remains the canonical node artifact; the
+  integration product is `final.tex`/`final.pdf` at the project root, and the
+  integration node's `output.tex`/`output.pdf` publish only as
+  `audit/audit-certificate.tex`/`audit-certificate.pdf`. Users never see a bare
+  `output.*`.
+- **Standard layout:**
+
+  ```
+  outputs/<projectId>/
+    final.pdf               <- primary compiled deliverable
+    final.tex               <- master source (\input's the fragments)
+    <other declared files>  <- preserved relative paths
+    <resolved TeX inputs>   <- fragments/figures needed to rebuild
+    audit/
+      audit-certificate.tex <- integration output.tex, renamed
+      audit-certificate.pdf <- integration output.pdf, when present
+      acceptance/<nodeId>.json <- acceptance receipt per accepted node
+      ledgers/<nodeId>.json    <- node-output.json per accepted node
+    MANIFEST.json           <- every path: source, rule, SHA-256, warnings
+  ```
+
+- **Fail closed, preserve the rest.** Missing or conflicting declared/closure
+  files, unsafe paths (traversal, absolute, symlinks, directories), and
+  unmanaged destination files with different content fail BEFORE anything is
+  written; the previous destination stays intact and the result names the
+  exact path to produce. Re-finalizing with unchanged content changes neither
+  managed content nor unrelated user files.
+
 ## Per-node AutoReason loop (the loop every node runs)
 
 This is the per-node AutoReason loop; it runs once per node, and once more over the merged deliverable in the integration node. The coordinator orchestrates; every role runs in a fresh confined subagent via `autoresearch_run_role` — never hand roles your own tools.
