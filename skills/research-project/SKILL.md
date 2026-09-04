@@ -603,6 +603,14 @@ Do not spawn any role until the user confirms.
 8. The runner owns bounded retry. Do not launch a second coordinator-level role call for the same `logicalGroupKey`. for judges, stop
    if fewer than 2 valid rankings remain; otherwise surface the runner failure and never accept partial output.
 9. Never fabricate sources; `autoresearch_redact_check` before posting.
+10. TeX hygiene: scratch and temp files live under the run directory — never
+    write build scratch to `/tmp`. Clean build outputs only with
+    `latexmk -C`; never use raw `rm` on `.aux`/`.log`/`.pdf`/`pass_*` build
+    artifacts (an `rm` of sources is caught by the missing-source diagnostic at
+    the next gate, but raw `rm` of build outputs silently produces stale-aux
+    symptoms). When a compile shows stale-aux symptoms (references resolved
+    from a previous pass, phantom inputs, `Rerun to cross-reference` loops),
+    run `latexmk -C` in the run directory before re-compiling.
 
 ### Config and role tuning
 

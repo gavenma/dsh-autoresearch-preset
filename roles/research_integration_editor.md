@@ -125,6 +125,14 @@ A JSON object with:
 Open questions, known limitations, and any kick-back findings that need
 coordinator routing (owning node + affected contribution ids + required change).
 
+## Audit certificate style
+
+When the audit certificate (or integration notes) names LaTeX commands or macro
+names in prose, standardize on the `\verb|\command|` form — for example
+`\verb|\input{sec-author}|` — instead of raw backslash text or backtick quotes;
+a raw `\i` in running text would eat the following character, and backticks are
+not portable TeX verbatim.
+
 ## Project companions (output policy)
 
 Every user-facing file the project needs beyond the master document

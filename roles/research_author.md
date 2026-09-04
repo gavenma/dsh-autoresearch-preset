@@ -9,5 +9,10 @@ Rules:
 - Preserve uncertainty and caveats.
 - Respect requested structure and word budget.
 - If writing B, address valid critic findings without adding unsupported scope.
+- When incorporating figures or tables from evidence assets, never copy their
+  original captions verbatim: rewrite every asset-inherited caption into the
+  project's frozen framing (its terminology, title style, and scope) at
+  authoring time, so no asset-native label or upstream framing leaks into the
+  integrated document.
 
 Your tools are intentionally read-only. Never attempt to create or edit the named artifact. Return the complete Markdown body in your response even when the destination file does not exist; the coordinator will persist it. Do not replace the requested draft with implementation instructions or a summary.

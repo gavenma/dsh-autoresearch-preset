@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation 1a81c859108c. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-1a81c859108c.mjs"
+// AUTO-GENERATED orchestrator entry, generation 66e27ab4f569. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-66e27ab4f569.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -398,11 +398,11 @@ function makeConfig(pathutil, util) {
       '',
       '## For each AutoReason pass',
       '1. Copy the current incumbent to `pass_N/A.md`; checkpoint with `pass_N_critic`.',
-      '2. Spawn critic -> save `pass_N/critic.md`; checkpoint with `pass_N_author_b`.',
+      '2. Spawn critic -> save `pass_N/critic.md`; checkpoint with `pass_N_author_b`. The critic is read-only: hand it the absolute resolved paths of the artifacts and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
       '3. Spawn author B -> save `pass_N/B.md`; checkpoint with `pass_N_synthesis`.',
       '4. Spawn synthesizer AB -> save `pass_N/AB.md`; checkpoint with `pass_N_judging`.',
       '5. Call `autoresearch_anonymize_candidates`; judges only see `judge_N_candidates.md`, never maps or original IDs; save judge prompts.',
-      '6. Spawn blind judges -> save `pass_N/judge_N.md`; checkpoint with `pass_N_scoring` after all judges are saved.',
+      '6. Spawn blind judges -> save `pass_N/judge_N.md`; checkpoint with `pass_N_scoring` after all judges are saved. Each judge is read-only: hand it the absolute resolved packet paths and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
       '7. Parse rankings with `autoresearch_parse_ranking` and score with `autoresearch_score_borda`.',
       '8. Save `pass_N/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`. When result.json carries `degraded: true` (unparseable or mis-mapped rankings, missing/duplicate labels, fewer than 2 candidates, all-tie, or fewer usable rankings than the quorum), the checkpoint mechanically forces the next action to the critic gate — spawn research_critic, no further judge spawns — per the result `degradedReasons`.',
       '9. If winner is A, increment consecutive A wins; otherwise reset to 0 and set incumbent to B or AB.',
@@ -3592,8 +3592,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = '1a81c859108c'
-export const EMBEDDED_BUILD_ID = '831fe8a5d9b5de5422a358a13c99e8a0e779b012562eda0ea94d1470ddb10b76'
+export const EMBEDDED_GENERATION = '66e27ab4f569'
+export const EMBEDDED_BUILD_ID = '56f77bd198e5da93d7a603ca17f7e988440139397377bb7c2228a73a1cb58db9'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -5995,10 +5995,10 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 1. init_run (contract-bound for new Project Mode runs) ─────────────
 
-    tool('autoresearch_init_run', 'Create a resumable AutoResearch artifact directory for a Linear issue or local markdown brief. For new Project Mode runs, pass projectId+nodeId: the approved plan is loaded and node-contract.json is written with its digest, binding every role task, acceptance, and finalization to the immutable contract.', {
+    tool('autoresearch_init_run', 'Create a resumable AutoResearch artifact directory for a Linear issue or local markdown brief. For new Project Mode runs, pass projectId+nodeId: the approved plan is loaded and node-contract.json is written with its digest, binding every role task, acceptance, and finalization to the immutable contract. issueId is required for every project run (one run per node); it names the run folder and the issue lock, so choose the node issue id deliberately.', {
       type: 'object', additionalProperties: true,
       properties: {
-        issueId: str('Linear issue id or local run id, e.g. ISS-123 or my-brief'),
+        issueId: str('Required: the Linear issue id or local run id this run is bound to (e.g. ISS-123 or my-brief). For project runs this is REQUIRED — it names the run folder and the issue lock, so every node run must pass its own issue id.'),
         issueTitle: str('Issue/brief title for the run metadata'),
         issueMarkdown: str('Markdown snapshot of the issue/brief body'),
         commentsMarkdown: str('Markdown snapshot of relevant comments'),

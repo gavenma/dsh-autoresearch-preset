@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "generation": "1a81c859108c",
-  "aggregateId": "831fe8a5d9b5de5422a358a13c99e8a0e779b012562eda0ea94d1470ddb10b76",
+  "generation": "66e27ab4f569",
+  "aggregateId": "56f77bd198e5da93d7a603ca17f7e988440139397377bb7c2228a73a1cb58db9",
   "aggregateScope": [
-    "tools/autoresearch-core-1a81c859108c.mjs",
+    "tools/autoresearch-core-66e27ab4f569.mjs",
     "tools/byte-utils.mjs",
     "tools/linear-client.mjs",
     "tools/research-web-fetch.mjs",
@@ -11,23 +11,23 @@
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs"
   ],
   "entries": {
-    "core": "tools/autoresearch-core-1a81c859108c.mjs",
-    "orchestrator": "tools/research-orchestrator-1a81c859108c.mjs",
-    "linear": "tools/linear-1a81c859108c.mjs"
+    "core": "tools/autoresearch-core-66e27ab4f569.mjs",
+    "orchestrator": "tools/research-orchestrator-66e27ab4f569.mjs",
+    "linear": "tools/linear-66e27ab4f569.mjs"
   },
   "files": {
-    "agent.cordis.yml": "4d48e1b406df3dc5e674111d660baeaaa391a1752e78e2ac4cf65738c39a6569",
+    "agent.cordis.yml": "ef0284ab204d186936178d95d9ea5516fb317548698b31a872c6c2187d8a254e",
     "config.default.json": "4e7e77ffdd2ed5498ccecdf9d899d503bf05662b9791ce34864189cd8d0bc704",
     "preset.yml": "260c2617a7e525324c3f7f44cda98b211846f129dcc2cb0a552449b63f6d4f63",
     "roles/evidence_verifier.md": "bef5eb24ee3e6e4184ab21a27a8ea9893cddca17c6b0e6ef346d084ee8857fd4",
     "roles/research_abstract_writer.md": "6ea56ff0d188574ff87799742dc561ccf3829e286bc5d90813bb0aced0bcb2cd",
-    "roles/research_author.md": "6f555b1bc2243faebbe62a9ea2c3f678fdb7922fc324c114b2a1b95320b54d24",
+    "roles/research_author.md": "ce80146a03d3db976a9cbe8ffd355194e210e18e8266cadb00acf72ac18965c0",
     "roles/research_coder.md": "7c1e8f57e6f59441a8b543a5d16a7a8bc63d8313f95b2d668ca146da4ddec359",
-    "roles/research_critic.md": "4c56cf4132f689fbd5dde1ad2ef3570f1c30708fe6cbdb37a8e696e6e74363b5",
+    "roles/research_critic.md": "463d342666a104b33a53bf9d763a59a5e064be5c753639c739e730160ca03969",
     "roles/research_experiments_commentator.md": "ec65cfe7ad15d0caf7e2cff299c0fdc70ffe8d8deda41e2662a30a60f080d6db",
-    "roles/research_integration_editor.md": "9cdcdbf584324bc25741b62a39677e86e8b5dd869e3c910a00a4c0d742ab8418",
-    "roles/research_integration_verifier.md": "2a563ceed33a04f7fee3a0431c9ca363c066ace1042edfd0ecaaaef8c56a3ee0",
-    "roles/research_judge.md": "29d88639ff8cab4713b6d2b1b3fe34641869ef41f83f66791dd05c70182d42fc",
+    "roles/research_integration_editor.md": "f475c1669c4c2ee8c66f5b57b59ce001bd80c18de6fe5c3062717af04bc7a050",
+    "roles/research_integration_verifier.md": "17e074b95032cda2f0ac7f5bd083ba9442950239305677d512f50dd1c673c7cb",
+    "roles/research_judge.md": "5da33b80c88c48a386a65a4235059be53463f506f733e15fa529190c88277b52",
     "roles/research_literature_writer.md": "68fdbc6c3827de976d25d4d7798190bb40587b224103303d1d2018f3fe5d9e55",
     "roles/research_planner.md": "9ce14b0812f7e7bab4540d0445d27993751b2b06d17c70abb88a45f83d844fb9",
     "roles/research_reporter.md": "5d9984a6b01a858d19490ee6c0a9aedb5453fb5938b8f738c570de06753449e1",
@@ -35,15 +35,15 @@
     "roles/research_synthesizer.md": "10ad11454c5314bec98a6160bddc776e7837ffe8af48ed7bd3fa88fca126b2b9",
     "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346",
     "skills/research-outline-project/SKILL.md": "e8c56a48f9e428a7ba5fb0b261e0da6d749370b968bd4c4607faff6cf9c37dff",
-    "skills/research-project/SKILL.md": "0dd65e713fdc141453380812172c53ee28bf7e3a6ed7ffac30989949cdee7678",
-    "tools/autoresearch-core-1a81c859108c.mjs": "19707c5c8f87306f4b87fd593b2355b129683d71f9db273fcd2414bfd26c46c8",
+    "skills/research-project/SKILL.md": "841012cb4adfc6e02f436dfe1a311d320da7993d91d7d2f41e699cad9d5407be",
+    "tools/autoresearch-core-66e27ab4f569.mjs": "19707c5c8f87306f4b87fd593b2355b129683d71f9db273fcd2414bfd26c46c8",
     "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
-    "tools/linear-1a81c859108c.mjs": "5b828812786a953bcfe75248954ab7631f930058beec8fe155daa4f1aa526ca7",
+    "tools/linear-66e27ab4f569.mjs": "d9a2d714834743af6fd01b0c84ce526cd1c99281241fb4425e8404171a8dae0f",
     "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
-    "tools/research-orchestrator-1a81c859108c.mjs": "9ef52ed4f79dc8e9694ea9c60b7763692476bccd6237dcdcaa92fcd342117bc9",
+    "tools/research-orchestrator-66e27ab4f569.mjs": "70f5b1cd95c81d84813acdb2792db7b259ad3b4ca6a6407935a67e75e5d09cde",
     "tools/research-web-fetch.mjs": "a30f6c6c88a9c37768a1682daa54728eb6bacd36c4141820e065dd1c5f339b22",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.mjs": "081d3b6f426d38a8029766f8839f505e9cbf2c81a71d62c26eada142e6c21ae4",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs": "5e9f76bd5e65fbd1602b29fc50e50490aeeacd34a715b2282b73f7e8029242e0"
   },
-  "generatedAt": "2026-09-04T04:53:57.627Z"
+  "generatedAt": "2026-09-04T04:57:35.380Z"
 }
