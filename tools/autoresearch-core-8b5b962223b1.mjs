@@ -573,10 +573,25 @@ export function nodeContract(plan, nodeId, opts = {}) {
     effectiveBudget: effective.budget,
     dependsOn: [...(Array.isArray(node.dependsOn) ? node.dependsOn : [])],
     verification: isPlainObject(node.verification) ? node.verification : {},
-    outputContract: isPlainObject(node.outputContract) ? node.outputContract : {},
+    outputContract: normalizedOutputContract(kind, node.outputContract),
   }
   contract.digest = digestOf(contract)
   return contract
+}
+
+// Contract output-contract normalization (GRF-2026 SOD #7). Assembly nodes
+// merge complete documents; when the plan leaves texMode unset, the contract
+// defaults it to "standalone" so the guardrail in node TeX validation fires
+// deterministically. An explicit texMode (fragment or standalone) is always
+// preserved. The plan file itself is never rewritten — only the derived
+// contract carries the default, so every derivation site agrees on the
+// digest.
+function normalizedOutputContract(kind, raw) {
+  const source = isPlainObject(raw) ? { ...raw } : {}
+  if (kind === 'assembly' && (typeof source.texMode !== 'string' || !source.texMode.trim())) {
+    source.texMode = 'standalone'
+  }
+  return source
 }
 
 // Project-level v2 contract.
@@ -1590,6 +1605,11 @@ export function acceptanceReceipt(params) {
     commandChecks: params.commandChecks ?? [],
     artifactClassification: params.artifactClassification ?? null,
     tex: params.tex ?? null,
+    // GRF-2026 SOD #3: the scanner-derived declared needs of the accepted
+    // artifact (authoritative for pass/fail) and the recorded contract-drift
+    // warnings. Absent on legacy receipts (pre-fix).
+    derivedDeclared: isPlainObject(params.derivedDeclared) ? params.derivedDeclared : null,
+    warnings: Array.isArray(params.warnings) ? [...params.warnings] : [],
     overall: overall.overall,
     failedCriteria: overall.failures,
     waiverNotes: (params.criteria ?? []).filter((entry) => entry?.result === 'WAIVED').map((entry) => ({ id: entry.id, waiver: entry.waiver })),
@@ -1644,9 +1664,65 @@ export function normalizeDeclared(declared) {
   }
 }
 
+// Strip TeX comments before a static scan (plan §4.3, GRF-2026 SOD #2).
+// Each line is cut at the first unescaped `%`. TeX-awareness (documented
+// limitations):
+//   - `\%` is an escaped percent and never starts a comment.
+//   - `\verb|…|` (delimiter = the first character after `\verb`) is verbatim:
+//     a `%` inside it is kept. A `\verb` with no closing delimiter on the line
+//     keeps the rest of the line verbatim.
+//   - `\begin{verbatim} … \end{verbatim}` spans lines; every line between the
+//     two markers (inclusive of the marker lines) is kept verbatim.
+// Only the `verbatim` environment is honored (not `verbatim*` or custom
+// long-verbatim aliases); that subset is the one the pipeline produces.
+export function stripTexComments(text) {
+  const lines = String(text).split('\n')
+  const out = []
+  let inVerbatim = false
+  for (const line of lines) {
+    if (inVerbatim) {
+      out.push(line)
+      if (/\\end\s*\{\s*verbatim\s*\}/.test(line)) inVerbatim = false
+      continue
+    }
+    const stripped = stripLineComment(line)
+    out.push(stripped)
+    const beginMatch = /\\begin\s*\{\s*verbatim\s*\}/.exec(stripped)
+    const endMatch = /\\end\s*\{\s*verbatim\s*\}/.exec(stripped)
+    if (beginMatch && (!endMatch || endMatch.index >= beginMatch.index)) inVerbatim = true
+  }
+  return out.join('\n')
+}
+
+function stripLineComment(line) {
+  let i = 0
+  const n = line.length
+  while (i < n) {
+    const ch = line[i]
+    if (ch === '\\') {
+      if (line.startsWith('\\verb', i)) {
+        const delimIndex = i + 5
+        const delim = line[delimIndex]
+        if (delim && delim !== '\n') {
+          const close = line.indexOf(delim, delimIndex + 1)
+          if (close !== -1) { i = close + 1; continue }
+          return line // unterminated \verb on this line: keep the rest verbatim
+        }
+        i += 2
+        continue
+      }
+      i += 2 // any other escape: backslash + next char (covers `\%`)
+      continue
+    }
+    if (ch === '%') return line.slice(0, i)
+    i += 1
+  }
+  return line
+}
+
 export function texNeeds(text) {
   const needs = { packages: [], macros: [], inputs: [], graphics: [], bibliographies: [], shellEscape: [] }
-  const source = String(text)
+  const source = stripTexComments(String(text))
   for (const match of source.matchAll(/\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
     needs.packages.push(...match[1].split(',').map((name) => name.trim()).filter(Boolean))
   }
@@ -1673,9 +1749,23 @@ export function texNeeds(text) {
   return needs
 }
 
+// Static TeX validation (plan §4.3, GRF-2026 SOD #3).
+//
+// The artifact's own scanned needs (`used`) are the source of truth for
+// pass/fail: everything the artifact declares or uses in its preamble is
+// "declared" by definition (the derived declared equals the scan). The
+// hand-filled contract `declared` list no longer acts as an allowlist —
+// "undeclared dependency" is no longer a failure mode. Drift between the
+// hand-filled contract and the artifact's derived declared is surfaced as
+// recorded WARNINGS in the receipt, never as a failure (legacy contracts
+// therefore only shrink their failure set).
+//
+// Remaining hard failures: empty output, fragment-mode forbidden constructs,
+// shell-escape.
 export function validateTexOutput(text, opts = {}) {
   const mode = opts.texMode === 'standalone' ? 'standalone' : 'fragment'
   const errors = []
+  const warnings = []
   const source = String(text)
   if (!source.trim()) errors.push('TeX output is empty.')
   for (const rule of TEX_FRAGMENT_FORBIDDEN) {
@@ -1686,27 +1776,26 @@ export function validateTexOutput(text, opts = {}) {
   const used = texNeeds(source)
   if (used.shellEscape.length > 0) errors.push('shell-escape (\\write18) is forbidden.')
   const declared = normalizeDeclared(opts.declared)
-  const declaredPackages = new Set(declared.packages)
-  const declaredMacros = new Set(declared.macros)
-  const declaredInputs = new Set(declared.inputs)
-  const declaredGraphics = new Set(declared.graphics)
-  const declaredBibliographies = new Set(declared.bibliographies)
-  for (const name of used.packages) {
-    if (!declaredPackages.has(name)) errors.push('Undeclared package: ' + name)
+  // Contract-drift warnings: the hand-filled declared list vs the artifact's
+  // derived declared (the scan). Both directions are drift, both are warnings.
+  const categories = [
+    ['package', 'packages'],
+    ['macro', 'macros'],
+    ['input', 'inputs'],
+    ['graphics', 'graphics'],
+    ['bibliography', 'bibliographies'],
+  ]
+  for (const [label, key] of categories) {
+    const usedSet = new Set(used[key])
+    const declaredSet = new Set(declared[key])
+    for (const name of usedSet) {
+      if (!declaredSet.has(name)) warnings.push('Contract declared-list drift: used ' + label + ' "' + name + '" is not in the contract declared list (the scanner-derived declared list is authoritative; record it as derived declared).')
+    }
+    for (const name of declaredSet) {
+      if (!usedSet.has(name)) warnings.push('Contract declared-list drift: declared ' + label + ' "' + name + '" is not used by the artifact (stale contract entry).')
+    }
   }
-  for (const name of used.macros) {
-    if (!declaredMacros.has(name)) errors.push('Undeclared macro: ' + name)
-  }
-  for (const name of used.inputs) {
-    if (!declaredInputs.has(name)) errors.push('Undeclared input: ' + name)
-  }
-  for (const name of used.graphics) {
-    if (!declaredGraphics.has(name)) errors.push('Undeclared graphics: ' + name)
-  }
-  for (const name of used.bibliographies) {
-    if (!declaredBibliographies.has(name)) errors.push('Undeclared bibliography: ' + name)
-  }
-  return { ok: errors.length === 0, errors, mode, used, declared }
+  return { ok: errors.length === 0, errors, warnings, mode, used, declared }
 }
 
 export function buildPreviewTex(outputTex, template) {
@@ -1968,12 +2057,17 @@ export function validateFinalTexStructure(finalTex, opts = {}) {
   const labels = new Map()
   for (const match of source.matchAll(/\\(?:label)\s*\*?\s*\{([^}]+)\}/g)) {
     const key = match[1].trim()
-    if (labels.has(key)) errors.push('Duplicate label: ' + key)
+    if (labels.has(key) && opts.skipLabelChecks !== true) errors.push('Duplicate label: ' + key)
     labels.set(key, true)
   }
-  for (const match of source.matchAll(/\\(?:ref|eqref|autoref|pageref)\s*\*?\s*\{([^}]+)\}/g)) {
-    const key = match[1].trim()
-    if (!labels.has(key)) errors.push('Cross-reference to missing label: ' + key)
+  // Label cross-reference checks are skipped when opts.skipLabelChecks is set
+  // (GRF-2026 SOD #19): the caller degrades the check to warnings because
+  // fragment sources are unavailable, but labels are still counted.
+  if (opts.skipLabelChecks !== true) {
+    for (const match of source.matchAll(/\\(?:ref|eqref|autoref|pageref)\s*\*?\s*\{([^}]+)\}/g)) {
+      const key = match[1].trim()
+      if (!labels.has(key)) errors.push('Cross-reference to missing label: ' + key)
+    }
   }
   for (const match of source.matchAll(/\\(?:input|include|includegraphics)\s*\*?\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
     const path = match[1].trim()
@@ -1992,6 +2086,19 @@ export function parseTexcountWords(stdout) {
   const text = String(stdout ?? '')
   const match = text.match(/Words in text:\s*(\d+)/i) ?? text.match(/(\d+)\s+words? in text/i)
   return match ? Number(match[1]) : null
+}
+
+// Naive word count over assembled TeX (GRF-2026 SOD #6): comment-stripped
+// text, counting whitespace-separated tokens containing at least one letter
+// or number. A documented heuristic used by tex_final_check only when
+// texcount is unavailable; texcount remains the primary counter.
+export function countAssembledWords(text) {
+  const stripped = stripTexComments(String(text ?? ''))
+  let count = 0
+  for (const token of stripped.split(/\s+/)) {
+    if (token && /[\p{L}\p{N}]/u.test(token)) count += 1
+  }
+  return count
 }
 
 // ── build identity (plan §4.5 / WP5) ───────────────────────────────────────

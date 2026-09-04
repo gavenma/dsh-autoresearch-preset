@@ -208,6 +208,10 @@ research_integration_editor + research_integration_verifier and zero
 scout/judge counts, and its `dependsOn` covers ALL leaves. For document
 rewrites, decompose per section/component plus one assembly node
 (kind "assembly"), with the integration node re-verifying the assembled
-whole. Prefer TeX artifacts for every node; `artifactFormat: "markdown"` is
-an explicit non-TeX exception that must be justified in the rationale.
+whole. The assembly node's `outputContract` must set `"texMode": "standalone"`
+(it merges complete documents that compile on their own; the contract
+derivation defaults omitted assembly texMode to standalone, but write it
+explicitly so the plan documents the choice). Prefer TeX artifacts for every
+node; `artifactFormat: "markdown"` is an explicit non-TeX exception that must
+be justified in the rationale.
 

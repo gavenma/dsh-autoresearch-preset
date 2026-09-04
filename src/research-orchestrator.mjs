@@ -512,7 +512,7 @@ Standards: (1) one node = one self-contained work item with one explicit purpose
 
 Node roles are drawn from the 7 pipeline roles only (research_scout, evidence_verifier, research_author, research_critic, research_synthesizer, research_judge, research_reporter, plus configured roleProfiles — not research_planner).
 
-Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, deliverables, acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
+Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, deliverables, acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
 `,
 
     research_scout: `You are a research scout.
@@ -3877,20 +3877,120 @@ async function renderPreview(fops, subprocessService, baseDir, runDir, opts = {}
   }
 }
 
+// Unified missing-source diagnostic (GRF-2026 SOD #1/#9): names the expected
+// source file, lists what is actually present in the run directory, and — when
+// orphaned build artifacts suggest a stale in-place build — points at
+// `latexmk -C` as the sanctioned cleanup tool.
+async function missingSourceDiagnostic(fops, runDir, expectedRel) {
+  const parts = ['Expected output source "' + expectedRel + '" is missing from the run directory.']
+  let entries = []
+  try { entries = (await fops.listDir(runDir)).map((entry) => entry.name) } catch { entries = [] }
+  parts.push('Directory contains: ' + (entries.length > 0 ? entries.join(', ') : '(empty)'))
+  const buildArtifacts = entries.filter((name) => /\.(log|fls|aux|out|toc|lof|lot|pdf)$/i.test(name))
+  if (buildArtifacts.length > 0) {
+    parts.push('Orphaned build artifacts are present (' + buildArtifacts.slice(0, 10).join(', ') + '); the directory looks like a stale in-place build. Sanctioned cleanup is `latexmk -C` in the run directory, never raw rm of build outputs, then recompile.')
+  }
+  return parts.join(' ')
+}
+
+// Candidate pass_*/*.tex files present in a run directory (WS1 recipe: the
+// coordinator needs to know what it can promote to output.tex).
+async function listPassTexCandidates(fops, runDir) {
+  const candidates = []
+  let entries = []
+  try { entries = await fops.listDir(runDir) } catch { entries = [] }
+  for (const entry of entries) {
+    if (!entry.dir || !/^pass_\d{2,}$/.test(entry.name)) continue
+    let children = []
+    try { children = await fops.listDir(pathutil.join(runDir, entry.name)) } catch { children = [] }
+    for (const child of children) {
+      if (!child.dir && String(child.name).toLowerCase().endsWith('.tex')) candidates.push(entry.name + '/' + child.name)
+    }
+  }
+  return candidates.sort()
+}
+
+// TeX system input paths allowed in a .fls without a workspace-local failure
+// (GRF-2026 SOD #4). One shared helper; the roots cover the common TeX Live,
+// MacTeX, and TeX for Windows installations.
+const TEX_SYSTEM_INPUT_ROOTS = [
+  '/usr/local/texlive',
+  '/Library/TeX',
+  '/usr/share/texlive',
+  '/usr/share/texmf',
+  '/var/lib/texmf',
+  '/etc/texmf',
+]
+export function isTexSystemInput(inputPath) {
+  const value = String(inputPath)
+  if (value.includes('/texmf-dist/')) return true
+  return TEX_SYSTEM_INPUT_ROOTS.some((root) => value === root || value.startsWith(root + '/'))
+}
+
+// Shared TeX file resolver (GRF-2026 SOD #6): resolves workspace-local
+// \input/\include targets of a TeX main file. Bounded depth (default 5) and a
+// cycle guard; targets are confined to the run directory. Returns
+// { files: [{ relPath, text }], unresolved: [target] } where files excludes
+// the main file itself.
+async function resolveTexInputs(fops, runDir, mainRel, opts = {}) {
+  const maxDepth = Number.isInteger(opts.maxDepth) && opts.maxDepth > 0 ? opts.maxDepth : 5
+  const main = String(mainRel)
+  const stripExt = (value) => String(value).replace(/\.(tex|sty)$/i, '')
+  const seen = new Set([main, stripExt(main)])
+  const files = []
+  const unresolved = []
+  const readRel = async (rel) => {
+    try { return await fops.readText(pathutil.join(runDir, rel)) } catch { return '' }
+  }
+  const queue = [{ rel: main, depth: 0, text: await readRel(main) }]
+  while (queue.length > 0) {
+    const item = queue.shift()
+    for (const match of item.text.matchAll(/\\(?:input|include)\s*\{([^}]+)\}/g)) {
+      const target = String(match[1]).trim()
+      if (!target) continue
+      const rel = /\.(tex|sty)$/i.test(target) ? target : target + '.tex'
+      if (seen.has(target) || seen.has(rel)) continue
+      seen.add(target)
+      seen.add(rel)
+      if (item.depth + 1 > maxDepth) { unresolved.push(target); continue }
+      let exists = false
+      try { exists = await fops.exists(pathutil.join(runDir, rel)) } catch { exists = false }
+      if (!exists) { unresolved.push(target); continue }
+      const childText = await readRel(rel)
+      files.push({ relPath: rel, text: childText })
+      queue.push({ rel, depth: item.depth + 1, text: childText })
+    }
+  }
+  return { files, unresolved }
+}
+
 // Node-level strict TeX validation: static rules first, then a strict build
 // of preview.tex (fragment mode, against the frozen template) or output.tex
 // (standalone mode). A nonzero compiler exit cannot pass.
+//
+// GRF-2026 SOD #3: the scanner-derived declared needs are the source of truth
+// for pass/fail; the hand-filled contract declared list only produces
+// recorded drift warnings (record.warnings / record.derivedDeclared).
 async function validateNodeTex(fops, subprocessService, baseDir, runDir, contract, opts = {}) {
   const outputPath = pathutil.resolveInside(runDir, 'output.tex')
-  const outputText = await readFileSafe(fops, outputPath)
+  const outputExists = await fops.exists(outputPath)
+  const outputText = outputExists ? await readFileSafe(fops, outputPath) : ''
   const texMode = opts.texMode ?? contract.outputContract?.texMode ?? 'fragment'
   const declared = opts.declared ?? contract.outputContract ?? {}
-  const staticResult = core.validateTexOutput(outputText, { texMode, declared })
+  const staticResult = outputExists ? core.validateTexOutput(outputText, { texMode, declared }) : null
   const record = {
-    mode: staticResult.mode,
+    mode: staticResult ? staticResult.mode : texMode,
     outputHash: core.sha256Text(outputText),
-    staticOk: staticResult.ok,
-    staticErrors: staticResult.errors,
+    staticOk: staticResult ? staticResult.ok : false,
+    staticErrors: staticResult ? staticResult.errors : [],
+    warnings: staticResult ? staticResult.warnings : [],
+    derivedDeclared: staticResult ? {
+      packages: staticResult.used.packages,
+      macros: staticResult.used.macros,
+      inputs: staticResult.used.inputs,
+      graphics: staticResult.used.graphics,
+      bibliographies: staticResult.used.bibliographies,
+    } : null,
     compiled: false,
     clean: false,
     exitCode: null,
@@ -3898,13 +3998,31 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     flsHash: '',
     previewHash: '',
     templateHash: '',
-    packages: staticResult.used.packages,
-    macros: staticResult.used.macros,
-    violations: staticResult.errors,
+    packages: staticResult ? staticResult.used.packages : [],
+    macros: staticResult ? staticResult.used.macros : [],
+    violations: staticResult ? staticResult.errors : [],
     errors: [],
   }
+  if (!outputExists) {
+    record.errors = [await missingSourceDiagnostic(fops, runDir, 'output.tex')]
+    record.violations = record.errors
+    return record
+  }
+  // texMode guardrail (SOD #7): a complete document compiled in fragment mode
+  // with no template available is a misconfigured texMode, not a template
+  // problem — name the fix explicitly.
+  const templateRel = opts.templatePath ?? contract.verification?.templatePath
+  const hasTemplate = typeof templateRel === 'string' && templateRel.trim() !== ''
+  if (texMode === 'fragment' && !hasTemplate && (/\documentclass\b/.test(outputText) || /\\begin\s*\{\s*document\s*\}/.test(outputText))) {
+    record.errors = ['output.tex is a complete standalone document (\\documentclass / \\begin{document} present) but texMode is "fragment" with no frozen template available. Set texMode: standalone (node outputContract — init_run normalizes assembly nodes — or the texMode argument to record_acceptance / tex_check) so the document compiles directly.']
+    record.violations = record.errors
+    return record
+  }
   if (!staticResult.ok) {
-    record.errors = staticResult.errors
+    // The static-error message still carries the derived declared object for
+    // copy-paste fixes of the other error kinds (SOD #3).
+    record.errors = [...staticResult.errors, 'derived declared: ' + JSON.stringify(record.derivedDeclared) + ' (copy it into the contract declared list to clear the drift warnings)']
+    record.violations = record.errors
     return record
   }
   if (subprocessService === undefined) {
@@ -3912,8 +4030,7 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     return record
   }
   if (texMode === 'fragment') {
-    const templateRel = opts.templatePath ?? contract.verification?.templatePath
-    if (typeof templateRel !== 'string' || !templateRel.trim()) {
+    if (!hasTemplate) {
       record.errors = ['fragment mode requires a frozen project template (contract.verification.templatePath)']
       return record
     }
@@ -6146,7 +6263,17 @@ const ORCHESTRATOR_PLUGIN = {
       const contract = contractFile.contract
       const outputName = contract.artifactFormat === 'tex' ? 'output.tex' : 'final.md'
       const outputHash = await hashFile(fops, pathutil.resolveInside(runDir, outputName))
-      if (!outputHash) throw new Error('No output artifact found for acceptance: ' + outputName)
+      if (!outputHash) {
+        // Opaque blocker → recipe (SOD #1): name the precondition, list the
+        // candidate files actually present, and share the missing-source
+        // diagnostic (SOD #9).
+        const diagnostic = await missingSourceDiagnostic(fops, runDir, outputName)
+        if (outputName === 'output.tex') {
+          const candidates = await listPassTexCandidates(fops, runDir)
+          throw new Error(diagnostic + ' Precondition: promote the judged winner first — call autoresearch_promote_artifact with destinationPath "output.tex"' + (candidates.length > 0 ? ' using one of the candidate files present: ' + candidates.join(', ') + '.' : ' (no pass_*/*.tex candidate files were found in the run directory).'))
+        }
+        throw new Error(diagnostic)
+      }
       let tex = null
       if (contract.artifactFormat === 'tex') {
         tex = await validateNodeTex(fops, subprocess, baseDir, runDir, contract, {
@@ -6159,6 +6286,10 @@ const ORCHESTRATOR_PLUGIN = {
         }
       }
       const classification = args.artifactClassification ? core.classifyArtifact(args.artifactClassification) : null
+      // Derived declared is the source of truth (SOD #3): record the scan and
+      // the contract-drift warnings in the receipt.
+      const derivedDeclared = tex ? tex.derivedDeclared : null
+      const texWarnings = tex ? (tex.warnings ?? []) : []
       const receipt = core.acceptanceReceipt({
         contract,
         criteria: args.criteria ?? [],
@@ -6168,6 +6299,8 @@ const ORCHESTRATOR_PLUGIN = {
         tex,
         outputHash,
         nodeRevision: typeof args.nodeRevision === 'number' ? args.nodeRevision : 1,
+        derivedDeclared,
+        warnings: texWarnings,
       })
       await fops.writeJson(pathutil.resolveInside(runDir, 'acceptance.json'), receipt)
       return {
@@ -6534,7 +6667,8 @@ const ORCHESTRATOR_PLUGIN = {
       const fops = makeFops(baseDir)
       const runDir = args.runDir ? abs(baseDir, args.runDir) : baseDir
       const finalTexPath = pathutil.resolveInside(runDir, 'final.tex')
-      const finalTex = await readFileSafe(fops, finalTexPath)
+      const finalTexExists = await fops.exists(finalTexPath)
+      const finalTex = finalTexExists ? await readFileSafe(fops, finalTexPath) : ''
       let bibliographyKeys = Array.isArray(args.bibliographyKeys) ? args.bibliographyKeys : []
       if (!bibliographyKeys.length && typeof args.bibliographyPath === 'string' && args.bibliographyPath.trim()) {
         const bibPath = await resolveInput(fops, baseDir, runDir, args.bibliographyPath, { mustExist: true })
@@ -6547,7 +6681,40 @@ const ORCHESTRATOR_PLUGIN = {
       const plan = args.projectId ? await projectstate.loadPlan(fops, baseDir, args.projectId, cfg.artifactRoot) : null
       const project = plan?.ok ? core.projectContract(plan.plan) : null
       const wordBudget = args.wordBudget ?? project?.finalWordBudget ?? null
-      const staticResult = core.validateFinalTexStructure(finalTex, { bibliographyKeys })
+      // Unified missing-source diagnostic (SOD #9): name the expected source,
+      // list what is present, point at latexmk -C; never attempt a build.
+      if (!finalTexExists) {
+        return {
+          ok: false,
+          staticOk: false,
+          staticErrors: [await missingSourceDiagnostic(fops, runDir, 'final.tex')],
+          citationCount: 0,
+          labelCount: 0,
+          wordBudget,
+          wordCount: null,
+          wordCountSource: null,
+          budgetOk: null,
+          compiled: false,
+          clean: false,
+          exitCode: null,
+          logHash: '',
+          flsHash: '',
+          pdfHash: '',
+          reproducible: null,
+          workspaceLocalInputs: [],
+          forbiddenInputs: [],
+          includedInputs: [],
+          unresolvedInputs: [],
+          labelCheck: { ok: false, degraded: 'final-source-missing', warnings: [] },
+        }
+      }
+      // Shared TeX file resolver (SOD #6): assemble final.tex plus resolved
+      // workspace-local \input/\include fragments for counting and the label
+      // cross-check, so modular assemblies are no longer under-counted.
+      const inputResolution = await resolveTexInputs(fops, runDir, 'final.tex')
+      const assembledText = [finalTex, ...inputResolution.files.map((file) => file.text)].join('\n')
+      const labelsUnavailable = inputResolution.unresolved.length > 0
+      const staticResult = core.validateFinalTexStructure(assembledText, { bibliographyKeys, skipLabelChecks: labelsUnavailable })
       const record = {
         ok: false,
         staticOk: staticResult.ok,
@@ -6556,6 +6723,7 @@ const ORCHESTRATOR_PLUGIN = {
         labelCount: staticResult.labelCount,
         wordBudget,
         wordCount: null,
+        wordCountSource: null,
         budgetOk: null,
         compiled: false,
         clean: false,
@@ -6566,15 +6734,55 @@ const ORCHESTRATOR_PLUGIN = {
         reproducible: null,
         workspaceLocalInputs: [],
         forbiddenInputs: [],
+        includedInputs: inputResolution.files.map((file) => file.relPath),
+        unresolvedInputs: inputResolution.unresolved,
+        labelCheck: { ok: true, degraded: labelsUnavailable ? 'fragments-unavailable' : null, warnings: [] },
+      }
+      if (labelsUnavailable) {
+        // Label cross-check (SOD #19): with fragment sources unavailable the
+        // check degrades to warnings — never a failure — and each unresolved
+        // reference names its file and owning node when identifiable.
+        const availableLabels = new Set()
+        for (const match of assembledText.matchAll(/\\label\s*\*?\s*\{([^}]+)\}/g)) availableLabels.add(match[1].trim())
+        const planNodes = plan?.ok && Array.isArray(plan.plan?.nodes) ? plan.plan.nodes : []
+        const nodeForFile = (relPath) => {
+          const base = pathutil.basename(String(relPath)).replace(/\.(tex|sty)$/i, '')
+          const node = planNodes.find((candidate) => candidate?.id === base)
+          return node ? node.id : ''
+        }
+        const scanFiles = [{ relPath: 'final.tex', text: finalTex }, ...inputResolution.files]
+        for (const file of scanFiles) {
+          for (const match of file.text.matchAll(/\\(?:ref|eqref|autoref|pageref)\s*\*?\s*\{([^}]+)\}/g)) {
+            const key = match[1].trim()
+            if (!key || availableLabels.has(key)) continue
+            const nodeId = nodeForFile(file.relPath)
+            record.labelCheck.warnings.push('Unresolved reference "' + key + '" in ' + file.relPath + (nodeId ? ' (owning node: ' + nodeId + ')' : '') + ' — fragment sources unavailable; recorded as a warning only.')
+          }
+        }
       }
       if (staticResult.ok && subprocess !== undefined) {
-        const texcount = await resolveExecutable(subprocess, 'texcount')
-        const countResult = await runSubprocess(subprocess, runDir, [texcount, '-inc', '-sum', 'final.tex'])
-        const wordCount = core.parseTexcountWords(countResult.stdout)
+        // Word count (SOD #6): texcount when available; otherwise a counted
+        // fallback over the assembled text so modular assemblies are never
+        // silently under-counted.
+        let wordCount = null
+        let wordCountSource = null
+        try {
+          const texcount = await resolveExecutable(subprocess, 'texcount')
+          const countResult = await runSubprocess(subprocess, runDir, [texcount, '-inc', '-sum', 'final.tex'])
+          wordCount = core.parseTexcountWords(countResult.stdout)
+          if (wordCount !== null) wordCountSource = 'texcount'
+        } catch {
+          wordCount = null
+        }
+        if (wordCount === null) {
+          wordCount = core.countAssembledWords(assembledText)
+          wordCountSource = 'assembled-fallback'
+        }
         record.wordCount = wordCount
-        record.budgetOk = wordCount === null || wordBudget === null ? null : wordCount <= wordBudget
-        if (wordBudget !== null && wordCount !== null && wordCount > wordBudget) {
-          record.staticErrors.push('texcount reports ' + wordCount + ' words; the project budget is ' + wordBudget + '.')
+        record.wordCountSource = wordCountSource
+        record.budgetOk = wordBudget === null ? null : wordCount <= wordBudget
+        if (wordBudget !== null && wordCount > wordBudget) {
+          record.staticErrors.push((wordCountSource === 'texcount' ? 'texcount reports ' : 'assembled word count reports ') + wordCount + ' words; the project budget is ' + wordBudget + '.')
         }
         const build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex')
         record.compiled = true
@@ -6593,7 +6801,7 @@ const ORCHESTRATOR_PLUGIN = {
           // .fls entries may be relative to the build cwd (the run dir).
           const inputPath = pathutil.isAbsolute(raw) ? pathutil.normalize(raw) : pathutil.normalize(pathutil.join(runDir, raw))
           if (inputPath.startsWith(cwdNorm + '/')) continue
-          if (inputPath.includes('/texmf-dist/') || inputPath.startsWith('/usr/local/texlive/') || inputPath.startsWith('/Library/TeX/')) continue
+          if (isTexSystemInput(inputPath)) continue
           record.forbiddenInputs.push(raw)
         }
         record.workspaceLocalInputs = inputLines.map((line) => line.slice(6).trim()).filter((p) => {
@@ -6780,5 +6988,9 @@ export const createLibraries = {
     requestRevision,
     buildUpstreamContext,
     preflightReadyNodes,
+    missingSourceDiagnostic,
+    listPassTexCandidates,
+    isTexSystemInput,
+    resolveTexInputs,
   },
 }
