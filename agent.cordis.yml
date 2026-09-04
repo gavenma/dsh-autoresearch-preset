@@ -284,8 +284,8 @@
 # Both rows consume host services only (fs/web/subagents/agents/credentials/
 # subprocess) and publish nothing, so they need no isolate realm.
 - id: tool-autoresearch
-  name: ./tools/research-orchestrator-401271f51f45.mjs
+  name: ./tools/research-orchestrator-681104ee93d2.mjs
 
 - id: tool-linear
-  name: ./tools/linear-401271f51f45.mjs
+  name: ./tools/linear-681104ee93d2.mjs
 

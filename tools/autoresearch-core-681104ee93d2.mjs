@@ -1420,14 +1420,24 @@ export function scoreBorda(params) {
     : ['A', 'AB', 'B']
   const scores = Object.fromEntries(candidateIds.map((id) => [id, 0]))
   const judgeRankings = Array.isArray(params.judgeRankings) ? params.judgeRankings : []
+  const quorumJudges = Number.isInteger(params.quorumJudges) && params.quorumJudges > 0 ? params.quorumJudges : 2
   const validRankings = []
   const invalidRankings = []
+  const degradedReasons = []
   for (const item of judgeRankings) {
-    const ranking = Array.isArray(item && item.ranking) ? item.ranking.map(String) : []
+    const hadRankingArray = Array.isArray(item && item.ranking)
+    const ranking = hadRankingArray ? item.ranking.map(String) : []
     const judge = (item && item.judge) ?? validRankings.length + invalidRankings.length + 1
     const errors = validateCandidateRanking(ranking, candidateIds)
     if (errors.length > 0) {
       invalidRankings.push({ judge, ranking, errors })
+      // GRF-2026 SOD #11: mechanical degradation criteria — (a) a judge
+      // ranking fails parsing or label mapping.
+      if (!hadRankingArray) {
+        degradedReasons.push('judge ' + judge + ': ranking unparseable (no ranking array in the judge record)')
+      } else {
+        degradedReasons.push('judge ' + judge + ': label mapping failed (' + errors.join('; ') + ')')
+      }
       continue
     }
     ranking.forEach((candidateId, index) => {
@@ -1443,6 +1453,13 @@ export function scoreBorda(params) {
     ? (selectedPriorityIndex >= 0 ? 'configured' : (configuredPriority.length > 0 ? 'fallback-first' : 'none'))
     : 'no-tie'
   const winner = tied.length === 1 ? tied[0] : (selectedPriorityIndex >= 0 ? configuredPriority[selectedPriorityIndex] : tied[0])
+  // GRF-2026 SOD #11: remaining mechanical degradation criteria —
+  // (c) fewer than 2 distinct candidates ranked, (d) all-tie scoring,
+  // (e) usable consistent rankings below the configured quorum.
+  if (candidateIds.length < 2) degradedReasons.push('fewer than 2 distinct candidates to rank')
+  if (tied.length === candidateIds.length) degradedReasons.push('all-tie: every candidate ended with the maximum score')
+  if (validRankings.length < quorumJudges) degradedReasons.push('only ' + validRankings.length + ' usable judge ranking(s); quorum requires ' + quorumJudges)
+  const degraded = degradedReasons.length > 0
   return {
     pass: params.pass,
     candidateScores: scores,
@@ -1462,6 +1479,12 @@ export function scoreBorda(params) {
     judgeRankings: validRankings,
     invalidRankings,
     notes: params.notes ?? '',
+    // Additive (SOD #11/#12): the degradation verdict and its routing.
+    // Existing consumers ignore unknown fields.
+    quorumJudges,
+    degraded,
+    degradedReasons,
+    routing: degraded ? 'critic-gate' : null,
   }
 }
 

@@ -42,7 +42,8 @@
   "judgePanel": [],
   "roleProfiles": {
     "research_planner": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_scout": {
       "model": "deepseek-official/deepseek-v4-flash"
@@ -51,13 +52,15 @@
       "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_author": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_critic": {
       "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_synthesizer": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_judge": {
       "model": "deepseek-official/deepseek-v4-flash"
@@ -75,13 +78,15 @@
       "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_abstract_writer": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_experiments_commentator": {
       "model": "deepseek-official/deepseek-v4-flash"
     },
     "research_integration_editor": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_integration_verifier": {
       "model": "deepseek-official/deepseek-v4-flash"

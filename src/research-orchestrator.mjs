@@ -404,7 +404,7 @@ function makeConfig(pathutil, util) {
       '5. Call `autoresearch_anonymize_candidates`; judges only see `judge_N_candidates.md`, never maps or original IDs; save judge prompts.',
       '6. Spawn blind judges -> save `pass_N/judge_N.md`; checkpoint with `pass_N_scoring` after all judges are saved.',
       '7. Parse rankings with `autoresearch_parse_ranking` and score with `autoresearch_score_borda`.',
-      '8. Save `pass_N/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`.',
+      '8. Save `pass_N/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`. When result.json carries `degraded: true` (unparseable or mis-mapped rankings, missing/duplicate labels, fewer than 2 candidates, all-tie, or fewer usable rankings than the quorum), the checkpoint mechanically forces the next action to the critic gate — spawn research_critic, no further judge spawns — per the result `degradedReasons`.',
       '9. If winner is A, increment consecutive A wins; otherwise reset to 0 and set incumbent to B or AB.',
       `10. Stop when consecutive A wins >= ${cfg?.convergenceThreshold ?? D.convergenceThreshold} or pass >= ${cfg?.maxPasses ?? D.maxPasses}.`,
       '',
@@ -943,17 +943,25 @@ function makeScoring(pathutil, util, config) {
     const candidateIds = util.nonEmptyStringArray(params.candidateIds, ['A', 'B', 'AB'])
     const bordaScores = util.numberArray(params.bordaScores, config.DEFAULT_CONFIG.bordaScores)
     const tieBreakPriority = util.nonEmptyStringArray(params.tieBreakPriority, config.DEFAULT_CONFIG.tieBreakPriority)
+    const quorumJudges = Number.isInteger(params.quorumJudges) && params.quorumJudges > 0 ? params.quorumJudges : 2
     const scores = Object.fromEntries(candidateIds.map((id) => [id, 0]))
     const judgeRankings = Array.isArray(params.judgeRankings) ? params.judgeRankings : []
     const validRankings = []
     const invalidRankings = []
+    const degradedReasons = []
 
     for (const item of judgeRankings) {
-      const ranking = Array.isArray(item && item.ranking) ? item.ranking.map(String) : []
+      const hadRankingArray = Array.isArray(item && item.ranking)
+      const ranking = hadRankingArray ? item.ranking.map(String) : []
       const judge = (item && item.judge) ?? validRankings.length + invalidRankings.length + 1
       const errors = validateCandidateRanking(ranking, candidateIds)
       if (errors.length > 0) {
         invalidRankings.push({ judge, ranking, errors })
+        if (!hadRankingArray) {
+          degradedReasons.push('judge ' + judge + ': ranking unparseable (no ranking array in the judge record)')
+        } else {
+          degradedReasons.push('judge ' + judge + ': label mapping failed (' + errors.join('; ') + ')')
+        }
         continue
       }
       ranking.forEach((candidateId, index) => {
@@ -966,6 +974,11 @@ function makeScoring(pathutil, util, config) {
     const tied = candidateIds.filter((id) => scores[id] === maxScore)
     const winner = tied.length === 1 ? tied[0] : (tieBreakPriority.find((id) => tied.includes(id)) ?? tied[0])
 
+    if (candidateIds.length < 2) degradedReasons.push('fewer than 2 distinct candidates to rank')
+    if (tied.length === candidateIds.length) degradedReasons.push('all-tie: every candidate ended with the maximum score')
+    if (validRankings.length < quorumJudges) degradedReasons.push('only ' + validRankings.length + ' usable judge ranking(s); quorum requires ' + quorumJudges)
+    const degraded = degradedReasons.length > 0
+
     return {
       pass: params.pass,
       candidateScores: scores,
@@ -977,6 +990,11 @@ function makeScoring(pathutil, util, config) {
       judgeRankings: validRankings,
       invalidRankings,
       notes: params.notes ?? '',
+      // Additive (SOD #11/#12): keep the legacy path consistent with core.
+      quorumJudges,
+      degraded,
+      degradedReasons,
+      routing: degraded ? 'critic-gate' : null,
     }
   }
 
@@ -4605,6 +4623,31 @@ scoring.scoreBorda = function (params) {
   return core.scoreBorda(params)
 }
 
+// ── degradation routing (GRF-2026 SOD #11/#12) ─────────────────────────────
+
+// Latest pass directory under the run that carries a result.json.
+async function latestScoredPass(fops, runDirAbs) {
+  let entries = []
+  try {
+    entries = await fops.listDir(runDirAbs)
+  } catch {
+    return null
+  }
+  let best = null
+  for (const entry of entries) {
+    if (!entry.dir || !/^pass_\d{2,}$/.test(entry.name)) continue
+    const pass = Number(entry.name.slice('pass_'.length))
+    if (!Number.isInteger(pass) || pass <= 0) continue
+    try {
+      if (!await fops.exists(pathutil.join(runDirAbs, entry.name, 'result.json'))) continue
+    } catch {
+      continue
+    }
+    if (best === null || pass > best) best = pass
+  }
+  return best
+}
+
 // ── init_run override: v2 contract binding (plan §4.3) ─────────────────────
 
 const _initRun = lifecycle.initRun
@@ -5519,7 +5562,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 5. score_borda (with tie-break provenance) ─────────────────────────
 
-    tool('autoresearch_score_borda', 'Compute Borda scores and conservative tie-breaks for AutoReason judge rankings. Records the tied set, configured priority, selected priority entry/index, and fallback status (plan §4.3).', {
+    tool('autoresearch_score_borda', 'Compute Borda scores and conservative tie-breaks for AutoReason judge rankings. Records the tied set, configured priority, selected priority entry/index, and fallback status (plan §4.3). Also records the mechanical degradation verdict (SOD #11): degraded / degradedReasons / routing, driven by unparseable or mis-mapped rankings, missing or duplicate labels, fewer than 2 candidates, all-tie scoring, or fewer usable rankings than the quorum. A degraded result routes the checkpoint to the critic gate — no further judge spawns.', {
       type: 'object', additionalProperties: true,
       properties: {
         judgeRankings: {
@@ -5537,6 +5580,7 @@ const ORCHESTRATOR_PLUGIN = {
         bordaScores: { type: 'array', items: { type: 'number' } },
         tieBreakPriority: { type: 'array', items: { type: 'string' } },
         pass: { type: 'number', description: 'Pass number.' },
+        quorumJudges: { type: 'number', description: 'Minimum usable judge rankings before the panel is degraded (default 2; pass the run config backtracking.quorumJudges value when it is set).' },
         notes: str('Optional notes recorded on the result.'),
       },
     }, async (args) => {
@@ -5589,7 +5633,32 @@ const ORCHESTRATOR_PLUGIN = {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
-      return await lifecycle.checkpointRun(fops, { ...args, runDir: abs(baseDir, args.runDir), baseDir })
+      // Deterministic degradation routing (SOD #11/#12): if the latest scored
+      // pass carries a degraded scoreBorda verdict, the checkpoint nextAction
+      // becomes the critic-gate directive — no further judge-spawn steps.
+      let checkpointArgs = args
+      const runDirAbs = abs(baseDir, args.runDir)
+      const passNo = Number.isInteger(args.currentPass) && args.currentPass > 0
+        ? args.currentPass
+        : await latestScoredPass(fops, runDirAbs)
+      if (passNo !== null) {
+        let scored = null
+        try {
+          scored = await fops.readJson(pathutil.join(runDirAbs, util.passName(passNo), 'result.json'))
+        } catch {
+          scored = null
+        }
+        if (util.isPlainObject(scored) && scored.degraded === true) {
+          const reasons = Array.isArray(scored.degradedReasons) && scored.degradedReasons.length > 0
+            ? scored.degradedReasons.join('; ')
+            : 'see pass_' + String(passNo).padStart(2, '0') + '/result.json'
+          checkpointArgs = {
+            ...args,
+            nextAction: 'CRITIC-GATE (mechanical routing): the latest scored pass (' + passNo + ') has a degraded judge panel (' + reasons + '). Spawn research_critic to arbitrate among the existing candidates or produce a new draft. Do not spawn further judges for this pass.',
+          }
+        }
+      }
+      return await lifecycle.checkpointRun(fops, { ...checkpointArgs, runDir: runDirAbs, baseDir })
     })
 
     // ── 8. presearch ───────────────────────────────────────────────────────
