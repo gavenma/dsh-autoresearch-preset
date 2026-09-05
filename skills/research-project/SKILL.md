@@ -221,13 +221,23 @@ hand-writes the plan.
 ### plan.json schema v2 (current standard)
 
 A v2 plan adds `schemaVersion: 2`, a root `projectContract`, and per-node
-`kind`/criterion IDs/verification. Every ordinary v2 node defaults to
-`artifactFormat: "tex"` and produces `output.tex` (semantic TeX fragment or
-standalone), `preview.tex` (generated wrapper for fragment mode — never
-model-authored), `node-output.json` (hash, revision, texMode, declared
+`kind`/criterion IDs/verification. Every NEW plan writes
+`projectContract.exposurePolicyVersion: 1` plus an explicit
+`projectContract.deliverables` array (possibly `[]`) — see the output policy
+section below; optional `rebuildable` (boolean, default false) and
+`diagnosticMappings` (exact internal source → `audit/` destination pairs) are
+the only other exposure fields. Every node carries a safe relative
+`outputContract.artifactPath` naming its promoted artifact; TeX fields
+(`texMode`, template) apply to TeX nodes only. Every ordinary v2 TeX node
+defaults to `artifactFormat: "tex"` and produces `output.tex` (semantic TeX
+fragment or standalone), `preview.tex` (generated wrapper for fragment mode —
+never model-authored), `node-output.json` (hash, revision, texMode, declared
 package/macro needs, contribution ledger), `acceptance.json` (the mechanical
-receipt bound to the node-contract digest), and `final.md` (the audit
-certificate, not the product). Strict TeX validation (static rules +
+receipt bound to the node-contract digest, recording the accepted artifact's
+path/format/hash and, for TeX, the verified `finalBuild` record), and
+`final.md` (the audit certificate, not the product). Markdown nodes produce
+their declared artifact (e.g. `final.md` or a custom `artifactPath`) and run
+no TeX validation. Strict TeX validation (static rules +
 `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error
 -recorder`, never `-f`) runs at node acceptance, not only at integration. A
 nonzero compiler exit can never pass.
@@ -461,55 +471,102 @@ workspace and session, not just the one where they were first hit:
    condition, and never silently edit a protected file to "fix" it — surface it
    for explicit authorization.
 
-## Output policy (finalize, v5 — single source of truth)
+## Output policy (finalize, v8 — single source of truth)
 
-`autoresearch_finalize_run` is one self-consistent finish step; the output
-policy it applies is:
+`autoresearch_finalize_run` is one self-consistent finish step. The policy is
+**exposure-driven and format-agnostic**: publish only the files the contract
+says the user needs, plus the minimal source-support files that keep an
+exposed source usable; everything else stays internal, and format-specific
+validation applies only to the exposed artifacts that need it. No filename
+extension is universal: a project may expose a PDF, a Markdown report, a TeX
+source bundle, or nothing at all.
 
-- **`outputs/<projectId>/` is the only user-facing publish target for a v2
-  project.** Bound v2 runs never create per-issue folders (`GAV-*` style
-  `outputs/<issueId>/` is unbound/legacy behavior only). Intermediate node
-  artifacts stay hidden in `.research-agent/runs/…` and reach the user only as
-  resolved inputs of the project-level set.
-- **The publish set is explicit plus build-derived.** `projectContract.deliverables`
-  is the one declarative list of user-facing files and must include every
-  requested companion (e.g. `final.tex`, `final.pdf`, `references.bib`,
-  `process-issues.md`, `figure-dossier.tex`) — safe relative file paths only;
-  no globs, no directory recursion. There is **no `companions.json` and no
-  filename-pattern discovery**: stage a companion in a node run directory
-  before acceptance and list it in the contract. For TeX, finalize also
-  derives the rebuild closure from the accepted `final.fls` (or the shared
-  resolver when the recorder is missing/stale — `closureSource: "resolver"` in
-  the manifest) and unions `\bibliography`/`\addbibresource` sources across the
-  resolved inputs, so fragments, graphics, styles, and `.bib` files cannot be
-  forgotten.
-- **Naming rule:** `output.tex` remains the canonical node artifact; the
-  integration product is `final.tex`/`final.pdf` at the project root, and the
-  integration node's `output.tex`/`output.pdf` publish only as
-  `audit/audit-certificate.tex`/`audit-certificate.pdf`. Users never see a bare
-  `output.*`.
-- **Standard layout:**
+### Exposure decision (marker = `projectContract.exposurePolicyVersion: 1`)
+
+| Contract state | New v2 (marker present) | Legacy v2 (marker absent, approved) |
+|---|---|---|
+| `deliverables` non-empty array | Expose exactly those paths, after validation | Same, parsing legacy `label: path (note)` entries |
+| `deliverables` explicit `[]`, no diagnostic mappings | `skipped`; no project folder created | Same |
+| `deliverables` `[]` + diagnostic mappings | Publish only the mapped `audit/` files | Same |
+| `deliverables` omitted | Rejected at plan validation — never guess | Frozen adapter: TeX → `final.tex` + `final.pdf`, Markdown → `final.md`; `sourceRule: legacy-adapter`, nothing else |
+
+Every NEW plan writes `exposurePolicyVersion: 1` and an explicit
+`deliverables` array (even `[]`). The marker is never backfilled into
+already-approved plans.
+
+### What the policy publishes
+
+- **`projectContract.deliverables` is the sole user-authored exposure
+  request.** Safe relative file paths only (entry grammar: `path`,
+  `path (note)`, or `label: path (note)`; the label/note is recorded in the
+  manifest, never used as a path). No globs, no directory expansion, no
+  filename-pattern discovery, no `companions.json`, no extension
+  substitution. A requested companion (`references.bib`, `process-issues.md`,
+  `figure-dossier.tex`, …) is just another entry in this list — stage it in a
+  node run directory before acceptance, and it is resolved in the fixed order
+  integration run dir → node run dirs in plan order → workspace root.
+- **One user-facing folder: `outputs/<projectId>/`.** Bound v2 runs never
+  create per-issue folders (`outputs/<issueId>/` is unbound/legacy behavior
+  only), and a bound non-integration node finalizes with no visible output at
+  all. Empty exposure with no mappings → finalize records `skipped` and
+  creates no folder.
+- **Source support follows an exposed source, not a format.** When an exposed
+  TeX master references local `\input`/`\include` targets or graphics, the
+  minimal local closure is published as `source-support` entries even when
+  `rebuildable` is false — and a missing input or an unresolved
+  `\ref`/`\eqref` target FAILS publication, because the user's source must
+  not be knowingly broken. A PDF-only or Markdown exposure gets no synthetic
+  source closure and no TeX checks at all.
+- **Full rebuild closure is opt-in.** `projectContract.rebuildable: true`
+  (TeX only; requires an exposed `.tex` deliverable) additionally requires the
+  accepted `finalBuild` record (`sourcePath`/`sourceHash`/`flsPath`/`flsHash`,
+  plus the PDF pair when a PDF is exposed), consumes every local non-system
+  `INPUT` from that trusted recorder (fragments, graphics, styles — not just
+  `.bib`), and unions `\bibliography`/`\addbibresource` sources across the
+  master and resolved inputs. Every recorded hash is re-verified before
+  publication; outside-root inputs are a non-relocatable failure.
+- **Internal evidence is exposed only by explicit mapping.**
+  `projectContract.diagnosticMappings` is an array of exact
+  `{ sourcePath, destinationPath }` pairs whose destination must be under
+  `audit/`. It is the only way run-internals such as the integration node's
+  `output.tex` (the audit certificate) can reach the user. Receipts, ledgers,
+  logs, previews, and compiler byproducts remain under
+  `.research-agent/runs/` by default.
+- **Standard layout when exposure is non-empty:**
 
   ```
   outputs/<projectId>/
-    final.pdf               <- primary compiled deliverable
-    final.tex               <- master source (\input's the fragments)
-    <other declared files>  <- preserved relative paths
-    <resolved TeX inputs>   <- fragments/figures needed to rebuild
-    audit/
-      audit-certificate.tex <- integration output.tex, renamed
-      audit-certificate.pdf <- integration output.pdf, when present
-      acceptance/<nodeId>.json <- acceptance receipt per accepted node
-      ledgers/<nodeId>.json    <- node-output.json per accepted node
-    MANIFEST.json           <- every path: source, rule, SHA-256, warnings
+    <declared deliverables>  <- exact paths from projectContract.deliverables
+    <source-support files>   <- only when a TeX source is exposed
+    <rebuild inputs>         <- only when rebuildable: true
+    audit/                   <- only via explicit diagnosticMappings
+    MANIFEST.json            <- every path: source, rule, SHA-256, warnings
   ```
 
-- **Fail closed, preserve the rest.** Missing or conflicting declared/closure
-  files, unsafe paths (traversal, absolute, symlinks, directories), and
-  unmanaged destination files with different content fail BEFORE anything is
-  written; the previous destination stays intact and the result names the
-  exact path to produce. Re-finalizing with unchanged content changes neither
-  managed content nor unrelated user files.
+- **`MANIFEST.json` makes the tree self-describing.** Every exposed path is
+  attributed to its `sourceRule` (`declared`, `source-support`, `rebuild`,
+  `audit`, or `legacy-adapter`) with `requiredBy`, the recorded label/note,
+  and a SHA-256 hash; the manifest also records `policyVersion`,
+  `projectId`, `planRevision`, the integration run, the selected artifact
+  format, and the `rebuildable` mode. Pre-existing destination files that are
+  not managed are inventoried under `preservedExisting` with their hashes —
+  they are never deleted, pruned, or silently clobbered.
+- **Fail closed, transactional, idempotent.** An unsafe project id, an unsafe
+  or missing explicit file, a conflicting hash, a symlink, a directory, or an
+  unmanaged destination file with different content fails BEFORE anything is
+  written, and a failed requested publish propagates as a finalize error
+  (never `ok: false` inside a success). Publication stages in a hidden
+  owner-marked sibling under `outputs/` (same filesystem), installs through a
+  rollback journal (back up → install → manifest last → restore on failure),
+  and recovers an interrupted transaction before the next finalize. A
+  re-finalize with unchanged content changes neither managed content nor
+  timestamps, and leaves unrelated sentinel files alone.
+- **Scratch never lives in `outputs/`.** Compiler byproducts, preview images,
+  candidate trees, caches, retry output, and the publish staging itself live
+  in run-owned temporary paths with owner markers and bounded retention
+  (default 24h TTL, 15-minute lease grace); cleanup runs at run
+  start/finalize/recovery boundaries, is owner- and confinement-checked, and
+  never sweeps an unrelated path.
 
 ## Per-node AutoReason loop (the loop every node runs)
 
@@ -603,8 +660,17 @@ Do not spawn any role until the user confirms.
 8. The runner owns bounded retry. Do not launch a second coordinator-level role call for the same `logicalGroupKey`. for judges, stop
    if fewer than 2 valid rankings remain; otherwise surface the runner failure and never accept partial output.
 9. Never fabricate sources; `autoresearch_redact_check` before posting.
-10. TeX hygiene: scratch and temp files live under the run directory — never
-    write build scratch to `/tmp`. Clean build outputs only with
+10. Scratch ownership: build scratch and temp files live under the run
+     directory or in owned run/attempt temporary paths — never in `outputs/`,
+     in `/tmp`, or in an arbitrary shared path. Pipeline-owned scratch
+     (preview rendering, format validators, role retries, publish
+     staging/journals) is lifecycle-managed: every owned directory carries an
+     owner marker with bounded retention (24h default TTL, 15-minute lease
+     grace); successful scratch is removed after its consumers finish, and a
+     failure retains only a bounded diagnostic reference before expiry.
+     Non-TeX roles follow the same ownership and cleanup rule without TeX
+     commands.
+11. TeX hygiene: clean build outputs only with
     `latexmk -C`; never use raw `rm` on `.aux`/`.log`/`.pdf`/`pass_*` build
     artifacts (an `rm` of sources is caught by the missing-source diagnostic at
     the next gate, but raw `rm` of build outputs silently produces stale-aux

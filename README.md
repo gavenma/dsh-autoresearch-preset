@@ -78,16 +78,19 @@ deliverable is published to `outputs/`.
 
 **6. Where things live.** All internal work — the approved plan, per-step
 checklists, drafts, evidence, and a journal of what was verified when — stays
-in a hidden `.research-agent/` folder in your project workspace. Only finished,
+in a hidden `.research-agent/` folder in your project workspace. Finished,
 user-facing deliverables are published to `outputs/`, and a project publishes
-exactly one folder: `outputs/<projectId>/`. It holds the primary
-`final.pdf`/`final.tex`, every companion the project contract declares
-(`references.bib`, `process-issues.md`, …), the fragments and graphics needed
-to rebuild the PDF, an `audit/` folder with the acceptance receipts,
-contribution ledgers, and the audit certificate, and a `MANIFEST.json` that
-attributes every published file with its source and hash. The plan is immutable
-after approval and the journal is append-only, so you can always reconstruct
-what happened and why.
+at most one folder: `outputs/<projectId>/`. What it holds is decided by the
+plan's project contract, not by filename convention: the explicit
+`deliverables` list (a compiled PDF or report, a TeX source if the project
+asks for one, companions like `references.bib` or `process-issues.md`), the
+minimal supporting files an exposed TeX source needs to stay usable, and —
+only when the project opts into a reproducible source package — the full
+rebuild closure; plus a `MANIFEST.json` that attributes every published file
+with its source, rule, and hash. Nothing is published that the contract does
+not name, and a project that declares no deliverables gets no folder at all.
+The plan is immutable after approval and the journal is append-only, so you
+can always reconstruct what happened and why.
 
 **7. Linear is a window, not the engine.** If you connect Linear (see Quick
 start), each plan step gets an issue that the agent updates as work

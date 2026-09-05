@@ -171,6 +171,7 @@ v2 revision.
   "integrationId": "integration",
   "projectContract": {
     "goal": "<one-sentence project goal>",
+    "exposurePolicyVersion": 1,
     "deliverables": ["final.tex", "final.pdf", "references.bib", "process-issues.md"],
     "acceptance": [
       { "id": "PAC-01", "text": "<mechanical project criterion>", "required": true, "check": { "type": "all-current-node-receipts" } }
@@ -192,7 +193,7 @@ v2 revision.
       "test": "<how acceptance is verified>",
       "artifactFormat": "tex",
       "verification": { "templatePath": "templates/manuscript.tex" },
-      "outputContract": { "texMode": "fragment", "declared": { "packages": [], "macros": [], "inputs": [], "graphics": [], "bibliographies": [] } },
+      "outputContract": { "artifactPath": "output.tex", "texMode": "fragment", "declared": { "packages": [], "macros": [], "inputs": [], "graphics": [], "bibliographies": [] } },
       "budget": { "numScouts": 1, "numJudges": 2, "maxPasses": 1, "convergenceThreshold": 2 },
       "dependsOn": []
     }
@@ -208,16 +209,51 @@ research_integration_editor + research_integration_verifier and zero
 scout/judge counts, and its `dependsOn` covers ALL leaves. For document
 rewrites, decompose per section/component plus one assembly node
 (kind "assembly"), with the integration node re-verifying the assembled
-whole. The assembly node's `outputContract` must set `"texMode": "standalone"`
-(it merges complete documents that compile on their own; the contract
-derivation defaults omitted assembly texMode to standalone, but write it
-explicitly so the plan documents the choice). Prefer TeX artifacts for every
-node; `artifactFormat: "markdown"` is an explicit non-TeX exception that must
-be justified in the rationale. `projectContract.deliverables` is the one
-declarative list of user-facing files: include every requested companion
-(e.g. `references.bib`, `process-issues.md`, `figure-dossier.tex`) as safe
-relative file paths — no globs or directories, and no `companions.json` or
-filename-pattern discovery exists; finalize publishes exactly this list plus
-the build-derived rebuild closure to `outputs/<projectId>/` (see the output
-policy in skills/research-project/SKILL.md).
+whole. Every node's `outputContract` carries `artifactPath` — the safe
+relative path of the promoted artifact (`output.tex` for TeX nodes, the
+report path for Markdown nodes, or another explicit name).
+
+### Project exposure (what the user receives)
+
+Every new v2 plan writes `projectContract.exposurePolicyVersion: 1` and an
+**explicit** `projectContract.deliverables` array. That list is the ONE
+declaration of the files the user receives — safe relative file paths, entry
+grammar `path`, `path (note)`, or `label: path (note)`:
+
+- List every user-facing file the brief asks for, in the format the brief
+  asks for: a compiled PDF, a Markdown report, a TeX master source, and any
+  requested companions (`references.bib`, `process-issues.md`,
+  `figure-dossier.tex`, …). No globs, no directories, no extension guessing,
+  no `companions.json`, and no filename-pattern discovery — nothing else is
+  published. `[]` is the valid no-exposure value for a project that
+  legitimately has no user-facing product (finalize records `skipped` and
+  creates no project folder).
+- **Never emit a universal `final.tex`/`final.pdf` default and never force
+  TeX fields on non-TeX nodes.** TeX nodes receive `texMode`/template fields;
+  Markdown nodes receive neither, and a Markdown or PDF-only exposure has no
+  `.tex`/`.fls`/`.bib` requirement. `artifactFormat: "markdown"` is a fully
+  supported choice for prose/report nodes — state it in the rationale when
+  it is the non-default for the project.
+- The assembly node's `outputContract` must set `"texMode": "standalone"`
+  (it merges complete documents that compile on their own; the contract
+  derivation defaults omitted assembly texMode to standalone, but write it
+  explicitly so the plan documents the choice).
+- Optional `rebuildable: true` (TeX only, and only with an exposed `.tex`
+  deliverable) asks for a fully reproducible source package — the accepted
+  final build's recorder closure plus the parsed bibliography union, all
+  hash-verified at finalize. Set it only when the user needs to rebuild the
+  exposed source from the published folder alone.
+- Optional `diagnosticMappings` is an array of exact
+  `{ "sourcePath", "destinationPath" }` objects that expose selected internal
+  evidence — for example the integration `output.tex`/`output.pdf` audit
+  certificate to `audit/audit-certificate.tex`/`.pdf`. Destinations must be
+  under `audit/`; sources are exact run-relative paths, never patterns.
+
+Finalize resolves `deliverables` in the fixed order integration run dir →
+node run dirs in plan order → workspace root, publishes the exact declared
+set to `outputs/<projectId>/`, adds the minimal `source-support` closure for
+any exposed TeX master (a missing input or unresolved label fails
+publication), and — only when `rebuildable: true` — the full rebuild closure.
+See the "Output policy (finalize, v8)" section of
+skills/research-project/SKILL.md for the complete policy.
 

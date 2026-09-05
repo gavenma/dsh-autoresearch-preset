@@ -133,14 +133,26 @@ names in prose, standardize on the `\verb|\command|` form — for example
 a raw `\i` in running text would eat the following character, and backticks are
 not portable TeX verbatim.
 
-## Project companions (output policy)
+## Project exposure (output policy)
 
-Every user-facing file the project needs beyond the master document
-(`references.bib`, `process-issues.md`, `figure-dossier.tex`, …) must be
-staged in a node run directory before acceptance AND listed in
-`projectContract.deliverables` as a safe relative path. There is no
+The user-facing files are declared exactly once, in
+`projectContract.deliverables` (safe relative file paths; entry grammar
+`path`, `path (note)`, or `label: path (note)`). Every user-facing file the
+project needs beyond the master document — companions like `references.bib`,
+`process-issues.md`, `figure-dossier.tex` — must be STAGED in a node run
+directory before acceptance AND listed in the contract. There is no
 `companions.json` and no filename-pattern discovery: anything not in the
-declared list is not published. Finalize publishes the declared list plus the
-build-derived rebuild closure to `outputs/<projectId>/` and the evidence set
-under `audit/` — see the "Output policy (finalize, v5)" section of
-skills/research-project/SKILL.md.
+declared list is not published, and the project's format is whatever the
+contract exposes — a Markdown or PDF-only product has no TeX requirement.
+
+Finalize applies the exposure policy (see the "Output policy (finalize, v8)"
+section of skills/research-project/SKILL.md): the declared list goes to
+`outputs/<projectId>/` at its exact declared paths; an exposed TeX master
+pulls its minimal local source-support closure (inputs, graphics, labels —
+missing ones fail publication), so stage every fragment the master
+references into the integration run directory before acceptance;
+`rebuildable: true` (TeX only) additionally publishes the accepted
+final-build closure and the bibliography union; internal evidence reaches
+the user only through explicit `diagnosticMappings` entries under `audit/`.
+Scratch and compiler byproducts stay in owned temporary paths — never in
+`outputs/`.

@@ -512,7 +512,7 @@ Standards: (1) one node = one self-contained work item with one explicit purpose
 
 Node roles are drawn from the 7 pipeline roles only (research_scout, evidence_verifier, research_author, research_critic, research_synthesizer, research_judge, research_reporter, plus configured roleProfiles — not research_planner).
 
-Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, deliverables (safe relative file paths of EVERY user-facing file, including requested companions like references.bib or process-issues.md — no globs, no companions.json, no filename-pattern discovery; finalize publishes this list plus the build-derived rebuild closure to outputs/<projectId>/), acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
+Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, exposurePolicyVersion: 1 (MANDATORY for every new plan), deliverables (an EXPLICIT array — the sole exposure request — of safe relative file paths of EVERY user-facing file the brief asks for, including requested companions like references.bib or process-issues.md; [] is the valid no-exposure value; no globs, no extension guessing, no companions.json, no filename-pattern discovery, and never a universal final.tex/final.pdf default — the format is whatever the brief asks for; optional rebuildable: true (TeX only, requires an exposed .tex deliverable) asks for a fully reproducible source package; optional diagnosticMappings exposes selected internal evidence under audit/), acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat (tex or markdown; TeX fields below apply to TeX nodes only — Markdown nodes never receive texMode or a template)/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { artifactPath (safe relative path of the promoted artifact), texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
 `,
 
     research_scout: `You are a research scout.
@@ -3899,14 +3899,18 @@ async function renderPreview(fops, subprocessService, baseDir, runDir, opts = {}
 // source file, lists what is actually present in the run directory, and — when
 // orphaned build artifacts suggest a stale in-place build — points at
 // `latexmk -C` as the sanctioned cleanup tool.
-async function missingSourceDiagnostic(fops, runDir, expectedRel) {
+async function missingSourceDiagnostic(fops, runDir, expectedRel, opts = {}) {
+  const format = opts.format ?? 'tex'
   const parts = ['Expected output source "' + expectedRel + '" is missing from the run directory.']
+  if (format !== 'tex') parts.push('(Artifact format: ' + format + ' — no LaTeX tooling applies.)')
   let entries = []
   try { entries = (await fops.listDir(runDir)).map((entry) => entry.name) } catch { entries = [] }
   parts.push('Directory contains: ' + (entries.length > 0 ? entries.join(', ') : '(empty)'))
-  const buildArtifacts = entries.filter((name) => /\.(log|fls|aux|out|toc|lof|lot|pdf)$/i.test(name))
-  if (buildArtifacts.length > 0) {
-    parts.push('Orphaned build artifacts are present (' + buildArtifacts.slice(0, 10).join(', ') + '); the directory looks like a stale in-place build. Sanctioned cleanup is `latexmk -C` in the run directory, never raw rm of build outputs, then recompile.')
+  if (format === 'tex') {
+    const buildArtifacts = entries.filter((name) => /\.(log|fls|aux|out|toc|lof|lot|pdf)$/i.test(name))
+    if (buildArtifacts.length > 0) {
+      parts.push('Orphaned build artifacts are present (' + buildArtifacts.slice(0, 10).join(', ') + '); the directory looks like a stale in-place build. Sanctioned cleanup is `latexmk -C` in the run directory, never raw rm of build outputs, then recompile.')
+    }
   }
   return parts.join(' ')
 }
@@ -3926,6 +3930,152 @@ async function listPassTexCandidates(fops, runDir) {
     }
   }
   return candidates.sort()
+}
+
+// ── exposed-TeX source usability (plan WS1 v8 item 7) ──────────────────────
+// When the project's exposure set includes a TeX source, the exposed master's
+// local inputs and labels must resolve as an ACCEPTANCE PRECONDITION — even
+// when no reproducible source package is requested. Internal (non-exposed)
+// TeX sources keep the warning-only behavior of tex_final_check.
+
+// Minimal deliverable-spec path extraction (full grammar lives in
+// core.parseDeliverableSpec, plan WS4 item 2): strip an optional
+// "label: " prefix and a trailing " (note)" suffix.
+function deliverableEntryPath(entry) {
+  if (typeof entry !== 'string') return null
+  let rest = entry.trim()
+  const colon = rest.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/)
+  if (colon) rest = colon[2]
+  const note = rest.match(/^(.*?)\s*\(([^()]*)\)$/)
+  if (note) rest = note[1]
+  const path = rest.trim()
+  return core.isSafeRelFilePath(path) ? path : null
+}
+
+// Identify the node that owns a missing input file or an undefined label,
+// so the diagnostic names the owner when identifiable (bounded scan of the
+// node run dirs from state.json).
+async function identifyOwnerNode(fops, baseDir, plan, contractFile, currentNodeId, probe) {
+  const loadedState = await projectstate.loadState(fops, baseDir, plan.projectId, plan, contractFile.artifactRoot || 'research-agent')
+  const nodes = loadedState.state?.nodes ?? {}
+  for (const node of plan.nodes ?? []) {
+    if (node.id === currentNodeId) continue
+    const stateEntry = nodes[node.id]
+    if (!stateEntry || typeof stateEntry.runDir !== 'string' || !stateEntry.runDir) continue
+    let runDirAbs = ''
+    try { runDirAbs = pathutil.resolve(baseDir, pathutil.resolveInside(baseDir, stateEntry.runDir)) } catch { continue }
+    try {
+      if (probe.kind === 'input') {
+        const names = [probe.target, probe.target.replace(/\.tex$/i, '') + '.tex']
+        for (const name of new Set(names)) {
+          let ok = false
+          try { ok = await fops.exists(pathutil.join(runDirAbs, name)) } catch { ok = false }
+          if (ok) return node.id
+        }
+      } else if (probe.kind === 'label') {
+        const nodeContract = (plan.nodes ?? []).find((entry) => entry.id === node.id)
+        const artifactRel = (typeof nodeContract?.outputContract?.artifactPath === 'string' && nodeContract.outputContract.artifactPath.trim())
+          ? nodeContract.outputContract.artifactPath.trim()
+          : ((nodeContract?.artifactFormat ?? 'tex') === 'tex' ? 'output.tex' : 'final.md')
+        let text = ''
+        try { text = await fops.readText(pathutil.join(runDirAbs, artifactRel)) } catch { text = '' }
+        if (new RegExp('\\\\label\\s*\\{\\s*' + probe.target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\}').test(text)) return node.id
+      }
+    } catch {}
+  }
+  return null
+}
+
+// The exposed TeX master's run-relative path (marker plan: first declared
+// .tex deliverable; legacy adapter: final.tex), or null when the project
+// exposes no TeX source.
+function exposedTexMasterRel(plan) {
+  if (plan) {
+    const pc = core.projectContract(plan)
+    if (pc.exposurePolicyVersion === 1) {
+      const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
+      return texPaths.length > 0 ? texPaths[0] : null
+    }
+  }
+  return 'final.tex'
+}
+
+// Acceptance precondition for the exposed TeX master (integration node):
+// local \input/\include targets must exist in the integration run dir and
+// every \ref/\eqref in the master must resolve to a \label in the master or
+// a resolvable fragment — even without a reproducible source package. A
+// master file that is absent at acceptance is a publish problem (the
+// declared deliverable is missing) and is reported there. Returns
+// { ok, errors }.
+async function exposedSourceUsability(fops, baseDir, runDir, contract, contractFile, { plan }) {
+  if (contract.artifactFormat !== 'tex') return { ok: true, errors: [] }
+  const integrationId = plan ? (plan.integrationId ?? 'integration') : 'integration'
+  if (contract.nodeId !== integrationId) return { ok: true, errors: [] }
+  // Does the project expose a TeX source? Marker plans: parsed deliverables.
+  // Legacy (marker absent): the frozen adapter selector exposes final.tex —
+  // and an unreadable plan keeps that conservative default rather than
+  // skipping the check.
+  const masterRel = exposedTexMasterRel(plan)
+  if (masterRel === null) return { ok: true, errors: [] }
+  let masterExists = false
+  try { masterExists = await fops.exists(pathutil.join(runDir, masterRel)) } catch { masterExists = false }
+  if (!masterExists) return { ok: true, errors: [] }
+  const errors = []
+  const masterText = await readFileSafe(fops, pathutil.join(runDir, masterRel))
+  const resolved = await resolveTexInputs(fops, runDir, masterRel)
+  for (const target of resolved.unresolved) {
+    const owner = await identifyOwnerNode(fops, baseDir, plan, contractFile, contract.nodeId, { kind: 'input', target })
+    errors.push('missing local input for the exposed TeX source ' + masterRel + ': ' + target
+      + (owner ? ' (found in node ' + owner + ': stage it into the integration run directory before acceptance)' : ' (not found in any node run directory)') + '.')
+  }
+  const labels = new Set()
+  const collect = (text) => { for (const m of String(text).matchAll(/\\label\s*\{([^}]+)\}/g)) labels.add(m[1].trim()) }
+  collect(masterText)
+  for (const file of resolved.files) collect(file.text)
+  for (const m of String(masterText).matchAll(/\\(?:eq)?ref\s*\{([^}]+)\}/g)) {
+    const target = m[1].trim()
+    if (labels.has(target)) continue
+    const owner = await identifyOwnerNode(fops, baseDir, plan, contractFile, contract.nodeId, { kind: 'label', target })
+    errors.push('unresolved \\ref target "' + target + '" in the exposed TeX source ' + masterRel
+      + (owner ? ' (the label is defined in node ' + owner + ': include its fragment or move the reference)' : '') + '.')
+  }
+  return { ok: errors.length === 0, errors }
+}
+
+// Plan WS4 (v8): capture the verified final build for a TeX run. The record
+// { sourcePath, sourceHash, flsPath?, flsHash?, pdfPath?, pdfHash? } names
+// the exposed final master (marker plan: first declared .tex deliverable;
+// legacy: final.tex), its recorder (<stem>.fls), and the exposed PDF. Fields
+// are present only for files that exist; publish-time rebuildable: true
+// re-hashes every recorded field.
+async function captureFinalBuild(fops, runDirAbs, plan) {
+  let sourceRel = 'final.tex'
+  let pdfRel = 'final.pdf'
+  if (plan) {
+    const pc = core.projectContract(plan)
+    if (pc.exposurePolicyVersion === 1) {
+      const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
+      if (texPaths.length > 0) sourceRel = texPaths[0]
+      const pdfPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.pdf'))
+      if (pdfPaths.length > 0) pdfRel = pdfPaths[0]
+    }
+  }
+  const sourceAbs = pathutil.join(runDirAbs, sourceRel)
+  const sourceHash = await hashFile(fops, sourceAbs)
+  if (sourceHash === '') return null
+  const record = { sourcePath: sourceRel, sourceHash }
+  const flsRel = sourceRel.replace(/\.tex$/i, '') + '.fls'
+  const flsHash = await hashFile(fops, pathutil.join(runDirAbs, flsRel))
+  if (flsHash !== '') {
+    record.flsPath = flsRel
+    record.flsHash = flsHash
+  }
+  const pdfHash = await hashFile(fops, pathutil.join(runDirAbs, pdfRel))
+  if (pdfHash !== '') {
+    record.pdfPath = pdfRel
+    record.pdfHash = pdfHash
+  }
+  return record
 }
 
 // TeX system input paths allowed in a .fls without a workspace-local failure
@@ -4682,6 +4832,10 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
     planRevision: validation.revision,
     contractDigest: contract.digest,
     artifactFormat: contract.artifactFormat,
+    // Plan WS4 (v8): copy the exposure marker from the approved plan so the
+    // bound run can distinguish new-policy from frozen-adapter publishing
+    // even if the plan file later revises. Marker absent (null) = legacy.
+    exposurePolicyVersion: util.isPlainObject(plan.plan.projectContract) && plan.plan.projectContract.exposurePolicyVersion === 1 ? 1 : null,
     writtenAt: new Date().toISOString(),
     contract,
   }
@@ -4726,10 +4880,30 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
       await fops.writeJson(configPath, synced)
     }
   }
+  // Plan WS4 (v8 item 5): run-start temp boundary. Recover this run's own
+  // abandoned transaction staging (same owner = same issue) from a crashed
+  // retry. Cleanup failures are reported, never fatal.
+  const cleanupReport = await (async () => {
+    try {
+      const outputRoot = typeof run?.outputRoot === 'string' && run.outputRoot.trim()
+        ? run.outputRoot
+        : typeof run?.config?.outputRoot === 'string' && run.config.outputRoot.trim()
+          ? run.config.outputRoot
+          : 'outputs'
+      let outputsAbs
+      try { outputsAbs = pathutil.resolve(baseDir, outputRoot) } catch { outputsAbs = null }
+      if (!outputsAbs) return null
+      const owner = typeof run?.issueId === 'string' && run.issueId ? run.issueId : pathutil.basename(runDir)
+      return await cleanupTempOwners(fops, baseDir, outputsAbs, { ownerId: owner, runId: owner })
+    } catch {
+      return null
+    }
+  })()
   return {
     ...result,
     contract: run.contract ?? { bound: true, projectId, nodeId, planRevision: validation.revision, contractDigest: contract.digest, schemaVersion: 2, artifactFormat: contract.artifactFormat },
     unbound: false,
+    tempCleanup: cleanupReport,
     instruction: 'Contract-bound run: node-contract.json written with digest ' + contract.digest + '. Every role task, acceptance, and finalization is bound to this contract.',
   }
 }
@@ -4776,25 +4950,37 @@ async function publishFinalDeliverables(fops, baseDir, runDir, run, contractFile
   return published
 }
 
-// ── output policy v5 (plan WS4; GRF-2026 SOD #23/#24/#25 + user review) ────
+// ── output policy v8 (plan WS4; exposure-driven, format-agnostic) ──────────
 // finalize is one self-consistent finish step:
 //   1. Journal sync — after the acceptance gate passes, MERGE into the
 //      state.json node entry (status done, runDir, runStatus complete,
 //      receipts triple, updatedAt). Every other field is preserved; the write
 //      is idempotent (only on change).
-//   2. Project-level publish to outputs/<projectId>/ — the explicit
-//      projectContract.deliverables list plus the build-derived closure
-//      (accepted final.fls, or the shared resolver when the recorder is
-//      missing/stale), the .bib union across resolved inputs, the
-//      deterministic denylist, and the audit/ evidence set. MANIFEST.json is
-//      written last and every path is attributable (declared|fls|bib|resolver
-//      |primary|audit|receipt|ledger) with a SHA-256 hash.
-//   3. Per-issue outputs/<issueId>/ publishing applies to unbound/legacy runs
-//      only. A bound v2 non-integration run creates no visible folder; its
-//      artifact, receipt, and ledger stay in the hidden run directory until
-//      integration consumes them.
-// All new behavior is gated on the bound v2 contract; legacy runs keep the
-// old publish shape byte-for-byte.
+//   2. Project-level publish to outputs/<projectId>/ — EXPOSURE-DRIVEN. Only
+//      what the approved contract explicitly exposes is published:
+//        - new-policy plans (projectContract.exposurePolicyVersion: 1): the
+//          explicit deliverables list (safe relative paths, optional
+//          "label: path (note)" specs), the bounded source-support closure of
+//          every exposed TeX source, the rebuild closure + bibliography union
+//          ONLY when rebuildable: true, and exactly the requested
+//          diagnosticMappings under audit/. No automatic primaries, no
+//          automatic closure for non-exposed sources, no automatic audit set.
+//          deliverables: [] without mappings is a legitimate no-exposure.
+//        - approved legacy plans (marker absent): the FROZEN adapter
+//          publishes ['final.tex','final.pdf'] (TeX) or ['final.md']
+//          (markdown) with sourceRule 'legacy-adapter'; no companions,
+//          closure, bib union, or audit set. An explicit empty list skips.
+//      The publish is TRANSACTIONAL: a hidden owner-marked staging sibling
+//      under the outputs parent, a rollback journal with backups of prior
+//      managed files, the MANIFEST v8 written last, unmanaged destination
+//      files never pruned or clobbered, and a same-hash re-finalize that
+//      changes no bytes and no timestamps.
+//   3. Per-issue outputs/<issueId>/ publishing applies to unbound/legacy
+//      runs only. A bound v2 non-integration run creates no visible folder;
+//      its artifact, receipt, and ledger stay in the hidden run directory
+//      until integration consumes them.
+// A failed REQUESTED publish THROWS from finalize: the run stays in-progress
+// and repairable (journal already merged), never a false success.
 
 const PUBLISH_DENYLIST_EXT = ['.aux', '.log', '.fls', '.out', '.toc', '.bbl', '.blg', '.fdb_latexmk', '.synctex.gz']
 const BINARY_PUBLISH_EXT = /\.(pdf|png|jpe?g|gz)$/i
@@ -4885,17 +5071,236 @@ function extractBibSources(texts) {
   return names
 }
 
-// Pure publish-set computation (plan WS4 item 2). Reads only; the copier is
+// \includegraphics targets referenced by the given TeX texts (plan WS4 v8
+// source-support): each target is resolved against masterDirAbs with common
+// image extensions. Returns [{ target, found, foundAbs }].
+async function resolveGraphicsTargets(fops, masterDirAbs, texts) {
+  const seen = new Set()
+  const targets = []
+  for (const text of texts) {
+    for (const match of String(text).matchAll(/\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
+      const target = String(match[1]).trim()
+      if (!target || seen.has(target)) continue
+      seen.add(target)
+      targets.push(target)
+    }
+  }
+  const out = []
+  for (const target of targets) {
+    const candidates = /\.(pdf|png|jpe?g|eps)$/i.test(target) ? [target] : [target, target + '.pdf', target + '.png', target + '.jpg', target + '.jpeg', target + '.eps']
+    let found = null
+    let foundAbs = null
+    for (const candidate of candidates) {
+      if (!isSafeRelPath(candidate)) continue
+      const abs = pathutil.join(masterDirAbs, candidate)
+      let ok = false
+      try { ok = await fops.exists(abs) } catch { ok = false }
+      if (ok) { found = candidate; foundAbs = abs; break }
+    }
+    out.push({ target, found, foundAbs })
+  }
+  return out
+}
+
+// ── temp-file lifecycle (plan WS4 item 5) ──────────────────────────────────
+// Owner-marked scratch and staging directories carry a marker.json:
+//   { schema: 1, ownerId, runId, operation, state, createdAt, expiresAt, runDir? }
+// States: 'owned' (held by a live operation), 'committed' (publish installed
+// successfully; staging pending deletion), 'retained' (bounded failure
+// retention until expiresAt), 'consumed' (contents consumed; delete at the
+// next boundary), 'expired' (past retention; delete at the next boundary).
+// There is NO background scheduler: cleanup happens only at run start /
+// finalize / recovery boundaries, is owner-only (marker.ownerId must match
+// the calling owner), confinement-checked (only directories under the given
+// parent are ever touched), and bounded-failure retention is explicit
+// (retentionTtl; an abandoned 'owned' marker additionally needs its lease
+// grace to have elapsed AND no matching live run lock).
+const TEMP_RETENTION_TTL_MS = 24 * 60 * 60 * 1000
+const TEMP_LEASE_GRACE_MS = 15 * 60 * 1000
+const TEMP_STAGING_PREFIX = '.publish-tmp-'
+
+export function tempStagingName(ownerId) {
+  const safe = String(ownerId ?? '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 96)
+  if (!safe) throw new Error('temp staging requires a non-empty owner id')
+  return TEMP_STAGING_PREFIX + safe
+}
+
+async function readTempMarker(fops, stagingDirAbs) {
+  try {
+    const marker = await fops.readJson(pathutil.join(stagingDirAbs, 'marker.json'))
+    if (util.isPlainObject(marker) && Number(marker.schema) === 1 && typeof marker.ownerId === 'string' && marker.ownerId) return marker
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function writeTempMarker(fops, stagingDirAbs, marker) {
+  await fops.ensureDir(stagingDirAbs)
+  await fops.writeJson(pathutil.join(stagingDirAbs, 'marker.json'), marker)
+}
+
+async function readTempJournal(fops, stagingDirAbs) {
+  try {
+    const journal = await fops.readJson(pathutil.join(stagingDirAbs, 'journal.json'))
+    return util.isPlainObject(journal) ? journal : null
+  } catch {
+    return null
+  }
+}
+
+function tempMarkerPastExpiry(marker, now) {
+  if (typeof marker.expiresAt !== 'string') return false
+  const ts = Date.parse(marker.expiresAt)
+  return Number.isFinite(ts) && now > ts
+}
+
+// A live run lock matches the marker's runDir (lock JSON carries the runDir
+// it was created for). No locks at all → no live run.
+async function liveRunLockExists(fops, baseDir, marker) {
+  if (typeof marker.runDir !== 'string' || !marker.runDir) return false
+  const locksDir = pathutil.join(baseDir, '.research-agent', 'locks')
+  let entries = []
+  try { entries = await fops.listDir(locksDir) } catch { return false }
+  for (const entry of entries) {
+    if (entry.dir || !String(entry.name).endsWith('.lock')) continue
+    try {
+      const data = await fops.readJson(pathutil.join(locksDir, entry.name))
+      if (util.isPlainObject(data) && typeof data.runDir === 'string' && data.runDir === marker.runDir) return true
+    } catch {}
+  }
+  return false
+}
+
+// Owner-only cleanup of temp directories under parentDirAbs. Deletes:
+//   - 'consumed'/'expired' markers for this owner (always)
+//   - 'committed' staging for this owner (success already recorded)
+//   - 'retained' markers past expiresAt
+//   - 'owned' markers past expiresAt with no matching live run lock
+// Never touches other owners' directories, directories without a valid owner
+// marker, or anything outside parentDirAbs (confinement check). Cleanup
+// failures are reported separately (cleanupErrors), never masking a caller
+// error. Returns { removed, skipped, cleanupErrors }.
+async function cleanupTempOwners(fops, baseDir, parentDirAbs, { ownerId, runId, now = Date.now(), checkLiveLock = true } = {}) {
+  const result = { removed: [], skipped: [], cleanupErrors: [] }
+  let entries = []
+  try { entries = await fops.listDir(parentDirAbs) } catch (error) {
+    result.cleanupErrors.push('cannot list temp parent ' + parentDirAbs + ': ' + (error?.message ?? error))
+    return result
+  }
+  const rmTree = async (dirAbs) => {
+    if (typeof fops.removeTree === 'function') {
+      await fops.removeTree(dirAbs)
+    } else {
+      throw new Error('fops.removeTree unavailable')
+    }
+  }
+  for (const entry of entries) {
+    if (!entry.dir || !String(entry.name).startsWith(TEMP_STAGING_PREFIX)) continue
+    const dirAbs = pathutil.join(parentDirAbs, entry.name)
+    const marker = await readTempMarker(fops, dirAbs)
+    if (marker === null) {
+      result.skipped.push({ name: entry.name, reason: 'no valid owner marker' })
+      continue
+    }
+    if (marker.ownerId !== ownerId) {
+      result.skipped.push({ name: entry.name, reason: 'not this owner (ownerId ' + marker.ownerId + ')' })
+      continue
+    }
+    const state = marker.state
+    if (state === 'consumed' || state === 'expired') {
+      try { await rmTree(dirAbs); result.removed.push(entry.name) } catch (error) { result.cleanupErrors.push('cannot remove ' + entry.name + ': ' + (error?.message ?? error)) }
+      continue
+    }
+    if (state === 'committed') {
+      try { await rmTree(dirAbs); result.removed.push(entry.name) } catch (error) { result.cleanupErrors.push('cannot remove committed staging ' + entry.name + ': ' + (error?.message ?? error)) }
+      continue
+    }
+    if (state === 'retained') {
+      if (!tempMarkerPastExpiry(marker, now)) {
+        result.skipped.push({ name: entry.name, reason: 'retained until ' + marker.expiresAt })
+        continue
+      }
+      try { await rmTree(dirAbs); result.removed.push(entry.name) } catch (error) { result.cleanupErrors.push('cannot remove retained temp ' + entry.name + ': ' + (error?.message ?? error)) }
+      continue
+    }
+    if (state === 'owned' || state === 'installing') {
+      if (!tempMarkerPastExpiry(marker, now)) {
+        result.skipped.push({ name: entry.name, reason: 'owned: lease active until ' + marker.expiresAt })
+        continue
+      }
+      if (checkLiveLock && await liveRunLockExists(fops, baseDir, marker)) {
+        result.skipped.push({ name: entry.name, reason: 'owned: live run lock matches ' + marker.runDir })
+        continue
+      }
+      try {
+        await fops.writeJson(pathutil.join(dirAbs, 'marker.json'), { ...marker, state: 'expired' })
+        await rmTree(dirAbs)
+        result.removed.push(entry.name)
+      } catch (error) { result.cleanupErrors.push('cannot remove owned temp ' + entry.name + ': ' + (error?.message ?? error)) }
+      continue
+    }
+    result.skipped.push({ name: entry.name, reason: 'unknown state ' + state })
+  }
+  return result
+}
+
+// Recursive removal of a temp tree (fops.remove is non-recursive).
+async function removeTempTree(fops, baseDir, dirAbs) {
+  if (typeof fops.removeTree === 'function') {
+    await fops.removeTree(dirAbs)
+    return
+  }
+  // Fallback: remove file-by-file then directory-by-directory (depth-limited).
+  const walk = async (dir, depth) => {
+    if (depth > 8) throw new Error('temp tree too deep to remove: ' + dir)
+    let entries = []
+    try { entries = await fops.listDir(dir) } catch { return }
+    for (const item of entries) {
+      const abs = pathutil.join(dir, item.name)
+      if (item.dir) await walk(abs, depth + 1)
+      else { try { await fops.remove(abs) } catch {} }
+    }
+    try { await fops.remove(dir) } catch {}
+  }
+  await walk(dirAbs, 0)
+}
+
+// ── pure publish-set computation (plan WS4 v8 item 2) ─────────────────────
+// EXPOSURE-DRIVEN, format-agnostic. Reads only; the transactional copier is
 // a separate step so a failed preflight never touches the destination.
-// Returns { ok, errors, warnings, closureSource, entries: [{dest, sourceAbs, rule, hash}] }.
+//
+// mode 'new' (exposurePolicyVersion: 1):
+//   declared  — the explicit deliverables list (parsed specs), resolved in
+//               the integration run dir, then node run dirs, then the
+//               workspace root. Reserved internal names error and point at
+//               diagnosticMappings.
+//   source-support — for each exposed TeX source: its bounded local
+//               \input/\include closure, \includegraphics files, and a
+//               label cross-check; missing inputs/graphics/labels are
+//               errors BEFORE publish (even with rebuildable: false).
+//   rebuild   — only when rebuildable: true: the accepted finalBuild record
+//               (hashes re-verified), every local non-system .fls INPUT,
+//               and the .bib union across the master + closure.
+//   audit     — exactly the requested diagnosticMappings (exact sourcePath,
+//               no filename-pattern or extension substitution).
+// mode 'legacy-adapter' (marker absent, frozen): ['final.tex','final.pdf']
+//   (TeX) or ['final.md'] (markdown), rule 'legacy-adapter', nothing else.
+//
+// Returns { ok, errors, warnings, mode, closureSource, entries: [{
+//   destinationPath, sourcePath (base-relative), sourceAbs, rule, hash,
+//   requiredBy, label, note }] }.
+
+const RESERVED_INTERNAL_NAMES = new Set(['output.tex', 'output.pdf', 'acceptance.json', 'node-output.json'])
+
 async function computePublishSet(params) {
-  const { fops, baseDir, runDirAbs, nodeRunDirs, deliverables, isTex } = params
+  const { fops, baseDir, runDirAbs, nodeRunDirs = [] } = params
+  const mode = params.mode === 'legacy-adapter' ? 'legacy-adapter' : 'new'
+  const isTex = params.isTex !== false
   const errors = []
   const warnings = []
   const entries = []
-  const destIndex = new Map() // dest -> { sourceAbs, hash, rule }
-  const primaryDest = new Set(isTex ? ['final.tex', 'final.pdf'] : ['final.md'])
-
+  const destIndex = new Map() // destinationPath -> entry
   const roots = [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir]
 
   const regularFile = async (abs) => {
@@ -4911,147 +5316,84 @@ async function computePublishSet(params) {
     }
   }
 
-  const addEntry = async (dest, sourceAbs, rule, { silentDuplicate = false } = {}) => {
-    const hash = await hashFile(fops, sourceAbs)
-    if (hash === '') {
-      errors.push('cannot hash publish source: ' + dest + ' (' + pathutil.relativePath(baseDir, sourceAbs) + ')')
+  const addEntry = async (destinationPath, sourceAbs, rule, { requiredBy, label = null, note = null, silentDuplicate = false } = {}) => {
+    if (!isSafeRelPath(destinationPath)) {
+      errors.push('publish destination is not a safe relative file path: ' + destinationPath)
       return
     }
-    const existing = destIndex.get(dest)
+    const hash = await hashFile(fops, sourceAbs)
+    if (hash === '') {
+      errors.push('cannot hash publish source: ' + destinationPath + ' (' + pathutil.relativePath(baseDir, sourceAbs) + ')')
+      return
+    }
+    const existing = destIndex.get(destinationPath)
     if (existing) {
       if (existing.hash === hash) {
         if (!silentDuplicate && existing.sourceAbs !== sourceAbs) {
-          warnings.push('duplicate ' + dest + ' resolved to identical content in multiple locations; published once')
+          warnings.push('duplicate ' + destinationPath + ' resolved to identical content in multiple locations; published once')
         }
         return
       }
-      errors.push('conflicting publish source for ' + dest + ': different content at ' + pathutil.relativePath(baseDir, existing.sourceAbs) + ' and ' + pathutil.relativePath(baseDir, sourceAbs))
+      errors.push('conflicting publish source for ' + destinationPath + ': different content at ' + pathutil.relativePath(baseDir, existing.sourceAbs) + ' and ' + pathutil.relativePath(baseDir, sourceAbs))
       return
     }
-    destIndex.set(dest, { sourceAbs, hash, rule })
-    entries.push({ dest, sourceAbs, rule, hash })
+    const entry = {
+      destinationPath,
+      sourcePath: pathutil.relativePath(baseDir, sourceAbs),
+      sourceAbs,
+      rule,
+      hash,
+      requiredBy: requiredBy ?? rule,
+      label,
+      note,
+    }
+    destIndex.set(destinationPath, entry)
+    entries.push(entry)
   }
 
-  // (a) Primary product artifacts always publish at the project root.
-  const primaryNames = isTex ? ['final.tex', 'final.pdf'] : ['final.md']
-  for (const name of primaryNames) {
-    const abs = pathutil.join(runDirAbs, name)
-    if (!await regularFile(abs)) {
-      errors.push('primary artifact missing: ' + name + ' (expected at ' + pathutil.relativePath(baseDir, abs) + ')')
-      continue
-    }
-    await addEntry(name, abs, deliverables.map((value) => value.trim()).includes(name) ? 'declared' : 'primary')
-  }
+  const shape = () => entries
+    .slice()
+    .sort((a, b) => (a.destinationPath < b.destinationPath ? -1 : a.destinationPath > b.destinationPath ? 1 : 0))
+    .map((entry) => ({
+      destinationPath: entry.destinationPath,
+      sourcePath: entry.sourcePath,
+      sourceAbs: entry.sourceAbs,
+      rule: entry.rule,
+      hash: entry.hash,
+      requiredBy: entry.requiredBy,
+      label: entry.label ?? null,
+      note: entry.note ?? null,
+    }))
 
-  // (b) Build-derived closure: accepted final.fls first, resolver fallback.
-  let closureSource = 'none'
-  const closureTexts = []
-  if (isTex) {
-    let flsText = null
-    try {
-      const flsAbs = pathutil.join(runDirAbs, 'final.fls')
-      if (await fops.exists(flsAbs)) flsText = await fops.readText(flsAbs)
-    } catch {
-      flsText = null
-    }
-    let flsInputs = null
-    if (flsText !== null) {
-      const parsed = parseFlsInputs(flsText, runDirAbs, roots)
-      if (parsed.outside.length > 0) {
-        warnings.push('final.fls references workspace-external inputs (skipped): ' + parsed.outside.slice(0, 5).join(', '))
-      }
-      const mainAbs = pathutil.normalize(pathutil.join(runDirAbs, 'final.tex'))
-      flsInputs = parsed.inputs.filter((item) => item.abs !== mainAbs)
-      const flsCoversMain = parsed.inputs.some((item) => item.abs === mainAbs)
-      if (flsCoversMain) {
-        closureSource = 'fls'
-      } else {
-        closureSource = 'resolver'
-        warnings.push('final.fls is missing or does not cover final.tex (stale recorder); using the shared TeX resolver for the rebuild closure')
-      }
-    } else {
-      closureSource = 'resolver'
-      warnings.push('final.fls missing; using the shared TeX resolver for the rebuild closure')
-    }
-    const finalTexText = await (async () => {
-      try { return await fops.readText(pathutil.join(runDirAbs, 'final.tex')) } catch { return '' }
-    })()
-    closureTexts.push(finalTexText)
-    if (closureSource === 'fls') {
-      for (const item of flsInputs) {
-        if (!await regularFile(item.abs)) {
-          errors.push('missing closure input from final.fls: ' + item.raw)
-          continue
-        }
-        const rel = relUnderAny(item.abs, roots)
-        if (rel === null || isDenylistedRelPath(rel)) continue
-        closureTexts.push(await (async () => {
-          try { return await fops.readText(item.abs) } catch { return '' }
-        })())
-        const silent = relUnder(runDirAbs, item.abs) !== null
-        await addEntry(rel, item.abs, 'fls', { silentDuplicate: silent })
-      }
-    } else {
-      const resolved = await resolveTexInputs(fops, runDirAbs, 'final.tex')
-      if (resolved.unresolved.length > 0) {
-        for (const target of resolved.unresolved) {
-          errors.push('missing closure input: ' + target + ' (referenced by final.tex but absent from the integration run directory)')
-        }
-      }
-      for (const file of resolved.files) {
-        const abs = pathutil.join(runDirAbs, file.relPath)
-        if (isDenylistedRelPath(file.relPath)) continue
-        closureTexts.push(file.text)
-        await addEntry(file.relPath, abs, 'resolver')
-      }
-    }
-  }
-
-  // (c) Bibliography sources across final.tex and its resolved inputs.
-  if (isTex) {
-    const bibNames = extractBibSources(closureTexts)
-    const bibRoots = [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir]
-    for (const name of bibNames) {
-      const candidates = name.toLowerCase().endsWith('.bib') ? [name] : [name, name + '.bib']
-      const matches = []
-      for (const root of bibRoots) {
-        for (const candidate of candidates) {
-          if (!isSafeRelPath(candidate)) continue
-          const abs = pathutil.join(root, candidate)
-          if (await regularFile(abs)) matches.push(abs)
-        }
-      }
-      const unique = [...new Set(matches)]
-      if (unique.length === 0) {
-        errors.push('declared bibliography source not found: ' + name + ' (looked in the integration run dir, node run dirs, and the workspace root)')
+  // ── legacy adapter (frozen) ──────────────────────────────────────────────
+  if (mode === 'legacy-adapter') {
+    const names = isTex ? ['final.tex', 'final.pdf'] : ['final.md']
+    for (const name of names) {
+      const abs = pathutil.join(runDirAbs, name)
+      if (!await regularFile(abs)) {
+        errors.push('legacy-adapter primary missing: ' + name + ' (expected at ' + pathutil.relativePath(baseDir, abs) + ')')
         continue
       }
-      const hashes = new Set()
-      for (const abs of unique) hashes.add(await hashFile(fops, abs))
-      if (hashes.size > 1) {
-        errors.push('conflicting bibliography source ' + name + ': different content at ' + unique.map((abs) => pathutil.relativePath(baseDir, abs)).join(' and '))
-        continue
-      }
-      const chosen = unique[0]
-      if (unique.length > 1) warnings.push('bibliography source ' + name + ' found in multiple locations with identical content; published once')
-      const rel = relUnderAny(chosen, bibRoots)
-      await addEntry(rel ?? pathutil.basename(chosen), chosen, 'bib')
+      await addEntry(name, abs, 'legacy-adapter', { requiredBy: 'legacy-adapter' })
     }
+    return { ok: errors.length === 0, errors, warnings, mode, closureSource: 'none', entries: shape() }
   }
 
-  // (d) Explicitly declared deliverables (safe relative file paths only).
-  const declaredNames = deliverables.map((value) => value.trim())
-  for (const rel of new Set(declaredNames)) {
-    if (!isSafeRelPath(rel)) {
-      errors.push('declared deliverable is not a safe relative file path: ' + rel + ' (globs, directories, traversal, and absolute paths are rejected)')
+  // ── new policy: declared deliverables ────────────────────────────────────
+  const specs = Array.isArray(params.deliverableSpecs) ? params.deliverableSpecs : []
+  const mappings = Array.isArray(params.diagnosticMappings) ? params.diagnosticMappings : []
+  const rebuildable = params.rebuildable === true
+  const acceptance = params.acceptance
+  const exposedTexMasters = [] // { declaredRel, abs, dir, relInDir }
+
+  for (const spec of specs) {
+    const rel = typeof spec?.path === 'string' ? spec.path : ''
+    if (RESERVED_INTERNAL_NAMES.has(rel)) {
+      errors.push('deliverable "' + rel + '" is a reserved internal name (output.tex, output.pdf, acceptance.json, and node-output.json are run-internals, not product paths). Expose it explicitly via projectContract.diagnosticMappings instead.')
       continue
     }
     if (isDenylistedRelPath(rel)) {
-      errors.push('declared deliverable matches the publish denylist: ' + rel + ' (build byproducts, previews, and pass_* candidate files are never published)')
-      continue
-    }
-    if (isTex && (rel === 'output.tex' || rel === 'output.pdf')) {
-      errors.push('declared deliverable ' + rel + ' is the audit certificate: it publishes automatically as audit/audit-certificate.* — remove it from projectContract.deliverables')
+      errors.push('deliverable ' + rel + ' matches the publish denylist (build byproducts, previews, and pass_* candidate files are never published)')
       continue
     }
     const matches = []
@@ -5061,7 +5403,7 @@ async function computePublishSet(params) {
     }
     const unique = [...new Set(matches)]
     if (unique.length === 0) {
-      errors.push('declared deliverable not found: ' + rel + ' (looked in ' + [runDirAbs, ...nodeRunDirs.map((item) => item.runDirAbs), baseDir].map((root) => pathutil.relativePath(baseDir, root) || root).join(', ') + ')')
+      errors.push('declared deliverable not found: ' + rel + ' (looked in the integration run dir, node run dirs, and the workspace root)')
       continue
     }
     const hashes = new Set()
@@ -5071,134 +5413,509 @@ async function computePublishSet(params) {
       continue
     }
     if (unique.length > 1) warnings.push('declared deliverable ' + rel + ' found in multiple locations with identical content; published once')
-    const silent = primaryDest.has(rel)
-    await addEntry(rel, unique[0], 'declared', { silentDuplicate: silent })
-  }
-
-  // (e) Audit carve-out: the integration certificate and every node's
-  //     receipt + ledger publish under audit/ whenever project publishing
-  //     succeeds.
-  // TeX only: on the integration node output.tex/output.pdf are the audit
-  // certificate (the product is final.tex/final.pdf). Markdown runs have no
-  // separate certificate: final.md is both the product and the node artifact.
-  const certificateSources = isTex ? [['output.tex', 'audit/audit-certificate.tex'], ['output.pdf', 'audit/audit-certificate.pdf']] : []
-  for (const [sourceName, dest] of certificateSources) {
-    const abs = pathutil.join(runDirAbs, sourceName)
-    if (await regularFile(abs)) {
-      await addEntry(dest, abs, 'audit')
-    } else if (sourceName === 'output.tex') {
-      warnings.push('audit certificate source missing: output.tex')
-    }
-  }
-  for (const item of nodeRunDirs) {
-    const nodeId = util.safeSegment(item.nodeId)
-    const acceptanceAbs = pathutil.join(item.runDirAbs, 'acceptance.json')
-    if (await regularFile(acceptanceAbs)) {
-      await addEntry('audit/acceptance/' + nodeId + '.json', acceptanceAbs, 'receipt')
-    } else if (item.runDirAbs === pathutil.normalize(runDirAbs)) {
-      warnings.push('no acceptance receipt for the integration node: acceptance.json missing')
-    }
-    const ledgerAbs = pathutil.join(item.runDirAbs, 'node-output.json')
-    if (await regularFile(ledgerAbs)) {
-      await addEntry('audit/ledgers/' + nodeId + '.json', ledgerAbs, 'ledger')
-    } else if (await regularFile(acceptanceAbs)) {
-      warnings.push('accepted node ' + nodeId + ' has no contribution ledger: node-output.json missing')
+    const chosen = unique[0]
+    await addEntry(rel, chosen, 'declared', {
+      requiredBy: spec.label ? 'declared:' + spec.label : 'declared:' + rel,
+      label: spec.label || null,
+      note: spec.note || null,
+    })
+    if (isTex && rel.toLowerCase().endsWith('.tex')) {
+      const dir = (roots.find((root) => pathutil.normalize(pathutil.join(root, rel)) === pathutil.normalize(chosen)) ?? runDirAbs)
+      exposedTexMasters.push({ declaredRel: rel, abs: chosen, dir: pathutil.normalize(dir), relInDir: relUnder(dir, chosen) || pathutil.basename(chosen) })
     }
   }
 
-  entries.sort((a, b) => (a.dest < b.dest ? -1 : a.dest > b.dest ? 1 : 0))
-  return {
-    ok: errors.length === 0,
-    errors,
-    warnings,
-    closureSource,
-    entries: entries.map((entry) => ({ dest: entry.dest, sourceAbs: entry.sourceAbs, rule: entry.rule, hash: entry.hash })),
+  // ── new policy: source-support closure for exposed TeX sources ──────────
+  let closureSource = 'none'
+  for (const master of exposedTexMasters) {
+    closureSource = 'source-support'
+    let masterText = ''
+    try { masterText = await fops.readText(master.abs) } catch { masterText = '' }
+    const resolved = await resolveTexInputs(fops, master.dir, master.relInDir)
+    for (const target of resolved.unresolved) {
+      errors.push('missing local input for the exposed TeX source ' + master.declaredRel + ': ' + target + ' (referenced by the master but absent from its run directory)')
+    }
+    for (const file of resolved.files) {
+      if (isDenylistedRelPath(file.relPath)) continue
+      await addEntry(file.relPath, pathutil.join(master.dir, file.relPath), 'source-support', { requiredBy: 'source-support(' + master.declaredRel + ')' })
+    }
+    const graphics = await resolveGraphicsTargets(fops, master.dir, [masterText, ...resolved.files.map((file) => file.text)])
+    for (const item of graphics) {
+      if (!item.found) {
+        errors.push('missing local graphic for the exposed TeX source ' + master.declaredRel + ': ' + item.target + ' (\\includegraphics target absent from the run directory)')
+        continue
+      }
+      if (isDenylistedRelPath(item.found)) continue
+      await addEntry(item.found, item.foundAbs, 'source-support', { requiredBy: 'source-support(' + master.declaredRel + ')' })
+    }
+    // Label cross-check: every \ref/\eqref in the master must resolve to a
+    // \label in the master or a resolvable fragment (v8 item 7 pre-publish).
+    const labels = new Set()
+    const collect = (text) => { for (const m of String(text).matchAll(/\\label\s*\{([^}]+)\}/g)) labels.add(m[1].trim()) }
+    collect(masterText)
+    for (const file of resolved.files) collect(file.text)
+    for (const m of String(masterText).matchAll(/\\(?:eq)?ref\s*\{([^}]+)\}/g)) {
+      const target = m[1].trim()
+      if (!labels.has(target)) {
+        errors.push('unresolved \\ref target "' + target + '" in the exposed TeX source ' + master.declaredRel + ' (no matching \\label in the master or its resolvable inputs)')
+      }
+    }
   }
+
+  // ── new policy: rebuild closure (rebuildable: true only) ────────────────
+  if (rebuildable) {
+    if (!isTex) {
+      errors.push('rebuildable: true requires a TeX project (TeX is the only format with a dependency checker)')
+    } else {
+      const fb = util.isPlainObject(acceptance?.finalBuild) ? acceptance.finalBuild : null
+      if (!fb || typeof fb.sourcePath !== 'string' || !fb.sourceHash || typeof fb.flsPath !== 'string' || !fb.flsHash) {
+        errors.push('rebuildable: true requires an accepted finalBuild record (sourcePath + sourceHash + flsPath + flsHash); the acceptance receipt does not carry one — the final build was not verified at acceptance time')
+      } else {
+        const srcAbs = pathutil.join(runDirAbs, fb.sourcePath)
+        const srcHash = await hashFile(fops, srcAbs)
+        if (srcHash !== fb.sourceHash) {
+          errors.push('finalBuild record is stale: sourcePath ' + fb.sourcePath + ' changed after acceptance (recorded ' + String(fb.sourceHash).slice(0, 12) + '… now ' + (srcHash || 'missing').slice(0, 12) + '…); rebuild and re-accept')
+        }
+        const flsAbs = pathutil.join(runDirAbs, fb.flsPath)
+        const flsHash = await hashFile(fops, flsAbs)
+        if (flsHash !== fb.flsHash) {
+          errors.push('finalBuild record is stale: flsPath ' + fb.flsPath + ' changed after acceptance (recorded ' + String(fb.flsHash).slice(0, 12) + '… now ' + (flsHash || 'missing').slice(0, 12) + '…)')
+        } else if (srcHash === fb.sourceHash) {
+          const flsText = await (async () => { try { return await fops.readText(flsAbs) } catch { return '' } })()
+          const parsed = parseFlsInputs(flsText, runDirAbs, roots)
+          const mainAbs = pathutil.normalize(srcAbs)
+          const closureTexts = []
+          let masterText = ''
+          try { masterText = await fops.readText(srcAbs) } catch { masterText = '' }
+          closureTexts.push(masterText)
+          for (const item of parsed.inputs) {
+            if (pathutil.normalize(item.abs) === mainAbs) continue
+            if (!await regularFile(item.abs)) {
+              errors.push('rebuild closure input missing: ' + item.raw + ' (recorded in ' + fb.flsPath + ' but absent from the integration run directory)')
+              continue
+            }
+            const rel = relUnderAny(item.abs, roots)
+            if (rel === null || isDenylistedRelPath(rel)) continue
+            let text = ''
+            try { text = await fops.readText(item.abs) } catch { text = '' }
+            closureTexts.push(text)
+            const silent = relUnder(runDirAbs, item.abs) !== null
+            await addEntry(rel, item.abs, 'rebuild', { requiredBy: 'rebuild(' + fb.flsPath + ')', silentDuplicate: silent })
+          }
+          for (const raw of parsed.outside) {
+            errors.push('non-relocatable rebuild input: ' + raw + ' (recorded in ' + fb.flsPath + ' but outside the workspace roots; the source package cannot be relocated to a separate folder)')
+          }
+          // PDF pair is required iff the requested package exposes a .pdf.
+          const exposesPdf = specs.some((spec) => typeof spec?.path === 'string' && spec.path.toLowerCase().endsWith('.pdf'))
+          if (exposesPdf) {
+            if (typeof fb.pdfPath !== 'string' || !fb.pdfHash) {
+              errors.push('rebuildable: true requires the finalBuild PDF pair (pdfPath + pdfHash) because the deliverable set exposes a PDF')
+            } else {
+              const pdfAbs = pathutil.join(runDirAbs, fb.pdfPath)
+              const pdfHash = await hashFile(fops, pdfAbs)
+              if (pdfHash !== fb.pdfHash) {
+                errors.push('finalBuild record is stale: pdfPath ' + fb.pdfPath + ' changed after acceptance (recorded ' + String(fb.pdfHash).slice(0, 12) + '… now ' + (pdfHash || 'missing').slice(0, 12) + '…)')
+              }
+            }
+          }
+          // Bibliography union across the master + the resolved closure.
+          for (const name of extractBibSources(closureTexts)) {
+            const candidates = name.toLowerCase().endsWith('.bib') ? [name] : [name, name + '.bib']
+            const matches = []
+            for (const root of roots) {
+              for (const candidate of candidates) {
+                if (!isSafeRelPath(candidate)) continue
+                const abs = pathutil.join(root, candidate)
+                if (await regularFile(abs)) matches.push(abs)
+              }
+            }
+            const unique = [...new Set(matches)]
+            if (unique.length === 0) {
+              errors.push('rebuild bibliography source not found: ' + name + ' (looked in the integration run dir, node run dirs, and the workspace root)')
+              continue
+            }
+            const hashes = new Set()
+            for (const abs of unique) hashes.add(await hashFile(fops, abs))
+            if (hashes.size > 1) {
+              errors.push('conflicting rebuild bibliography source ' + name + ': different content at ' + unique.map((abs) => pathutil.relativePath(baseDir, abs)).join(' and '))
+              continue
+            }
+            if (unique.length > 1) warnings.push('rebuild bibliography source ' + name + ' found in multiple locations with identical content; published once')
+            const chosen = unique[0]
+            const rel = relUnderAny(chosen, roots)
+            await addEntry(rel ?? pathutil.basename(chosen), chosen, 'rebuild', { requiredBy: 'rebuild(bib:' + name + ')' })
+          }
+        }
+      }
+    }
+  }
+
+  // ── new policy: requested diagnostic mappings only ──────────────────────
+  for (const mapping of mappings) {
+    const srcRel = typeof mapping?.sourcePath === 'string' ? mapping.sourcePath.trim() : ''
+    const destRel = typeof mapping?.destinationPath === 'string' ? mapping.destinationPath.trim() : ''
+    if (!isSafeRelPath(srcRel)) {
+      errors.push('diagnostic mapping sourcePath is not a safe relative file path: ' + srcRel)
+      continue
+    }
+    if (!isSafeRelPath(destRel) || !destRel.startsWith('audit/') || destRel.length <= 'audit/'.length) {
+      errors.push('diagnostic mapping destinationPath must be a safe relative path under audit/: ' + destRel)
+      continue
+    }
+    const srcAbs = pathutil.join(runDirAbs, srcRel)
+    if (!await regularFile(srcAbs)) {
+      errors.push('diagnostic mapping source missing: ' + srcRel + ' (integration run directory)')
+      continue
+    }
+    await addEntry(destRel, srcAbs, 'audit', {
+      requiredBy: 'diagnostic-mapping(' + srcRel + ')',
+      label: typeof mapping?.label === 'string' ? mapping.label : null,
+      note: typeof mapping?.note === 'string' ? mapping.note : null,
+    })
+  }
+
+  return { ok: errors.length === 0, errors, warnings, mode, closureSource, entries: shape() }
 }
 
-// Hash-checked copier (plan WS4 item 4): preflight validates every source
-// hash and every destination before anything is written; only managed paths
-// are copied; MANIFEST.json is written last; unrelated destination files are
-// never pruned or overwritten with different content.
-async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, computed) {
-  const fail = (errors) => ({ ok: false, errors, warnings: computed.warnings, published: [] })
+// ── transactional publish (plan WS4 v8 item 4) ─────────────────────────────
+// Preflight validates the projectId, the outputs root, every destination,
+// and every source hash BEFORE anything is written. Install runs through a
+// hidden owner-marked staging sibling under the outputs parent with a
+// rollback journal: prior managed files (and any destination file about to
+// be modified) are backed up first, MANIFEST v8 is written last, and a
+// failure restores the snapshot and removes newly created files. Unmanaged
+// destination files are recorded in preservedExisting and never pruned.
+async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, computed, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const iso = (ts) => new Date(ts).toISOString()
+  const warnings = [...(computed.warnings ?? [])]
+  const fail = (errors) => ({ ok: false, errors, warnings, published: [], copied: [], preservedExisting: [], cleanupErrors: [] })
   if (!computed.ok) return fail(computed.errors)
-  const outputDir = pathutil.resolve(baseDir, outputRoot, util.safeSegment(projectId))
-  if (typeof fops.ensureDir === 'function') await fops.ensureDir(outputDir)
-  const manifestPath = pathutil.join(outputDir, 'MANIFEST.json')
-  let priorManifest = null
-  try { priorManifest = await fops.readJson(manifestPath) } catch { priorManifest = null }
-  const priorEntries = util.isPlainObject(priorManifest) && Array.isArray(priorManifest.entries) ? priorManifest.entries : []
-  const managedDest = new Set(priorEntries.filter((entry) => typeof entry?.path === 'string').map((entry) => entry.path))
+  const idError = core.projectIdError(projectId)
+  if (idError) return fail([idError])
+  const runId = String(opts.runId ?? '')
+  if (!runId) return fail(['publish transaction requires a run owner id (runId)'])
+  if (typeof fops.removeTree !== 'function' && typeof fops.remove !== 'function') {
+    return fail(['fops.removeTree unavailable: cannot guarantee transactional staging cleanup'])
+  }
 
-  // Preflight: destination symlinks, unmanaged occupancy, source hashes.
+  const removeTree = async (dirAbs) => { await removeTempTree(fops, baseDir, dirAbs) }
+
+  // Preflight: outputs root and project dir must be regular non-symlink
+  // directories inside the workspace. lstat first: a dangling symlink fails
+  // stat but is still a hazard.
+  let outputsAbs
+  try { outputsAbs = pathutil.resolveInside(baseDir, outputRoot) } catch (error) {
+    return fail(['outputs root is not inside the workspace: ' + (error?.message ?? error)])
+  }
+  outputsAbs = pathutil.resolve(baseDir, outputsAbs)
+  let outputsLstat = null
+  try { outputsLstat = typeof fops.lstat === 'function' ? await fops.lstat(outputsAbs) : null } catch { outputsLstat = null }
+  if (outputsLstat) {
+    if (outputsLstat.type === 'symlink') return fail(['outputs root is a symbolic link: ' + outputRoot])
+    const statInfo = await fops.stat(outputsAbs)
+    if (statInfo && typeof statInfo.isDirectory === 'function' && !statInfo.isDirectory()) return fail(['outputs root is not a directory: ' + outputRoot])
+  } else if (typeof fops.ensureDir === 'function') {
+    await fops.ensureDir(outputsAbs)
+  }
+  const projectDirAbs = pathutil.join(outputsAbs, projectId)
+  let projectDirLstat = null
+  try { projectDirLstat = typeof fops.lstat === 'function' ? await fops.lstat(projectDirAbs) : null } catch { projectDirLstat = null }
+  let projectDirExists = false
+  if (projectDirLstat) {
+    if (projectDirLstat.type === 'symlink') return fail(['project directory is a symbolic link: outputs/' + projectId])
+    const statInfo = await fops.stat(projectDirAbs)
+    if (statInfo && typeof statInfo.isDirectory === 'function' && !statInfo.isDirectory()) return fail(['project path exists and is not a directory: outputs/' + projectId])
+    projectDirExists = true
+  }
+
+  const manifestDestAbs = pathutil.join(projectDirAbs, 'MANIFEST.json')
+  let priorManifest = null
+  try { priorManifest = await fops.readJson(manifestDestAbs) } catch { priorManifest = null }
+  const priorEntries = util.isPlainObject(priorManifest) && Array.isArray(priorManifest.entries) ? priorManifest.entries : []
+  const priorManaged = new Map() // path -> hash
+  for (const entry of priorEntries) {
+    if (typeof entry?.path === 'string' && entry.path !== 'MANIFEST.json' && typeof entry.hash === 'string') priorManaged.set(entry.path, entry.hash)
+  }
+
+  // Staging identity (needed to recover a crashed retry BEFORE preflight).
+  const stagingAbs = pathutil.join(outputsAbs, tempStagingName(runId))
+  const filesAbs = pathutil.join(stagingAbs, 'files')
+  const backupAbs = pathutil.join(stagingAbs, 'backup')
+  // Recover a previous transaction of OURS (crash/retry of the same run).
+  // Restored files are ours: the occupancy check treats them as known instead
+  // of as unmanaged occupancy.
+  const recoveredOwned = new Set()
+  const priorMarker = await readTempMarker(fops, stagingAbs)
+  if (priorMarker !== null) {
+    if (priorMarker.ownerId !== runId) {
+      return fail(['another run owns the publish transaction for ' + projectId + ' (owner ' + priorMarker.ownerId + ', state ' + priorMarker.state + '); recover it after that run completes or its lease expires'])
+    }
+    if (priorMarker.state !== 'committed') {
+      const journal = await readTempJournal(fops, stagingAbs)
+      if (journal && Array.isArray(journal.backups) && Array.isArray(journal.installedNew)) {
+        await restoreFromJournal(fops, baseDir, projectDirAbs, journal, backupAbs, warnings)
+        for (const item of Array.isArray(journal.snapshot) ? journal.snapshot : []) {
+          if (typeof item?.path === 'string' && item.path !== 'MANIFEST.json') recoveredOwned.add(item.path)
+        }
+      }
+    }
+    await removeTree(stagingAbs)
+  }
+
+  // Destination inventory (preservedExisting baseline) + per-entry preflight.
+  const inventory = []
+  const walkInventory = async (dirAbs, relPrefix, depth) => {
+    if (depth > 8) return
+    let items = []
+    try { items = await fops.listDir(dirAbs) } catch { return }
+    for (const item of items) {
+      const rel = relPrefix ? relPrefix + '/' + item.name : item.name
+      if (item.dir) { await walkInventory(pathutil.join(dirAbs, item.name), rel, depth + 1); continue }
+      const hash = await hashFile(fops, pathutil.join(dirAbs, item.name))
+      if (hash !== '') inventory.push({ path: rel, hash })
+    }
+  }
+  if (projectDirExists) await walkInventory(projectDirAbs, '', 0)
+
   for (const entry of computed.entries) {
-    const destAbs = pathutil.join(outputDir, entry.dest)
-    const destInfo = typeof fops.lstat === 'function' ? await fops.lstat(destAbs) : null
-    if (destInfo?.type === 'symlink') return fail(['destination is a symbolic link: ' + entry.dest])
-    if (destInfo && !managedDest.has(entry.dest)) {
+    if (!isSafeRelPath(entry.destinationPath)) return fail(['publish destination is not a safe relative path: ' + entry.destinationPath])
+    const destAbs = pathutil.join(projectDirAbs, entry.destinationPath)
+    let destLstat = null
+    try { destLstat = typeof fops.lstat === 'function' ? await fops.lstat(destAbs) : null } catch { destLstat = null }
+    if (destLstat && destLstat.type === 'symlink') return fail(['destination is a symbolic link: ' + entry.destinationPath])
+    if (destLstat && !priorManaged.has(entry.destinationPath) && !recoveredOwned.has(entry.destinationPath)) {
       const existingHash = await hashFile(fops, destAbs)
       if (existingHash !== '' && existingHash !== entry.hash) {
-        return fail(['destination ' + entry.dest + ' is occupied by an unmanaged file with different content; remove it or publish it via the project deliverables list first'])
+        return fail(['destination ' + entry.destinationPath + ' is occupied by an unmanaged file with different content; remove it first (unmanaged files are never clobbered)'])
       }
     }
     const sourceHash = await hashFile(fops, entry.sourceAbs)
     if (sourceHash !== entry.hash) {
-      return fail(['source changed between preflight and computation: ' + entry.dest + ' (' + pathutil.relativePath(baseDir, entry.sourceAbs) + ')'])
+      return fail(['source changed between preflight and computation: ' + entry.destinationPath + ' (' + pathutil.relativePath(baseDir, entry.sourceAbs) + ')'])
     }
   }
 
-  // Copy (skip same-hash destinations: no content or timestamp churn).
+  // Staging: hidden owner-marked sibling under the outputs parent (same fs).
+  await fops.ensureDir(stagingAbs)
+  const marker = {
+    schema: 1,
+    ownerId: runId,
+    runId,
+    operation: 'publish-transaction',
+    projectId,
+    state: 'owned',
+    runDir: typeof opts.runRelDir === 'string' ? opts.runRelDir : '',
+    createdAt: iso(now),
+    expiresAt: iso(now + TEMP_LEASE_GRACE_MS),
+  }
+  await writeTempMarker(fops, stagingAbs, marker)
+  const snapshot = []
+  for (const [path, hash] of priorManaged) snapshot.push({ path, hash })
+  let priorManifestHash = ''
+  try { priorManifestHash = await hashFile(fops, manifestDestAbs) } catch { priorManifestHash = '' }
+  snapshot.push({ path: 'MANIFEST.json', hash: priorManifestHash })
+  const journal = {
+    schema: 1,
+    ownerId: runId,
+    runId,
+    projectId,
+    createdAt: iso(now),
+    snapshot,
+    backups: [],
+    installedNew: [],
+  }
+  await fops.writeJson(pathutil.join(stagingAbs, 'journal.json'), journal)
+
+  // Stage every entry and hash-verify the staged copy.
+  for (const entry of computed.entries) {
+    const stagedAbs = pathutil.join(filesAbs, entry.destinationPath)
+    await fops.ensureDir(pathutil.dirname(stagedAbs))
+    if (BINARY_PUBLISH_EXT.test(entry.destinationPath) || BINARY_PUBLISH_EXT.test(pathutil.basename(entry.sourceAbs))) {
+      if (typeof fops.copy !== 'function') return await abortStaged(fops, stagingAbs, marker, 'binary deliverable copy is unavailable: ' + entry.destinationPath)
+      await fops.copy(entry.sourceAbs, stagedAbs)
+    } else {
+      const text = await fops.readText(entry.sourceAbs)
+      await fops.writeText(stagedAbs, text)
+    }
+    const stagedHash = await hashFile(fops, stagedAbs)
+    if (stagedHash !== entry.hash) return await abortStaged(fops, stagingAbs, marker, 'staged copy hash mismatch: ' + entry.destinationPath)
+  }
+  await writeTempMarker(fops, stagingAbs, { ...marker, state: 'installing' })
+
+  // Install: same-hash skip (no churn); back up anything modified or pruned;
+  // prune previously managed files that are no longer in the set.
+  const newSet = new Set(computed.entries.map((entry) => entry.destinationPath))
   const published = []
   const copied = []
-  for (const entry of computed.entries) {
-    const destAbs = pathutil.join(outputDir, entry.dest)
-    await fops.ensureDir(pathutil.dirname(destAbs))
-    const existingHash = await hashFile(fops, destAbs)
-    if (existingHash !== entry.hash) {
-      if (BINARY_PUBLISH_EXT.test(entry.dest)) {
-        if (typeof fops.copy !== 'function') return fail(['binary deliverable copy is unavailable: ' + entry.dest])
-        await fops.copy(entry.sourceAbs, destAbs)
+  try {
+    for (const entry of computed.entries) {
+      const destAbs = pathutil.join(projectDirAbs, entry.destinationPath)
+      let existingHash = ''
+      try { existingHash = await hashFile(fops, destAbs) } catch { existingHash = '' }
+      let destExists = false
+      try { destExists = await fops.exists(destAbs) } catch { destExists = false }
+      if (existingHash !== '') destExists = true
+      if (destExists && existingHash === entry.hash) {
+        published.push({ path: entry.destinationPath, sourcePath: entry.sourcePath, sourceRule: entry.rule, hash: entry.hash, idempotent: true })
+        continue
+      }
+      if (destExists) {
+        const backedUpAbs = pathutil.join(backupAbs, entry.destinationPath)
+        await fops.ensureDir(pathutil.dirname(backedUpAbs))
+        await fops.copy(destAbs, backedUpAbs)
+        const backupHash = await hashFile(fops, backedUpAbs)
+        const snapshotHash = (snapshot.find((item) => item.path === entry.destinationPath) ?? {}).hash
+        if (snapshotHash !== undefined && snapshotHash !== '' && backupHash !== snapshotHash && existingHash !== '') {
+          throw new Error('backup verification failed for ' + entry.destinationPath + ' (hash drift during install)')
+        }
+        if (!journal.backups.includes(entry.destinationPath)) journal.backups.push(entry.destinationPath)
       } else {
-        const text = await fops.readText(entry.sourceAbs)
+        journal.installedNew.push(entry.destinationPath)
+      }
+      await fops.ensureDir(pathutil.dirname(destAbs))
+      if (BINARY_PUBLISH_EXT.test(entry.destinationPath) || BINARY_PUBLISH_EXT.test(pathutil.basename(entry.sourceAbs))) {
+        await fops.copy(pathutil.join(filesAbs, entry.destinationPath), destAbs)
+      } else {
+        const text = await fops.readText(pathutil.join(filesAbs, entry.destinationPath))
         await fops.writeText(destAbs, text)
       }
       const verified = await hashFile(fops, destAbs)
-      if (verified !== entry.hash) return fail(['published deliverable hash mismatch: ' + entry.dest])
-      copied.push(entry.dest)
+      if (verified !== entry.hash) throw new Error('published deliverable hash mismatch: ' + entry.destinationPath)
+      copied.push(entry.destinationPath)
+      published.push({ path: entry.destinationPath, sourcePath: entry.sourcePath, sourceRule: entry.rule, hash: entry.hash, idempotent: false })
     }
-    published.push({ path: entry.dest, sourcePath: pathutil.relativePath(baseDir, entry.sourceAbs), sourceRule: entry.rule, hash: entry.hash, idempotent: existingHash === entry.hash })
+    // Prune previously managed files no longer in the set (ours, not user's).
+    for (const [path] of priorManaged) {
+      if (newSet.has(path)) continue
+      const destAbs = pathutil.join(projectDirAbs, path)
+      let destExists = false
+      try { destExists = await fops.exists(destAbs) } catch { destExists = false }
+      if (!destExists) continue
+      const backedUpAbs = pathutil.join(backupAbs, path)
+      await fops.ensureDir(pathutil.dirname(backedUpAbs))
+      await fops.copy(destAbs, backedUpAbs)
+      if (!journal.backups.includes(path)) journal.backups.push(path)
+      await fops.remove(destAbs)
+    }
+    // MANIFEST v8 last.
+    const preservedExisting = inventory
+      .filter((item) => item.path !== 'MANIFEST.json' && !newSet.has(item.path) && !journal.installedNew.includes(item.path) && priorManaged.has(item.path) === false)
+      .map((item) => ({ path: item.path, hash: item.hash }))
+    const manifest = {
+      schemaVersion: 1,
+      kind: 'project-publish-manifest',
+      policyVersion: computed.mode === 'legacy-adapter' ? 'legacy-adapter' : 1,
+      projectId,
+      planRevision: opts.planRevision ?? null,
+      integrationRun: typeof opts.integrationRunRel === 'string' ? opts.integrationRunRel : null,
+      artifactFormat: typeof opts.artifactFormat === 'string' ? opts.artifactFormat : null,
+      rebuildable: computed.mode === 'new' ? Boolean(opts.rebuildable) : false,
+      entries: computed.entries.map((entry) => {
+        const item = {
+          path: entry.destinationPath,
+          sourcePath: entry.sourcePath,
+          sourceRule: entry.rule,
+          requiredBy: entry.requiredBy,
+          hash: entry.hash,
+        }
+        if (entry.label) item.label = entry.label
+        if (entry.note) item.note = entry.note
+        return item
+      }),
+      preservedExisting,
+      warnings,
+    }
+    // MANIFEST v8 is written last — and only when its stable content
+    // actually changed (a steady-state re-finalize changes no bytes).
+    const stableCompare = (value) => {
+      const copy = { ...value }
+      delete copy.generatedAt
+      return core.stableStringify(copy)
+    }
+    let manifestChanged = !util.isPlainObject(priorManifest) || !Array.isArray(priorManifest.entries)
+    if (!manifestChanged) manifestChanged = stableCompare(priorManifest) !== stableCompare(manifest)
+    if (manifestChanged) {
+      const stagedManifestAbs = pathutil.join(stagingAbs, 'manifest.json')
+      await fops.writeJson(stagedManifestAbs, { ...manifest, generatedAt: iso(now) })
+      let manifestExists = false
+      try { manifestExists = await fops.exists(manifestDestAbs) } catch { manifestExists = false }
+      if (manifestExists) {
+        const backedUpAbs = pathutil.join(backupAbs, 'MANIFEST.json')
+        await fops.ensureDir(pathutil.dirname(backedUpAbs))
+        await fops.copy(manifestDestAbs, backedUpAbs)
+        if (!journal.backups.includes('MANIFEST.json')) journal.backups.push('MANIFEST.json')
+      }
+      if (!journal.installedNew.includes('MANIFEST.json')) journal.installedNew.push('MANIFEST.json')
+      await fops.copy(stagedManifestAbs, manifestDestAbs)
+    }
+    await fops.writeJson(pathutil.join(stagingAbs, 'journal.json'), journal)
+    await writeTempMarker(fops, stagingAbs, { ...marker, state: 'committed' })
+    await removeTree(stagingAbs)
+    return {
+      ok: true,
+      errors: [],
+      warnings,
+      mode: computed.mode,
+      closureSource: computed.closureSource,
+      outputDir: pathutil.relativePath(baseDir, projectDirAbs),
+      published,
+      copied,
+      manifestWritten: manifestChanged,
+      preservedExisting,
+    }
+  } catch (error) {
+    const message = (error?.message ?? error) + ''
+    await restoreFromJournal(fops, baseDir, projectDirAbs, journal, backupAbs, warnings)
+    try {
+      await fops.writeJson(pathutil.join(stagingAbs, 'journal.json'), journal)
+      await writeTempMarker(fops, stagingAbs, { ...marker, state: 'retained', error: message, expiresAt: iso(now + TEMP_RETENTION_TTL_MS) })
+    } catch {}
+    return { ok: false, errors: [message], warnings, published: [], copied: [], preservedExisting: [], cleanupErrors: [] }
   }
+}
 
-  // MANIFEST.json last, idempotent (stable comparison ignores generatedAt).
-  const manifest = {
-    schemaVersion: 1,
-    kind: 'project-publish-manifest',
-    projectId,
-    closureSource: computed.closureSource,
-    warnings: computed.warnings,
-    entries: computed.entries.map((entry) => ({ path: entry.dest, sourcePath: pathutil.relativePath(baseDir, entry.sourceAbs), sourceRule: entry.rule, hash: entry.hash })),
+
+// Hash-checked rollback: restore every backed-up destination from the
+// journal's backup tree (verified against the snapshot hash when one exists)
+// and remove every file this transaction newly created.
+async function restoreFromJournal(fops, baseDir, projectDirAbs, journal, backupAbs, warnings) {
+  if (!util.isPlainObject(journal)) return
+  for (const path of Array.isArray(journal.backups) ? journal.backups : []) {
+    if (!isSafeRelPath(path)) continue
+    const backupAbsPath = pathutil.join(backupAbs, path)
+    const destAbs = pathutil.join(projectDirAbs, path)
+    let backupExists = false
+    try { backupExists = await fops.stat(backupAbsPath) !== undefined } catch { backupExists = false }
+    if (!backupExists) continue
+    const snapshotHash = (Array.isArray(journal.snapshot) ? journal.snapshot : []).find((item) => item.path === path)?.hash
+    const backupHash = await hashFile(fops, backupAbsPath)
+    if (typeof snapshotHash === 'string' && snapshotHash !== '' && backupHash !== snapshotHash) {
+      warnings.push('rollback: backup verification mismatch for ' + path + ' (kept current destination)')
+      continue
+    }
+    await fops.ensureDir(pathutil.dirname(destAbs))
+    await fops.copy(backupAbsPath, destAbs)
   }
-  const stableCompare = (value) => {
-    const copy = { ...value }
-    delete copy.generatedAt
-    return core.stableStringify(copy)
+  for (const path of Array.isArray(journal.installedNew) ? journal.installedNew : []) {
+    if (!isSafeRelPath(path)) continue
+    const destAbs = pathutil.join(projectDirAbs, path)
+    const snapshot = (Array.isArray(journal.snapshot) ? journal.snapshot : []).find((item) => item.path === path)
+    if (snapshot && snapshot.hash !== '') continue // pre-existing file, not ours
+    try { await fops.stat(destAbs) } catch { continue }
+    await fops.remove(destAbs)
   }
-  let manifestChanged = !util.isPlainObject(priorManifest) || !Array.isArray(priorManifest.entries)
-  if (!manifestChanged) manifestChanged = stableCompare(priorManifest) !== stableCompare(manifest)
-  if (manifestChanged) {
-    await fops.writeJson(manifestPath, { ...manifest, generatedAt: new Date().toISOString() })
-  }
-  return {
-    ok: true,
-    errors: [],
-    warnings: computed.warnings,
-    closureSource: computed.closureSource,
-    outputDir: pathutil.relativePath(baseDir, outputDir),
-    published,
-    copied,
-    manifestWritten: manifestChanged,
-  }
+}
+
+async function abortStaged(fops, stagingAbs, marker, message) {
+  try {
+    await writeTempMarker(fops, stagingAbs, { ...marker, state: 'retained', error: message, expiresAt: isoNowPlus(TEMP_RETENTION_TTL_MS) })
+  } catch {}
+  return { ok: false, errors: [message], warnings: [], published: [], copied: [], preservedExisting: [], cleanupErrors: [] }
+}
+
+function isoNowPlus(ms) {
+  return new Date(Date.now() + ms).toISOString()
 }
 
 // Journal sync (plan WS4 item 1): merge the final state into the node entry,
@@ -5236,7 +5953,7 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
   return { ok: true, action: 'merged', nodeId: contractFile.nodeId, path: pathutil.relativePath(baseDir, loadedState.path) }
 }
 
-// ── finalize_run override: v2 acceptance gate + output policy (plan §4.3, WS4) ──
+// ── finalize_run override: v2 acceptance gate + output policy v8 ───────────
 
 const _finalizeRun = lifecycle.finalizeRun
 lifecycle.finalizeRun = async function (fops, params) {
@@ -5248,7 +5965,11 @@ lifecycle.finalizeRun = async function (fops, params) {
   let deliverables = []
   if (contractFile) {
     const acceptance = await loadAcceptance(fops, runDir)
-    const outputName = contractFile.artifactFormat === 'tex' ? 'output.tex' : 'final.md'
+    // Plan WS1 (v8): consume the accepted artifact path from the contract;
+    // the legacy format default only applies when the contract has none.
+    const outputName = (typeof contractFile.contract?.outputContract?.artifactPath === 'string' && contractFile.contract.outputContract.artifactPath.trim())
+      ? contractFile.contract.outputContract.artifactPath.trim()
+      : (contractFile.artifactFormat === 'tex' ? 'output.tex' : 'final.md')
     const outputHash = await hashFile(fops, pathutil.resolveInside(runDir, outputName))
     if (!core.acceptanceIsCurrent(acceptance, contractFile.contractDigest, outputHash)) {
       throw new Error('v2 run cannot finalize without a current successful acceptance receipt bound to the node-contract digest (plan §4.3). Call autoresearch_record_acceptance and retry.')
@@ -5264,35 +5985,93 @@ lifecycle.finalizeRun = async function (fops, params) {
     // WS4 item 3: bound v2 runs never create per-issue output folders.
     const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
     if (!loadedPlan.ok) {
-      projectPublish = { ok: false, skipped: true, errors: ['cannot resolve the project plan for ' + contractFile.projectId + ': ' + loadedPlan.error] }
-    } else if ((loadedPlan.plan.integrationId ?? 'integration') !== contractFile.nodeId) {
+      throw new Error('Project publish blocked: cannot resolve the project plan for ' + contractFile.projectId + ': ' + loadedPlan.error + ' (the run stays in-progress and repairable)')
+    }
+    if ((loadedPlan.plan.integrationId ?? 'integration') !== contractFile.nodeId) {
       projectPublish = { ok: true, skipped: true, reason: 'non-integration node: the project-level publish happens when the integration node finalizes' }
     } else {
-      // WS4 item 2: project-level publish for the integration node.
-      const rawDeliverables = loadedPlan.plan.projectContract?.deliverables
-      const deliverableList = (Array.isArray(rawDeliverables) ? rawDeliverables : ['final.tex', 'final.pdf']).filter((value) => typeof value === 'string').map((value) => value.trim()).filter(Boolean)
-      if (deliverableList.length === 0) {
-        projectPublish = { ok: true, skipped: true, reason: 'projectContract.deliverables is explicitly empty: no project publish', outputRoot: null }
-      } else {
-        const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
-        const nodeRunDirs = [{ nodeId: contractFile.nodeId, runDirAbs: pathutil.normalize(runDir) }]
-        for (const node of loadedPlan.plan.nodes ?? []) {
-          if (node.id === contractFile.nodeId) continue
-          const stateEntry = loadedState.state?.nodes?.[node.id]
-          if (stateEntry && typeof stateEntry.runDir === 'string' && stateEntry.runDir) {
-            const abs = pathutil.resolve(baseDir, pathutil.resolveInside(baseDir, stateEntry.runDir))
-            nodeRunDirs.push({ nodeId: node.id, runDirAbs: pathutil.normalize(abs) })
-          }
+      // Preflight BEFORE any filesystem operation (plan WS4 item 2).
+      const idError = core.projectIdError(contractFile.projectId)
+      if (idError) throw new Error('Project publish blocked: ' + idError)
+      const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
+      const runId = typeof run?.issueId === 'string' && run.issueId ? run.issueId : pathutil.basename(runDir)
+      const runRelDir = pathutil.relativePath(baseDir, runDir)
+      const rawProject = util.isPlainObject(loadedPlan.plan.projectContract) ? loadedPlan.plan.projectContract : {}
+      const isNewPolicy = rawProject.exposurePolicyVersion === 1
+      const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+      const nodeRunDirs = [{ nodeId: contractFile.nodeId, runDirAbs: pathutil.normalize(runDir) }]
+      for (const node of loadedPlan.plan.nodes ?? []) {
+        if (node.id === contractFile.nodeId) continue
+        const stateEntry = loadedState.state?.nodes?.[node.id]
+        if (stateEntry && typeof stateEntry.runDir === 'string' && stateEntry.runDir) {
+          const abs = pathutil.resolve(baseDir, pathutil.resolveInside(baseDir, stateEntry.runDir))
+          nodeRunDirs.push({ nodeId: node.id, runDirAbs: pathutil.normalize(abs) })
         }
-        const computed = await computePublishSet({
-          fops,
-          baseDir,
-          runDirAbs: pathutil.normalize(runDir),
-          nodeRunDirs,
-          deliverables: deliverableList,
-          isTex: contractFile.artifactFormat === 'tex',
-        })
-        projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed)
+      }
+      if (isNewPolicy) {
+        if (!Array.isArray(rawProject.deliverables)) {
+          throw new Error('Project publish blocked: exposure-policy contract requires an explicit projectContract.deliverables array')
+        }
+        const specs = []
+        const specErrors = []
+        for (const entry of rawProject.deliverables) {
+          const parsed = core.parseDeliverableSpec(entry)
+          if (parsed.ok) specs.push(parsed)
+          else specErrors.push(parsed.error)
+        }
+        if (specErrors.length > 0) throw new Error('Project publish blocked: ' + specErrors.join('; '))
+        const mappings = Array.isArray(rawProject.diagnosticMappings) ? rawProject.diagnosticMappings : []
+        if (specs.length === 0 && mappings.length === 0) {
+          projectPublish = { ok: true, skipped: true, reason: 'explicit empty deliverables and no diagnostic mappings: nothing exposed', outputRoot: null }
+        } else {
+          const computed = await computePublishSet({
+            fops,
+            baseDir,
+            runDirAbs: pathutil.normalize(runDir),
+            nodeRunDirs,
+            mode: 'new',
+            isTex: contractFile.artifactFormat === 'tex',
+            deliverableSpecs: specs,
+            rebuildable: rawProject.rebuildable === true,
+            diagnosticMappings: mappings,
+            acceptance,
+          })
+          if (!computed.ok) throw new Error('Project publish blocked: ' + computed.errors.join('; '))
+          projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed, {
+            runId,
+            runRelDir,
+            planRevision: loadedPlan.plan?.revision ?? null,
+            artifactFormat: contractFile.artifactFormat,
+            rebuildable: rawProject.rebuildable === true,
+            integrationRunRel: runRelDir,
+          })
+          if (!projectPublish.ok) throw new Error('Project publish failed: ' + projectPublish.errors.join('; '))
+        }
+      } else {
+        // Frozen legacy adapter for approved marker-absent plans.
+        const rawDeliverables = rawProject.deliverables
+        const explicitEmpty = Array.isArray(rawDeliverables) && rawDeliverables.length === 0
+        if (explicitEmpty) {
+          projectPublish = { ok: true, skipped: true, reason: 'projectContract.deliverables is explicitly empty: no project publish', outputRoot: null }
+        } else {
+          const computed = await computePublishSet({
+            fops,
+            baseDir,
+            runDirAbs: pathutil.normalize(runDir),
+            nodeRunDirs,
+            mode: 'legacy-adapter',
+            isTex: contractFile.artifactFormat === 'tex',
+          })
+          if (!computed.ok) throw new Error('Project publish blocked: ' + computed.errors.join('; '))
+          projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed, {
+            runId,
+            runRelDir,
+            planRevision: loadedPlan.plan?.revision ?? null,
+            artifactFormat: contractFile.artifactFormat,
+            integrationRunRel: runRelDir,
+          })
+          if (!projectPublish.ok) throw new Error('Project publish failed: ' + projectPublish.errors.join('; '))
+        }
       }
     }
   } else {
@@ -5874,6 +6653,13 @@ const ORCHESTRATOR_PLUGIN = {
             graceMs: 5000,
           })
           await handle.done
+        },
+        removeTree: async (p) => {
+          if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot remove temp tree')
+          const rm = await subprocess.resolveExecutable('/bin/rm')
+          const targetPath = typeof fs.processPath === 'function' ? await fs.processPath(await targetOf(p)) : pathutil.normalize(p)
+          const result = await runSubprocess(subprocess, baseDir, [rm, '-rf', targetPath])
+          if (result.exitCode !== 0) throw new Error('rm -rf failed for ' + targetPath + ': ' + result.stderr.slice(-400))
         },
         readJson: async (p) => {
           try {
@@ -6468,7 +7254,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 12. finalize_run (v2 acceptance gate) ──────────────────────────────
 
-    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent output policy (plan WS4). Unbound/legacy runs publish their final deliverables under outputs/<issueId>/ as before. Bound v2 runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes exactly one folder, outputs/<projectId>/: the primary final.tex/final.pdf (or final.md), the explicit projectContract.deliverables list (including requested companions such as process-issues.md — no companions.json or filename-pattern discovery exists), the build-derived rebuild closure from the accepted final.fls (resolver fallback when the recorder is missing/stale, recorded in MANIFEST.json as closureSource), the .bib union, the audit/ evidence set (audit-certificate.* renamed from output.*, per-node acceptance receipts and ledgers), and MANIFEST.json attributing every path with a SHA-256 hash. Missing or conflicting declared/closure files fail before anything is written. Returns the published paths, journalSync, and projectPublish results. Contract-bound (v2) runs are rejected without a current successful acceptance receipt bound to the node-contract digest.', {
+    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent, exposure-driven output policy (plan WS4 v8). Unbound/legacy runs publish their final deliverables under outputs/<issueId>/ as before. Bound v2 runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes at most one folder, outputs/<projectId>/. With exposurePolicyVersion: 1 the explicit projectContract.deliverables list is the sole exposure request (exact safe relative paths, companions included; [] with no diagnostic mappings finalizes as skipped with no folder); an exposed TeX master additionally publishes its minimal local source-support closure (missing inputs or unresolved labels fail), and rebuildable: true (TeX only) adds the accepted finalBuild recorder closure plus the parsed bibliography union, with every recorded hash re-verified. Internal evidence reaches the user only through exact projectContract.diagnosticMappings entries under audit/. Marker-absent plans use the frozen legacy adapter (final.tex/final.pdf for TeX, final.md for Markdown, rule legacy-adapter, nothing else). Publication is transactional: owner-marked staging, hash verification, rollback journal, MANIFEST.json last, unmanaged destination files preserved and inventoried. A failed requested publish propagates as a finalize error, never a soft failure. Returns the published paths, journalSync, and projectPublish results. Contract-bound (v2) runs are rejected without a current successful acceptance receipt bound to the node-contract digest.', {
       type: 'object', additionalProperties: true,
       properties: {
         runDir: { type: 'string', description: 'Run directory path.' },
@@ -6930,7 +7716,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 20. record_acceptance (plan §4.3) ──────────────────────────────────
 
-    tool('autoresearch_record_acceptance', 'Record a mechanical acceptance receipt for a contract-bound run. Every plan criterion must be accounted for (PASS/FAIL/WAIVED/NOT_APPLICABLE); waivers require a recorded user decision, rationale, scope, and plan revision. Extractor-backed expected categories must record count, bytes, and SHA-256 (zero required counts fail); command checks record command, cwd, exit code, and log hashes. For artifactFormat tex, strict TeX validation (static rules + latexmk build, never -f) runs before acceptance; a nonzero compiler exit cannot pass. Writes acceptance.json.', {
+    tool('autoresearch_record_acceptance', 'Record a mechanical acceptance receipt for a contract-bound run. Every plan criterion must be accounted for (PASS/FAIL/WAIVED/NOT_APPLICABLE); waivers require a recorded user decision, rationale, scope, and plan revision. Extractor-backed expected categories must record count, bytes, and SHA-256 (zero required counts fail); command checks record command, cwd, exit code, and log hashes. Validation is dispatched from the node artifactFormat: TeX nodes run strict TeX validation (comment-aware static rules + latexmk build, never -f; a nonzero compiler exit cannot pass) — the scanner-derived declared needs are the source of truth, so a mismatch against the hand-filled contract declared list is a recorded warning, not a failure — and record the accepted artifact { path, format, sha256 } plus the verified finalBuild record (sourcePath/sourceHash/flsPath/flsHash, PDF pair when present). When the project exposes a TeX source, the exposed master\'s local inputs and labels must resolve before acceptance. Markdown/non-TeX nodes pass on the accepted artifact\'s existence, path safety, and hash (plus explicit deliverable checks) with no TeX requirement. Writes acceptance.json and mechanically derives node-output.json (the contribution ledger, idempotent on same-hash replay).', {
       type: 'object', additionalProperties: true,
       properties: {
         runDir: { type: 'string', description: 'Run directory path.' },
@@ -6966,16 +7752,22 @@ const ORCHESTRATOR_PLUGIN = {
         throw new Error('v2 mechanical acceptance requires a bound run: node-contract.json is missing. Use autoresearch_init_run with projectId+nodeId.')
       }
       const contract = contractFile.contract
-      const outputName = contract.artifactFormat === 'tex' ? 'output.tex' : 'final.md'
+      // Plan WS1 (v8): the accepted artifact path comes from the node
+      // contract (outputContract.artifactPath); only the legacy adapter may
+      // fall back to the old format-based default.
+      const outputName = (typeof contract.outputContract?.artifactPath === 'string' && contract.outputContract.artifactPath.trim())
+        ? contract.outputContract.artifactPath.trim()
+        : (contract.artifactFormat === 'tex' ? 'output.tex' : 'final.md')
       const outputHash = await hashFile(fops, pathutil.resolveInside(runDir, outputName))
       if (!outputHash) {
         // Opaque blocker → recipe (SOD #1): name the precondition, list the
         // candidate files actually present, and share the missing-source
-        // diagnostic (SOD #9).
-        const diagnostic = await missingSourceDiagnostic(fops, runDir, outputName)
-        if (outputName === 'output.tex') {
+        // diagnostic (SOD #9). Format-aware: no LaTeX mentions for
+        // non-TeX artifacts.
+        const diagnostic = await missingSourceDiagnostic(fops, runDir, outputName, { format: contract.artifactFormat })
+        if (contract.artifactFormat === 'tex') {
           const candidates = await listPassTexCandidates(fops, runDir)
-          throw new Error(diagnostic + ' Precondition: promote the judged winner first — call autoresearch_promote_artifact with destinationPath "output.tex"' + (candidates.length > 0 ? ' using one of the candidate files present: ' + candidates.join(', ') + '.' : ' (no pass_*/*.tex candidate files were found in the run directory).'))
+          throw new Error(diagnostic + ' Precondition: promote the judged winner first — call autoresearch_promote_artifact with destinationPath "' + outputName + '"' + (candidates.length > 0 ? ' using one of the candidate files present: ' + candidates.join(', ') + '.' : ' (no pass_*/*.tex candidate files were found in the run directory).'))
         }
         throw new Error(diagnostic)
       }
@@ -6991,6 +7783,23 @@ const ORCHESTRATOR_PLUGIN = {
         }
       }
       const classification = args.artifactClassification ? core.classifyArtifact(args.artifactClassification) : null
+      // Plan WS1 (v8 item 7): when the project exposes a TeX source, the
+      // exposed master's local inputs and labels must resolve BEFORE
+      // acceptance — even without a reproducible source package.
+      let planForUsability = null
+      try {
+        const loadedPlan = await projectstate.loadPlan(fops, baseDir, contract.projectId, contractFile.artifactRoot || 'research-agent')
+        if (loadedPlan.ok) planForUsability = loadedPlan.plan
+      } catch {}
+      const usability = await exposedSourceUsability(fops, baseDir, runDir, contract, contractFile, {
+        plan: planForUsability,
+      })
+      if (!usability.ok) {
+        throw new Error('Exposed-TeX source usability check failed before acceptance: ' + usability.errors.join(' ') + ' The published source must be usable from its own folder: stage the missing fragments into the integration run directory and retry.')
+      }
+      // Plan WS4 (v8): record the verified final build (TeX only) so the
+      // publish-time rebuildable: true branch can re-verify it.
+      const finalBuild = contract.artifactFormat === 'tex' ? await captureFinalBuild(fops, runDir, planForUsability) : null
       // Derived declared is the source of truth (SOD #3): record the scan and
       // the contract-drift warnings in the receipt.
       const derivedDeclared = tex ? tex.derivedDeclared : null
@@ -7003,6 +7812,8 @@ const ORCHESTRATOR_PLUGIN = {
         artifactClassification: classification,
         tex,
         outputHash,
+        artifactPath: outputName,
+        finalBuild,
         nodeRevision: typeof args.nodeRevision === 'number' ? args.nodeRevision : 1,
         derivedDeclared,
         warnings: texWarnings,
@@ -7728,9 +8539,17 @@ export const createLibraries = {
     parseTexSections,
     firstUsableSentence,
     computePublishSet,
+    publishProjectDeliverables,
     parseFlsInputs,
     extractBibSources,
     isSafeRelPath,
     isDenylistedRelPath,
+    resolveGraphicsTargets,
+    exposedSourceUsability,
+    captureFinalBuild,
+    cleanupTempOwners,
+    tempStagingName,
+    TEMP_RETENTION_TTL_MS,
+    TEMP_LEASE_GRACE_MS,
   },
 }

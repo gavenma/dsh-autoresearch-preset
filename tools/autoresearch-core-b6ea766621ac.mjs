@@ -444,6 +444,41 @@ function safeSegment(value) {
   return safe === String(value).trim()
 }
 
+// Plan WS4 (v8): safe relative FILE path for exposure deliverables,
+// outputContract.artifactPath, and diagnostic mappings. Relative (never
+// absolute), no NUL/control characters, no backslashes, no empty/`.`/`..`
+// segments, no trailing separator, and no parentheses/whitespace (the
+// deliverable-spec grammar keeps those out of paths so notes stay
+// unambiguous).
+export function isSafeRelFilePath(value) {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return false
+  if (/[\\\u0000-\u001f\u007f]/.test(trimmed)) return false
+  if (/^[A-Za-z]:/.test(trimmed) || trimmed.startsWith('/')) return false
+  if (/\s/.test(trimmed) || trimmed.includes('(') || trimmed.includes(')')) return false
+  if (trimmed.endsWith('/') || trimmed.endsWith('.')) return false
+  const segments = trimmed.split('/')
+  if (segments.length > 8) return false
+  for (const segment of segments) {
+    if (segment === '' || segment === '.' || segment === '..') return false
+    if (!/^[A-Za-z0-9._-]+$/.test(segment)) return false
+  }
+  return true
+}
+
+// Plan WS4 (v8): projectId is the single path segment under the fixed
+// outputs/ root. Reject empty values, `.`, `..`, separators, absolute paths,
+// control characters, and encoded separators.
+export const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+export function projectIdError(value) {
+  if (typeof value !== 'string' || !PROJECT_ID_PATTERN.test(value)) {
+    return 'projectId must match [A-Za-z0-9][A-Za-z0-9._-]{0,63} as a single path segment (got ' + JSON.stringify(value) + ')'
+  }
+  return null
+}
+
 // Effective scout/judge counts for a node: omitted roles force zero; a
 // positive explicit count for an omitted role is an ERROR under strict v2
 // rules (a warning-only normalization in legacy v1 reads).
@@ -591,23 +626,99 @@ function normalizedOutputContract(kind, raw) {
   if (kind === 'assembly' && (typeof source.texMode !== 'string' || !source.texMode.trim())) {
     source.texMode = 'standalone'
   }
+  if (source.artifactPath !== undefined) {
+    if (typeof source.artifactPath !== 'string' || !source.artifactPath.trim()) {
+      throw new Error('outputContract.artifactPath must be a non-empty string when present.')
+    }
+    if (!isSafeRelFilePath(source.artifactPath.trim())) {
+      throw new Error('outputContract.artifactPath must be a safe relative file path (no traversal, absolute paths, or directories): ' + source.artifactPath)
+    }
+    source.artifactPath = source.artifactPath.trim()
+  }
   return source
 }
 
-// Project-level v2 contract.
+// Project-level v2 contract (plan WS4 v8).
+//
+// Exposure boundary: `exposurePolicyVersion: 1` in the raw projectContract is
+// the new/legacy signal. Marker plans must carry an explicit `deliverables`
+// array (possibly empty — a legitimate no-exposure value) and optionally
+// `rebuildable: true` plus `diagnosticMappings`; the marker, the
+// omitted-versus-present list, the normalized rebuildable flag, and the
+// normalized mappings join the contract digest. Already-approved v2 records
+// without the marker keep the old normalized shape EXACTLY (legacy default
+// deliverables, identical digest) so their frozen adapter branch stays
+// byte-stable; the marker is never backfilled.
 export function projectContract(plan) {
   const raw = isPlainObject(plan?.projectContract) ? plan.projectContract : {}
+  const hasMarker = raw.exposurePolicyVersion === 1
+  const hasDeliverables = Array.isArray(raw.deliverables)
   const contract = {
     goal: typeof raw.goal === 'string' ? raw.goal : (plan?.projectName ?? ''),
-    deliverables: Array.isArray(raw.deliverables) ? raw.deliverables : ['final.tex', 'final.pdf'],
+    deliverables: hasDeliverables ? raw.deliverables : (hasMarker ? [] : ['final.tex', 'final.pdf']),
     acceptance: Array.isArray(raw.acceptance)
       ? raw.acceptance.map(normalizeAcceptanceCriterion).filter(Boolean)
       : [],
     test: typeof raw.test === 'string' ? raw.test : '',
     finalWordBudget: positiveInt(raw.finalWordBudget) ? raw.finalWordBudget : 8000,
   }
+  if (hasMarker) {
+    contract.exposurePolicyVersion = 1
+    contract.deliverablesOmitted = !hasDeliverables
+    contract.rebuildable = raw.rebuildable === true
+    contract.diagnosticMappings = normalizeDiagnosticMappings(raw.diagnosticMappings)
+  }
   contract.digest = digestOf(contract)
   return contract
+}
+
+// Normalize optional diagnostic mappings (plan WS4 item 2): exact
+// sourcePath -> destinationPath pairs exposing internal diagnostics under
+// audit/. Non-conforming entries are dropped here; plan validation reports
+// them as errors.
+function normalizeDiagnosticMappings(raw) {
+  if (!Array.isArray(raw)) return null
+  const out = []
+  for (const entry of raw) {
+    if (!isPlainObject(entry)) continue
+    const sourcePath = typeof entry.sourcePath === 'string' ? entry.sourcePath.trim() : ''
+    const destinationPath = typeof entry.destinationPath === 'string' ? entry.destinationPath.trim() : ''
+    const label = typeof entry.label === 'string' ? entry.label.trim() : ''
+    const note = typeof entry.note === 'string' ? entry.note.trim() : ''
+    if (!sourcePath || !destinationPath) continue
+    out.push({ sourcePath, destinationPath, label, note })
+  }
+  return out
+}
+
+// Deliverable spec grammar (plan WS4 item 2): `path` | `path (note)` |
+// `label: path (note)`. The path is a safe relative file path (no
+// whitespace, parentheses, traversal, or absolute paths); the label is
+// [A-Za-z][A-Za-z0-9_-]*; the note is free text in one trailing parenthesized
+// suffix, taken only when the remaining path is valid. Pure — no I/O.
+export function parseDeliverableSpec(value) {
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'deliverable spec must be a string (got ' + JSON.stringify(value) + ')' }
+  }
+  let rest = value.trim()
+  if (rest.length === 0) return { ok: false, error: 'deliverable spec must be non-empty' }
+  let label = ''
+  const colon = rest.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/)
+  if (colon) {
+    label = colon[1]
+    rest = colon[2]
+  }
+  let note = ''
+  const noteMatch = rest.match(/^(.*?)\s*\(([^()]*)\)$/)
+  if (noteMatch) {
+    rest = noteMatch[1]
+    note = noteMatch[2]
+  }
+  const path = rest.trim()
+  if (!isSafeRelFilePath(path)) {
+    return { ok: false, error: 'deliverable path must be a safe relative file path (no traversal, absolute paths, directories, whitespace, or parentheses): ' + JSON.stringify(value) }
+  }
+  return { ok: true, path, label, note }
 }
 
 // Stable digest over the normalized whole-plan contract. Used by Linear
@@ -665,6 +776,51 @@ export function validatePlan(plan, opts = {}) {
     const project = projectContract(plan)
     if (project.acceptance.length === 0) errors.push('v2 plan.projectContract.acceptance must be a non-empty array of criteria.')
     if (!isNonEmptyString(project.goal)) errors.push('v2 plan.projectContract.goal must be a non-empty string.')
+    // Plan WS4 (v8): new-policy (marker) contracts are fully explicit.
+    // Marker absent = frozen legacy adapter (already-approved v2 record):
+    // no new checks, no forced defaults.
+    const rawProject = isPlainObject(plan.projectContract) ? plan.projectContract : {}
+    if (rawProject.exposurePolicyVersion === 1) {
+      if (projectIdError(plan.projectId)) errors.push(projectIdError(plan.projectId))
+      if (!Array.isArray(rawProject.deliverables)) {
+        errors.push('v2 exposure-policy contract requires an explicit projectContract.deliverables array (use [] for a legitimate no-exposure project; never omit the list).')
+      } else {
+        for (const entry of rawProject.deliverables) {
+          const parsed = parseDeliverableSpec(entry)
+          if (!parsed.ok) errors.push('projectContract.deliverables: ' + parsed.error)
+        }
+      }
+      if (rawProject.rebuildable !== undefined && typeof rawProject.rebuildable !== 'boolean') {
+        errors.push('projectContract.rebuildable must be a boolean when present.')
+      }
+      const exposedTexSource = Array.isArray(rawProject.deliverables)
+        && rawProject.deliverables.some((entry) => {
+          const parsed = parseDeliverableSpec(entry)
+          return parsed.ok && parsed.path.toLowerCase().endsWith('.tex')
+        })
+      if (rawProject.rebuildable === true && !exposedTexSource) {
+        errors.push('projectContract.rebuildable: true requires an exposed TeX source deliverable (TeX is the only format with a dependency checker); remove the flag or expose the TeX source.')
+      }
+      if (rawProject.diagnosticMappings !== undefined) {
+        if (!Array.isArray(rawProject.diagnosticMappings)) {
+          errors.push('projectContract.diagnosticMappings must be an array of { sourcePath, destinationPath } objects when present.')
+        } else {
+          rawProject.diagnosticMappings.forEach((entry, index) => {
+            if (!isPlainObject(entry) || !isNonEmptyString(entry.sourcePath) || !isNonEmptyString(entry.destinationPath)) {
+              errors.push('projectContract.diagnosticMappings[' + index + ']: must be an object with non-empty sourcePath and destinationPath strings.')
+              return
+            }
+            const dest = String(entry.destinationPath).trim()
+            if (!isSafeRelFilePath(dest) || !dest.startsWith('audit/') || dest.length <= 'audit/'.length) {
+              errors.push('projectContract.diagnosticMappings[' + index + ']: destinationPath must be a safe relative path under audit/.')
+            }
+            if (!isSafeRelFilePath(String(entry.sourcePath).trim())) {
+              errors.push('projectContract.diagnosticMappings[' + index + ']: sourcePath must be a safe relative file path (never a filename pattern).')
+            }
+          })
+        }
+      }
+    }
   }
 
   const nodes = Array.isArray(plan.nodes) ? plan.nodes : []
@@ -1620,6 +1776,19 @@ export function acceptanceReceipt(params) {
     nodeContractDigest: params.contract.digest,
     nodeRevision: params.nodeRevision ?? 1,
     outputHash: params.outputHash ?? '',
+    // Plan WS4 (v8): the actually accepted artifact is recorded explicitly.
+    // outputHash above is the compatibility alias for artifact.sha256;
+    // finalize consumes the artifact record instead of re-deriving a path
+    // from artifactFormat.
+    artifact: {
+      path: typeof params.artifactPath === 'string' ? params.artifactPath : '',
+      format: params.contract.artifactFormat,
+      sha256: params.outputHash ?? '',
+    },
+    // Plan WS4 (v8): the verified final build for TeX nodes (accepted
+    // master + recorder + accepted PDF), or null when absent. Publish-time
+    // rebuildable: true re-verifies every recorded hash.
+    finalBuild: isPlainObject(params.finalBuild) ? params.finalBuild : null,
     artifactFormat: params.contract.artifactFormat,
     issuedAt: params.issuedAt ?? new Date().toISOString(),
     issuedBy: 'coordinator',
