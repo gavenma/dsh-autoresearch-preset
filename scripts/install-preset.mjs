@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,14 +8,24 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const destination = process.argv[2]
 const applyLocal = process.argv.includes('--apply-local')
 const replaceConfig = process.argv.includes('--replace-config')
+const cleanTarget = process.argv.includes('--clean-target')
 
 if (!destination) {
-  console.error('Usage: node scripts/install-preset.mjs <DSH_HOME/.agent-presets/research> [--apply-local] [--replace-config]')
+  console.error('Usage: node scripts/install-preset.mjs <DSH_HOME/.agent-presets/research> [--apply-local] [--replace-config] [--clean-target]')
   process.exit(2)
 }
 
 const target = path.resolve(destination)
+const installedConfigPath = path.join(target, 'config.default.json')
+const hadExistingConfig = fs.existsSync(installedConfigPath)
+const preservedConfig = hadExistingConfig ? fs.readFileSync(installedConfigPath) : null
+if (cleanTarget) {
+  const home = path.resolve(process.env.HOME ?? '/')
+  if (target === path.parse(target).root || target === home || target === root || root.startsWith(target + path.sep)) throw new Error('refusing unsafe --clean-target destination: ' + target)
+  fs.rmSync(target, { recursive: true, force: true })
+}
 fs.mkdirSync(target, { recursive: true })
+if (cleanTarget && preservedConfig && !replaceConfig) fs.writeFileSync(installedConfigPath, preservedConfig)
 
 // Only runtime assets are installed: the composition, preset metadata, role
 // prompts, skills, and the generated tools/ tree. Development and
@@ -67,11 +78,10 @@ function mergePresetConfig(base, overlay) {
 }
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
+const sha256File = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 const repoConfigPath = path.join(root, 'config.default.json')
-const installedConfigPath = path.join(target, 'config.default.json')
 const localConfigPath = path.join(root, 'config.local.json')
 
-const hadExistingConfig = fs.existsSync(installedConfigPath)
 if (hadExistingConfig && replaceConfig) {
   fs.copyFileSync(repoConfigPath, installedConfigPath)
   console.log('--replace-config: reset the existing config.default.json to the shipped defaults.')
@@ -93,6 +103,51 @@ if (hadExistingConfig && !replaceConfig && !applyLocal) {
   console.log('config.default.json already exists at the target — left untouched. '
     + 'Use --apply-local to layer your config.local.json in, or --replace-config to reset to the shipped defaults.')
 }
+
+// The deployed manifest describes the effective runtime files. A local overlay
+// intentionally changes config.default.json, so update only that mutable file's
+// hash; generated entries and aggregate identity remain immutable build facts.
+const installedManifestPath = path.join(target, 'tools', 'build-manifest.json')
+if (fs.existsSync(installedManifestPath) && fs.existsSync(installedConfigPath)) {
+  const deployedManifest = readJson(installedManifestPath)
+  if (deployedManifest.files && Object.prototype.hasOwnProperty.call(deployedManifest.files, 'config.default.json')) {
+    deployedManifest.files['config.default.json'] = sha256File(installedConfigPath)
+    fs.writeFileSync(installedManifestPath, JSON.stringify(deployedManifest, null, 2) + '\n')
+    console.log('Updated deployed manifest hash for the effective config.default.json.')
+  }
+}
+
+const deployedManifest = readJson(installedManifestPath)
+const deployedEntries = new Set(Object.values(deployedManifest.entries ?? {}).map((entry) => path.basename(entry)))
+const installedTools = path.join(target, 'tools')
+for (const name of fs.readdirSync(installedTools)) {
+  if (/^(autoresearch-core|linear|research-orchestrator)-[0-9a-f]{12}\.mjs$/.test(name) && !deployedEntries.has(name)) {
+    fs.rmSync(path.join(installedTools, name), { force: true })
+  }
+}
+const mismatches = []
+for (const [relativePath, expectedHash] of Object.entries(deployedManifest.files ?? {})) {
+  const installedPath = path.join(target, relativePath)
+  if (!fs.existsSync(installedPath)) mismatches.push(relativePath + ': missing')
+  else if (sha256File(installedPath) !== expectedHash) mismatches.push(relativePath + ': hash mismatch')
+}
+if (mismatches.length > 0) throw new Error('installed runtime verification failed: ' + mismatches.join('; '))
+const aggregateHashes = Object.fromEntries((deployedManifest.aggregateScope ?? []).map((relativePath) => [relativePath, sha256File(path.join(target, relativePath))]))
+const installedAggregateId = crypto.createHash('sha256').update(Object.entries(aggregateHashes).sort(([a], [b]) => a.localeCompare(b)).map(([relativePath, hash]) => relativePath + ':' + hash).join('\n')).digest('hex')
+if (installedAggregateId !== deployedManifest.aggregateId) throw new Error('installed immutable aggregate mismatch: expected ' + deployedManifest.aggregateId + ', actual ' + installedAggregateId)
+const installReceipt = {
+  schemaVersion: 1,
+  generation: deployedManifest.generation,
+  aggregateId: deployedManifest.aggregateId,
+  configSha256: sha256File(installedConfigPath),
+  applyLocal,
+  replaceConfig,
+  cleanTarget,
+  target,
+  installedAt: new Date().toISOString(),
+  verifiedFiles: Object.keys(deployedManifest.files ?? {}).length,
+}
+fs.writeFileSync(path.join(target, 'install-receipt.json'), JSON.stringify(installReceipt, null, 2) + '\n')
 
 // Advisory only: report role models outside the effective recognized list.
 // Read-only — nothing here changes any file.

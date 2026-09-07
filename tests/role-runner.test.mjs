@@ -112,6 +112,14 @@ const base = {
 
 {
   const fops = makeMemoryFops()
+  const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
+  const ownerPath = '/run/packets/role-attempts/' + groupId + '/owner.json'
+  await fops.writeJson(ownerPath, { schemaVersion: 1, ownerId: 'foreign-coordinator', logicalGroupId: groupId })
+  await assert.rejects(() => runner.runRole({ ...base, fops, runDir: '/run', startSubagent: async () => { throw new Error('must not spawn') }, maxAttempts: 1 }), /owned by another coordinator/)
+}
+
+{
+  const fops = makeMemoryFops()
   const events = []
   let followups = 0
   const localAgent = {
@@ -138,7 +146,8 @@ const base = {
       return { id: 'same-child', localAgent, result: Promise.resolve(textResult('partial output', 'max-tokens')), async dispose() { runs.disposals += 1 } }
     },
   }
-  const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent.bind(runs), maxAttempts: 1 })
+  const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent.bind(runs), agentOptions: { ...base.agentOptions, reasoningEffort: 'high' }, maxAttempts: 1 })
+  assert.equal(runs.requests[0].agentOptions.reasoningEffort, 'high')
   assert.equal(result.outcomeClass, 'success')
   assert.equal(result.sameChildRetry, true)
   assert.equal(result.firstStopReason, 'max-tokens')
@@ -276,7 +285,7 @@ const base = {
 
 {
   const fops = makeMemoryFops()
-  const groupId = runner.logicalId(base.logicalGroupKey)
+  const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
   const groupDir = '/run/packets/role-attempts/' + groupId
   const outputPath = groupDir + '/attempt-01.output.txt'
   fops.files.set(outputPath, 'recovered')
@@ -326,7 +335,7 @@ const base = {
   const fops = makeMemoryFops()
   const chain = ['acme/alpha', 'acme-beta/labs/model-x']
   const runs = makeRuns([{ result: textResult('', 'error') }, { result: textResult('done via the fallback') }])
-  const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: chain, maxAttempts: 3 })
+  const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, agentOptions: { ...base.agentOptions, reasoningEffort: 'high' }, modelChain: chain, maxAttempts: 3 })
   assert.equal(result.outcomeClass, 'success')
   assert.equal(result.attempts.length, 2)
   assert.equal(result.attempts[0].outcomeClass, 'provider-error')
@@ -336,6 +345,8 @@ const base = {
   assert.equal(runs.requests[1].agentOptions.provider, 'acme-beta')
   assert.equal(runs.requests[1].agentOptions.model, 'labs/model-x')
   assert.equal(runs.requests[1].agentOptions.maxTokens, 1234)
+  assert.equal(runs.requests[0].agentOptions.reasoningEffort, 'high')
+  assert.equal(runs.requests[1].agentOptions.reasoningEffort, 'high')
   assert.equal(runs.starts, 2)
 }
 
@@ -573,7 +584,7 @@ const base = {
   // plus a persisted breaker entry -> the continued run hands off to the
   // fallback instead of re-probing the failed model.
   const fops = makeMemoryFops()
-  const groupId = runner.logicalId(base.logicalGroupKey)
+  const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
   const groupDir = '/run/packets/role-attempts/' + groupId
   const breakerPath = '/art/model-breaker.json'
   fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'acme/alpha': { blockedUntilMs: Number.MAX_SAFE_INTEGER, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
@@ -887,6 +898,34 @@ const base = {
   const merged = createLibraries.config.mergeConfig({ roleExecution: { maxAttempts: 5 } })
   assert.equal(merged.roleExecution.maxAttempts, 5)
   assert.equal(merged.roleExecution.modelFallbackCooldownMs, 600000)
+  assert.throws(() => createLibraries.profiles.resolveEffectiveProfile('research_author', { ...merged, roleProfiles: { research_author: { model: 'acme/alpha', reasoningEffort: 3 } } }), /reasoningEffort must be null or a non-empty/)
+  assert.throws(() => createLibraries.profiles.resolveEffectiveProfile('research_author', { ...merged, roleProfiles: { research_author: { model: 'acme/alpha', reasoningEffort: 'x'.repeat(65) } } }), /reasoningEffort must be null or a non-empty/)
+  assert.match(createLibraries.profiles.reasoningEffortWarning('acme', 'alpha', 'max', { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }), /not advertised/)
+  assert.equal(createLibraries.profiles.reasoningEffortWarning('acme', 'alpha', 'high', { reasoning: { efforts: [{ id: 'high' }] } }), null)
+}
+
+// Phase 0 regression: native DSH reasoning effort must survive option
+// normalization and fallback handoff once the profile setting is enabled.
+{
+  const options = createLibraries.modelparse.resolveAgentOptions({
+    model: 'acme/alpha',
+    reasoningEffort: 'high',
+    maxTokens: 2048,
+  })
+  assert.equal(options.provider, 'acme')
+  assert.equal(options.model, 'alpha')
+  assert.equal(options.reasoningEffort, 'high')
+  assert.equal(options.maxTokens, 2048)
+  assert.equal(createLibraries.modelparse.resolveAgentOptions({ model: 'acme/alpha' }).reasoningEffort, undefined)
+  assert.equal(createLibraries.modelparse.resolveAgentOptions({ model: 'acme/alpha', reasoningEffort: 'x'.repeat(65) }).reasoningEffort, undefined)
+  const highFops = makeMemoryFops(); const lowFops = makeMemoryFops()
+  const highRuns = makeRuns([{ result: textResult('high effort') }])
+  const lowRuns = makeRuns([{ result: textResult('low effort') }])
+  await runner.runRole({ ...base, fops: highFops, runDir: '/run', startSubagent: highRuns.startSubagent, agentOptions: { ...base.agentOptions, reasoningEffort: 'high' }, maxAttempts: 1 })
+  await runner.runRole({ ...base, fops: lowFops, runDir: '/run', startSubagent: lowRuns.startSubagent, agentOptions: { ...base.agentOptions, reasoningEffort: 'low' }, maxAttempts: 1 })
+  const highOwner = [...highFops.files.keys()].find((file) => file.endsWith('/owner.json'))
+  const lowOwner = [...lowFops.files.keys()].find((file) => file.endsWith('/owner.json'))
+  assert.notEqual(highOwner, lowOwner)
 }
 
 console.log('role-runner tests passed')

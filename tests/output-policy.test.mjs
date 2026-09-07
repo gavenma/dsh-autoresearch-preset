@@ -1195,6 +1195,11 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
   const badBuildRes = spawnSync(process.execPath, [scriptPath, '--base-dir', baseDir, '--project-id', 'grf-proj', '--source-root', path.join(baseDir, grfRunRel), '--final-build-file', badBuildFile], { encoding: 'utf8', cwd: baseDir })
   assert.equal(badBuildRes.status, 1, 'finalBuild hash mismatch must fail: ' + badBuildRes.stdout)
   assert.match(badBuildRes.stderr, /finalBuild verification failed/)
+  const backslashBuildFile = path.join(baseDir, 'backslash-final-build.json')
+  await fs.writeFile(backslashBuildFile, JSON.stringify({ sourcePath: 'sub\\final.tex', sourceHash: sha256('wrong bytes\n') }))
+  const backslashBuildRes = spawnSync(process.execPath, [scriptPath, '--base-dir', baseDir, '--project-id', 'grf-proj', '--source-root', path.join(baseDir, grfRunRel), '--final-build-file', backslashBuildFile], { encoding: 'utf8', cwd: baseDir })
+  assert.equal(backslashBuildRes.status, 1)
+  assert.match(backslashBuildRes.stderr, /must be a safe relative path/)
 
   // Reviewed override (PDF-only historical republish): verifies the accepted
   // PDF with a correct finalBuild file, publishes ONLY the exposed PDF,

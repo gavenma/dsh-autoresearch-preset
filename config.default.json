@@ -1,5 +1,5 @@
 {
-  "_help": "AutoResearch preset default config keeps internal plans, receipts, packets, and run artifacts in hidden .research-agent/; completed user-facing deliverables are published under outputs/. Legacy visible research-agent/ and legacy .research-agent/ projects remain readable; an existing workspace file wins. MODEL ASSIGNMENT IS CENTRALIZED IN roleProfiles BELOW: every role has exactly one entry there and its model is chosen in that one place. An optional roleProfiles.<role>.modelFallbacks array is an ordered handoff chain: when a model fails with a provider/route error the role runner steps to the next entry, and a per-workspace breaker (<artifactRoot>/model-breaker.json, cooldown roleExecution.modelFallbackCooldownMs) makes later role runs skip a rate-limited model until the cooldown expires; a success on a model clears its entry. There is no separate roleModels bucket and no per-role tool list here — per-role tools are fixed by the built-in role manifest (the integration editor already carries read_image there). judgePanel is an optional per-judge override and only takes effect when research_judge.model is omitted. _recognizedModels is the pick list of valid 'provider/model' strings (refresh with autoresearch_list_models; unrecognized strings are flagged by autoresearch_dependency_check). The integration editor must use a multimodal model for visual inspection — if the default model in your deployment is text-only, point research_integration_editor at a multimodal model via the workspace config or config.local.json. The shipped defaults run every role on deepseek-official/deepseek-v4-flash; use `npm run init` to customize per deployment.",
+  "_help": "AutoResearch preset default config keeps internal plans, receipts, packets, and run artifacts in hidden .research-agent/; completed user-facing deliverables are published under outputs/. Legacy visible research-agent/ and legacy .research-agent/ projects remain readable; an existing workspace file wins. MODEL ASSIGNMENT IS CENTRALIZED IN roleProfiles BELOW: every role has exactly one entry there and its model is chosen in that one place. An optional roleProfiles.<role>.modelFallbacks array is an ordered handoff chain: when a model fails with a provider/route error the role runner steps to the next entry, and a per-workspace breaker (<artifactRoot>/model-breaker.json, cooldown roleExecution.modelFallbackCooldownMs) makes later role runs skip a rate-limited model until the cooldown expires; a success on a model clears its entry. There is no separate roleModels bucket and no per-role tool list here — per-role tools are fixed by the built-in role manifest (the integration editor already carries read_image there). judgePanel is an optional per-judge override and only takes effect when research_judge.model is omitted. _recognizedModels is the pick list of valid 'provider/model' strings (refresh with autoresearch_list_models; unrecognized strings are flagged by autoresearch_dependency_check). The integration editor must use a multimodal model for visual inspection — if the default model in your deployment is text-only, point research_integration_editor at a multimodal model via the workspace config or config.local.json. Each role may set reasoningEffort to a provider-supported effort identifier; unset roles use the provider default. The shipped defaults run every role on deepseek-official/deepseek-v4-flash; use `npm run init` to customize per deployment.",
   "_recognizedModels": [
     "deepseek-official/deepseek-v4-flash",
     "deepseek-official/deepseek-v4-pro"
@@ -43,53 +43,68 @@
   "roleProfiles": {
     "research_planner": {
       "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null,
       "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_scout": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "evidence_verifier": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_author": {
       "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null,
       "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_critic": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_synthesizer": {
       "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null,
       "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_judge": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_reporter": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_coder": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_unit_tester": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_literature_writer": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_abstract_writer": {
       "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null,
       "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_experiments_commentator": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     },
     "research_integration_editor": {
       "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null,
       "modelFallbacks": ["deepseek-official/deepseek-v4-pro"]
     },
     "research_integration_verifier": {
-      "model": "deepseek-official/deepseek-v4-flash"
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": null
     }
   }
 }

@@ -44,8 +44,8 @@ back.
 *scouts* that gather evidence in parallel (web pages, papers, PDFs); a
 *writer* drafts from that evidence; a *critic* attacks the draft for real
 problems rather than style nitpicks; *judges* compare the candidate versions
-and rank them. Every worker is fresh and confined: it sees only the inputs
-its role needs, writes only into its own step's folder, and returns when done.
+and rank them. Every worker is fresh and confined: it sees only the inputs its
+role needs, writes only into its own step's folder, and returns when done.
 
 **3. Draft → critique → revise, until the work converges.** Each step runs a
 bounded refinement loop: draft, critique, revise, re-critique. The loop stops
@@ -53,6 +53,9 @@ when the critique finds nothing real left to fix (convergence) or when the
 step's attempt budget is spent. When a step ends with several surviving
 candidates, the judges rank them **blind** — they do not know which version is
 the original, the revision, or who produced it — and the best one is promoted.
+If the judging panel itself degrades mechanically — unparsable rankings,
+duplicated or missing labels, all-tie scores, or too few usable rankings — the
+step is routed to the critic gate instead of being decided by a broken panel.
 This is what keeps "more iterations" from silently degrading quality.
 
 **4. Failures are traced to their cause.** If a later step can't meet its
@@ -69,7 +72,9 @@ work afterwards.
 
 **5. The final document is assembled, then re-verified as a whole.** When
 every content step is done, an *integration* pass merges the pieces: it checks
-that every planned contribution is present, fixes editorial issues in place
+that every planned contribution is present — each accepted section is hashed
+and anchored into a contribution ledger, so "is it actually in the final
+document" is a mechanical check — fixes editorial issues in place
 (shortening, formatting, moving material to an appendix), and — for
 substantive problems or conflicts between pieces — bounces the problem back to
 the step that owns it instead of silently rewriting someone's work. A visual
@@ -92,13 +97,15 @@ not name, and a project that declares no deliverables gets no folder at all.
 The plan is immutable after approval and the journal is append-only, so you
 can always reconstruct what happened and why.
 
-**7. Linear is a window, not the engine.** If you connect Linear (see Quick
-start), each plan step gets an issue that the agent updates as work
-progresses, so a human can follow the project on a board like any other Linear
-work. The mirror is one-directional by design: the files from step 6 are the
-source of truth, and the project never blocks on or trusts a Linear state. If
-the two disagree, the agent surfaces the drift instead of silently reconciling
-it.
+**7. Linear is the operational project surface, not the fact authority.** If
+you connect Linear (see Quick start), each plan step gets an issue with
+dependency relations (the plan's `dependsOn` edges appear as *blocks* arrows on
+the board), progress updates, and visible machine holds when an upstream step
+fails. Every mutation is recorded first in a local write-ahead log and applied
+to Linear with read-back confirmation, so an interrupted update can be replayed
+and a Linear outage never loses local progress. The approved plan and local
+journal remain authoritative for the DAG and immutable facts; local-only
+projects never call Linear.
 
 ## Quick start
 
@@ -159,7 +166,7 @@ Start a new DSH session afterwards (see Install below for the restart rule).
 ## Requirements
 
 - A compatible DSH installation. The preset was recorded and tested with
-  `@deepseek-ai/dsh` `0.1.1-rc.2`; pin and test the DSH version in your own
+  `@deepseek-ai/dsh` `0.1.2-rc.1`; pin and test the DSH version in your own
   deployment before production use.
 - Node.js 20 or later for the verification and installation scripts.
 - Optional: a Linear credential exposed to DSH as `LINEAR_API_KEY` for Linear
@@ -205,14 +212,21 @@ makes one simple promise:
 > configuration byte-for-byte identical, so an update can never silently change
 > how your deployment behaves.
 
-Two explicit command-line flags are the only way the installer writes that
-file, and only because you told it to:
+Two explicit command-line flags can write that file, and only because you told
+the installer to:
 
 - `--apply-local` — layer your git-ignored `config.local.json` overrides
   (created by `npm run init`) into the target config. Without the flag,
   `config.local.json` is simply ignored.
 - `--replace-config` — reset the target config to the shipped defaults. Combine
   with `--apply-local` to reset and then re-apply your overrides.
+
+`--clean-target` removes the destination preset tree before reinstalling, which
+eliminates stale unmanaged residue and old bundles. If the target already has a
+`config.default.json`, that file is preserved byte-for-byte across the clean
+unless `--replace-config` or `--apply-local` explicitly changes it. Unsafe clean
+targets such as `/`, the home directory, or a parent of the source checkout are
+rejected.
 
 The one exception that needs no instruction: a first install into a target
 that has no config yet receives the shipped `config.default.json`, because a
@@ -245,9 +259,13 @@ The check is offline: it re-hashes every runtime file against the build
 manifest and verifies the preset's internal consistency. It calls nothing —
 no models, no DSH server, no Linear, no network — and takes seconds.
 
-A full runtime validation should also mount the installed preset in DSH and run
-its built-in self-checks (`autoresearch_build_probe` and `linear_build_probe`);
-both should report a healthy project graph before you start real work.
+Run the complete local release gate with `npm run release:verify`. It executes
+the full test suite, local-only Markdown/PDF/reproducible-TeX smoke, installs the
+preset into a clean target with local overrides, and imports the installed orchestrator and Linear
+bundles for both build probes. A live rollout should additionally restart DSH,
+start a blank session, and run `autoresearch_build_probe` and
+`linear_build_probe`; both must report a healthy immutable graph, with mutable
+configuration differences listed separately as `configDrift`.
 
 ## Configuration and operation
 
@@ -262,6 +280,14 @@ defaults before use:
 - Model identifiers are deployment-specific. Configure accessible providers and
   models, particularly for the integration editor when image inspection is
   needed.
+- Each role may set `reasoningEffort` to a provider-supported identifier for
+  deeper (or shallower) reasoning; unset roles use the provider default, and an
+  effort the provider does not advertise is reported as a warning.
+- The five writing roles ship with a `modelFallbacks` chain to
+  `deepseek-official/deepseek-v4-pro`: when a role's model fails with a
+  provider or rate-limit error, the role steps to the next model in the chain,
+  and a per-workspace breaker skips a rate-limited model until its cooldown
+  expires.
 - External research performs outbound HTTP(S) fetches and may send context to
   configured model providers. Disable it when the research material is not
   authorized for those services.

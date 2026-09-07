@@ -1334,6 +1334,7 @@ export function renderSpecBlock(contract, opts = {}) {
     SPEC_BLOCK_START,
     'project: ' + (contract.projectId ?? ''),
     'plan-revision: ' + (contract.planRevision ?? 1),
+    'node-revision: ' + (contract.nodeRevision ?? 1),
     'contract-digest: ' + (contract.digest ?? ''),
     'node: ' + (contract.nodeId ?? ''),
     'kind: ' + (contract.kind ?? 'research'),
@@ -2232,11 +2233,12 @@ export function revisionRequestDigest(request) {
     problem: request?.problem ?? '',
     requiredChange: request?.requiredChange ?? '',
     acceptanceChecks: [...(request?.acceptanceChecks ?? [])].sort(),
+    upstreamAttribution: request?.upstreamAttribution ?? null,
   })
 }
 
 export function revisionRequestMarker(projectId, epoch, nodeId, requestDigestValue) {
-  return 'autoresearch-revision-request:' + projectId + ':' + epoch + ':' + nodeId + ':' + requestDigestValue
+  return 'autoresearch-causal-event:' + projectId + ':' + epoch + ':' + nodeId + ':' + requestDigestValue
 }
 
 export function revisionCommentBody(request, marker) {
@@ -2353,11 +2355,14 @@ export function validateBuildProbe(expected, actual, opts = {}) {
   const expectedId = expected?.aggregateId ?? ''
   const actualId = actual?.aggregateId ?? ''
   const mismatches = []
+  const configDrift = []
+  const immutableScope = new Set(expected?.aggregateScope ?? Object.keys(expected?.files ?? {}))
   const graph = isPlainObject(actual?.graph) ? actual.graph : {}
   for (const [path, expectedHash] of Object.entries(expected?.files ?? {})) {
     const actualHash = graph[path]
-    if (actualHash === undefined) mismatches.push(path + ': missing on disk')
-    else if (actualHash !== expectedHash) mismatches.push(path + ': hash mismatch')
+    const target = immutableScope.has(path) ? mismatches : configDrift
+    if (actualHash === undefined) target.push(path + ': missing on disk')
+    else if (actualHash !== expectedHash) target.push(path + ': hash mismatch')
   }
   for (const [path] of Object.entries(graph)) {
     if (!(path in (expected?.files ?? {}))) mismatches.push(path + ': unexpected module in graph')
@@ -2370,6 +2375,7 @@ export function validateBuildProbe(expected, actual, opts = {}) {
     expectedGraphHash: expected?.graphHash ?? null,
     actualGraphHash: actual?.graphHash ?? null,
     mismatches,
+    configDrift,
     mountedUrl: opts.mountedUrl ?? '',
     probe: opts.probeName ?? 'build-probe',
     ...(opts.companion ? { companion: opts.companion } : {}),

@@ -87,6 +87,57 @@ function makeRealSubprocess(failNames = new Set()) {
     },
   }
 }
+const cleanupDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-tex-cleanup-'))
+const cleanupFops = {
+  ...fileService,
+  async exists(target) { return (await fileService.stat(target)) !== undefined },
+  async ensureDir(target) { await fs.mkdir(target, { recursive: true }) },
+  async removeTree(target) { await fs.rm(target, { recursive: true, force: true }) },
+  async copy(source, destination) { await fs.mkdir(path.dirname(destination), { recursive: true }); await fs.copyFile(source, destination) },
+  async writeJson(target, value) { await fileService.writeText(target, JSON.stringify(value, null, 2) + '\n') },
+  async readJson(target) { try { return JSON.parse(await fileService.readText(target)) } catch { return null } },
+  async listDir(target) { try { return (await fs.readdir(target, { withFileTypes: true })).map((entry) => ({ name: entry.name, dir: entry.isDirectory() })) } catch { return [] } },
+}
+const cleanupSubprocess = {
+  async resolveExecutable() { return '/fake/latexmk' },
+  spawn({ argv, cwd }) {
+    const done = (async () => {
+      const outDir = argv.find((arg) => String(arg).startsWith('-outdir='))?.slice('-outdir='.length)
+      assert.ok(outDir)
+      assert.equal(JSON.parse(await fs.readFile(path.join(outDir, '.autoresearch-compiler.json'), 'utf8')).owner, 'autoresearch-compiler-v1')
+      for (const [name, value] of [['final.log', 'ok'], ['final.fls', 'INPUT x'], ['final.pdf', '%PDF'], ['final.fdb_latexmk', 'scratch'], ['final.synctex.gz', 'scratch']]) await fs.writeFile(path.join(outDir, name), value)
+      return { exitCode: 0 }
+    })()
+    return { done, collected: { stdout: { readFrom: async () => ({ text: '' }) }, stderr: { readFrom: async () => ({ text: '' }) } } }
+  },
+}
+const cleanupBuild = await lib.helpers.strictTexBuild(cleanupFops, cleanupSubprocess, cleanupDir, cleanupDir, 'final.tex')
+assert.equal(cleanupBuild.clean, true)
+assert.equal(cleanupBuild.pdfExists, true)
+assert.equal(cleanupBuild.scratchCleaned, true)
+assert.equal(await fs.access(path.join(cleanupDir, '.autoresearch-compiler')).then(() => true).catch(() => false), false)
+assert.equal(await fs.readFile(path.join(cleanupDir, 'final.pdf'), 'utf8'), '%PDF')
+assert.equal(await fs.access(path.join(cleanupDir, 'final.log')).then(() => true).catch(() => false), false)
+assert.equal(await fs.access(path.join(cleanupDir, 'final.fls')).then(() => true).catch(() => false), false)
+await fs.rm(cleanupDir, { recursive: true, force: true })
+
+const previewSafetyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-preview-safety-'))
+await fs.writeFile(path.join(previewSafetyDir, 'final.pdf'), '%PDF')
+await fs.mkdir(path.join(previewSafetyDir, 'preview'), { recursive: true })
+await fs.writeFile(path.join(previewSafetyDir, 'preview', 'user-file.txt'), 'do not remove')
+const previewSafetyFops = {
+  ...fileService,
+  async exists(target) { return fs.access(target).then(() => true).catch(() => false) },
+  async readJson(target) { try { return JSON.parse(await fs.readFile(target, 'utf8')) } catch { return undefined } },
+  async listDir(target) { return (await fs.readdir(target, { withFileTypes: true })).map((entry) => ({ name: entry.name, dir: entry.isDirectory() })) },
+  async removeTree(target) { await fs.rm(target, { recursive: true, force: true }) },
+  async ensureDir(target) { await fs.mkdir(target, { recursive: true }) },
+  async writeJson(target, value) { await fs.writeFile(target, JSON.stringify(value)) },
+}
+await assert.rejects(() => lib.helpers.renderPreview(previewSafetyFops, { async resolveExecutable() { throw new Error('not reached') } }, baseDir, previewSafetyDir), /not owned by AutoResearch/)
+assert.equal(await fs.readFile(path.join(previewSafetyDir, 'preview', 'user-file.txt'), 'utf8'), 'do not remove')
+await fs.rm(previewSafetyDir, { recursive: true, force: true })
+
 const texAvailable = (() => {
   try { fsSync.accessSync(fsSync.realpathSync('/usr/bin/latexmk'), fsSync.constants.X_OK); return true } catch { return false }
 })()
@@ -230,6 +281,7 @@ const exec = { agent: { session: { header: { cwd: baseDir, delegationDepth: 0 } 
     async readText(target) { return await fs.readFile(await svc.resolve(target), 'utf8') },
     async exists(target) { return (await svc.stat(target)) !== undefined },
     async stat(target) { try { return await fs.stat(await svc.resolve(target)) } catch { return undefined } },
+    async lstat(target) { try { const info = await fs.lstat(await svc.resolve(target)); return { type: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'directory' : 'file' } } catch { return undefined } },
   }
   const join = (rel) => path.join(dir, rel)
   await fs.writeFile(join('main.tex'), '\\input{a}\n')
@@ -258,6 +310,34 @@ const exec = { agent: { session: { header: { cwd: baseDir, delegationDepth: 0 } 
   const deep = await lib.helpers.resolveTexInputs(svc, dir, 'd0.tex', { maxDepth: 2 })
   assert.equal(deep.files.length, 2, 'depth must be bounded')
   assert.ok(deep.unresolved.length >= 1, 'targets beyond depth must be reported unresolved')
+
+  // Nested imports resolve relative to the including file and cannot escape
+  // the run root through traversal.
+  await fs.mkdir(join('sections'))
+  await fs.writeFile(join('sections/main.tex'), '\\input{child}\n')
+  await fs.writeFile(join('sections/child.tex'), 'nested leaf\n')
+  const nested = await lib.helpers.resolveTexInputs(svc, dir, 'sections/main.tex')
+  assert.deepEqual(nested.files.map((f) => f.relPath), ['sections/child.tex'])
+  await fs.writeFile(join('escape.tex'), '\\input{../outside}\n')
+  await fs.writeFile(join('outside.tex'), 'must not resolve\n')
+  const escaped = await lib.helpers.resolveTexInputs(svc, dir, 'escape.tex')
+  assert.equal(escaped.files.length, 0)
+  assert.ok(escaped.unresolved.some((item) => item.includes('escapes run directory')))
+
+  await fs.writeFile(join('unsafe-paths.tex'), '\\input{/etc/passwd}\n\\input{C:\\secrets\\paper}\n')
+  const unsafePaths = await lib.helpers.resolveTexInputs(svc, dir, 'unsafe-paths.tex')
+  assert.equal(unsafePaths.files.length, 0)
+  assert.equal(unsafePaths.unresolved.length, 2)
+  assert.ok(unsafePaths.unresolved.every((item) => item.includes('escapes run directory')))
+
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-tex-external-'))
+  await fs.writeFile(path.join(externalDir, 'secret.tex'), 'external content\n')
+  await fs.symlink(externalDir, join('linked'))
+  await fs.writeFile(join('symlink-main.tex'), '\\input{linked/secret}\n')
+  const symlinked = await lib.helpers.resolveTexInputs(svc, dir, 'symlink-main.tex')
+  assert.equal(symlinked.files.length, 0)
+  assert.deepEqual(symlinked.unresolved, ['linked/secret'])
+  await fs.rm(externalDir, { recursive: true, force: true })
 
   await fs.rm(dir, { recursive: true, force: true })
 }

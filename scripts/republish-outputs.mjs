@@ -143,15 +143,22 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
 
   const effectiveFinalBuild = finalBuild
   // Reviewed finalBuild verification for the record itself (hash recomputed
-  // against the source root). rebuildable: true additionally requires the
-  // recorder pair, enforced by the shared publish core.
+  // against the source root). Paths are confined before any filesystem read.
+  // rebuildable: true additionally requires the recorder pair, enforced by the
+  // shared publish core.
   if (effectiveFinalBuild) {
-    const srcHash = await hashFile(fops, path.join(sourceAbs, effectiveFinalBuild.sourcePath))
+    const safeFinalBuildPath = (value, field) => {
+      if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value) || value.includes('\\') || value.split('/').includes('..')) {
+        throw new Error('final-build ' + field + ' must be a safe relative path under --source-root')
+      }
+      return path.join(sourceAbs, value)
+    }
+    const srcHash = await hashFile(fops, safeFinalBuildPath(effectiveFinalBuild.sourcePath, 'sourcePath'))
     if (srcHash !== effectiveFinalBuild.sourceHash) {
       throw new Error('finalBuild verification failed: sourcePath ' + effectiveFinalBuild.sourcePath + ' hash mismatch (recorded ' + String(effectiveFinalBuild.sourceHash).slice(0, 12) + '… now ' + (srcHash || 'missing').slice(0, 12) + '…)')
     }
     if (effectiveFinalBuild.pdfPath) {
-      const pdfHash = await hashFile(fops, path.join(sourceAbs, effectiveFinalBuild.pdfPath))
+      const pdfHash = await hashFile(fops, safeFinalBuildPath(effectiveFinalBuild.pdfPath, 'pdfPath'))
       if (pdfHash !== effectiveFinalBuild.pdfHash) {
         throw new Error('finalBuild verification failed: pdfPath ' + effectiveFinalBuild.pdfPath + ' hash mismatch (recorded ' + String(effectiveFinalBuild.pdfHash).slice(0, 12) + '… now ' + (pdfHash || 'missing').slice(0, 12) + '…)')
       }

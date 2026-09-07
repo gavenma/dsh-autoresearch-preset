@@ -55,6 +55,17 @@ assert.equal(stateAfter.nodes.consumer.status, 'todo')
 assert.equal(stateAfter.nodes.integration.status, 'todo')
 assert.equal(stateAfter.nodes.consumer.issueId, 'consumer-issue')
 assert.equal(stateAfter.nodes.consumer.url, 'https://example.invalid/consumer')
+assert.equal(stateAfter.nodes.consumer.nodeRevision, 2)
+stateAfter.nodes.consumer.status = 'done'
+stateAfter.nodes.consumer.receipts = ['fresh-acceptance']
+await fs.writeFile(path.join(projectDir, 'state.json'), JSON.stringify(stateAfter, null, 2) + '\n')
+const replay = await tool.execute({ projectId, nodeId: 'consumer', epoch: 1, request: { problem: 'Concrete issue.', requiredChange: 'Revise.', acceptanceChecks: ['Recheck.'] } }, exec)
+assert.equal(replay.created, false)
+assert.deepEqual(replay.resetNodes, [])
+const stateAfterReplay = JSON.parse(await fs.readFile(path.join(projectDir, 'state.json'), 'utf8'))
+assert.equal(stateAfterReplay.nodes.consumer.status, 'done')
+assert.equal(stateAfterReplay.nodes.consumer.nodeRevision, 2)
+assert.deepEqual(stateAfterReplay.nodes.consumer.receipts, ['fresh-acceptance'])
 
 await fs.rm(baseDir, { recursive: true, force: true })
 console.log('revision request wiring passed for generation ' + manifest.generation)

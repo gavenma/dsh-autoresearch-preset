@@ -30,6 +30,6 @@ and Linear is a derived view.
 
 Role prompts and skills are public interface. When changing them, document the
 behavioral contract, preserve blind judging where applicable, and avoid claims
-that a model's causal attribution proves a root cause. The causal-backtracking
-design is documented in `docs/causal-backtracking-plan.zh-CN.md` and remains a
-design document until implemented and tested.
+that a model's causal attribution proves a root cause. The implemented causal lifecycle, Linear projection, and hardening contract is
+documented in `docs/autoresearch-hardening-linear-causal-plan.md`; changes must
+keep that contract and its release gates current.

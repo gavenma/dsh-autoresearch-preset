@@ -39,7 +39,12 @@ export async function backfillRun(runDirAbs, { dryRun = false } = {}) {
   if (!receipt || receipt.kind !== 'acceptance-receipt' || receipt.overall !== 'PASS') {
     return { ok: false, skipped: 'no PASSing acceptance receipt' }
   }
-  const artifactName = receipt.artifactFormat === 'markdown' ? 'final.md' : 'output.tex'
+  const artifactName = typeof receipt.artifact?.path === 'string' && receipt.artifact.path.trim()
+    ? receipt.artifact.path.trim()
+    : (receipt.artifactFormat === 'markdown' ? 'final.md' : 'output.tex')
+  if (path.isAbsolute(artifactName) || artifactName.split('/').includes('..') || artifactName.includes('\\')) {
+    return { ok: false, skipped: 'accepted artifact path is unsafe: ' + artifactName }
+  }
   let outputText
   try {
     outputText = await fs.readFile(path.join(runDirAbs, artifactName), 'utf8')
@@ -54,6 +59,7 @@ export async function backfillRun(runDirAbs, { dryRun = false } = {}) {
   const nodeRevision = Number.isInteger(receipt.nodeRevision) && receipt.nodeRevision > 0 ? receipt.nodeRevision : 1
   const ledger = deriveNodeOutputDocument({
     contract: { nodeId, artifactFormat: receipt.artifactFormat },
+    artifactPath: artifactName,
     outputText,
     outputHash: String(receipt.outputHash ?? ''),
     nodeRevision,

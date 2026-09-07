@@ -1,5 +1,5 @@
-// Source entry for the AutoResearch Linear adapter. The build script emits a versioned runtime bundle.
-import * as autoresearchCore from "./autoresearch-core.mjs"
+// AUTO-GENERATED Linear entry, generation 836c5e1f5fa7. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-836c5e1f5fa7.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -1133,8 +1133,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = '__AUTORESEARCH_GENERATION__'
-export const EMBEDDED_BUILD_ID = '__AUTORESEARCH_BUILD_ID__'
+export const EMBEDDED_GENERATION = '836c5e1f5fa7'
+export const EMBEDDED_BUILD_ID = '1141e5056c8674e89ab8321832ce0fd19d4697c517d4b4ffadcf8b1278888dce'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)

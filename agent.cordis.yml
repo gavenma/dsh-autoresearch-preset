@@ -156,6 +156,19 @@
             model: deepseek-v4-flash
             thresholdRatio: 0.6
             retainRatio: 0.12
+          - provider: local-qwen-fp8
+            model: qwen3.8-27b-fp8
+            thresholdRatio: 0.6
+            retainRatio: 0.1
+            maxOverflowRetries: 2
+            # Checkpoint summarization output cap (CoT + summary text).
+            maxTokens: 32768
+          - provider: local-qwen-uncensored
+            model: qwen3.8-27b-uncensored
+            thresholdRatio: 0.6
+            retainRatio: 0.1
+            maxOverflowRetries: 2
+            maxTokens: 32768
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
@@ -284,8 +297,8 @@
 # Both rows consume host services only (fs/web/subagents/agents/credentials/
 # subprocess) and publish nothing, so they need no isolate realm.
 - id: tool-autoresearch
-  name: ./tools/research-orchestrator-b6ea766621ac.mjs
+  name: ./tools/research-orchestrator-836c5e1f5fa7.mjs
 
 - id: tool-linear
-  name: ./tools/linear-b6ea766621ac.mjs
+  name: ./tools/linear-836c5e1f5fa7.mjs
 

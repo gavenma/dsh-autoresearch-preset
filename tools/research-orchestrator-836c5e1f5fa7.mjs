@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation b6ea766621ac. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-b6ea766621ac.mjs"
+// AUTO-GENERATED orchestrator entry, generation 836c5e1f5fa7. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-836c5e1f5fa7.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -1390,6 +1390,12 @@ function makeProfiles(util, config) {
     return config.expectedModelForRole(role, cfg)
   }
 
+  profiles.reasoningEffortWarning = function (provider, model, effort, modelInfo) {
+    const advertised = Array.isArray(modelInfo?.reasoning?.efforts) ? modelInfo.reasoning.efforts.map((entry) => entry?.id).filter(Boolean) : null
+    if (!effort || !advertised || advertised.includes(effort)) return null
+    return 'reasoningEffort "' + effort + '" is not advertised for ' + provider + '/' + model + '; the provider adapter remains authoritative.'
+  }
+
   function getRoleProfileToolDefaults(cfg, role) {
     const { logical, actual } = profiles.resolveRoleKeys(cfg, role)
     for (const key of [logical, actual, role]) {
@@ -1475,12 +1481,11 @@ function makeProfiles(util, config) {
     const retryDelayMs = profileNumber('retryDelayMs', Number(execution.retryDelayMs) || 0, 0, 60 * 1000)
     const leaseMs = profileNumber('leaseMs', Number(execution.leaseMs) || 900000, 1000, 24 * 60 * 60 * 1000)
 
-    const reasoning =
-      typeof profile?.reasoning === 'string' && profile.reasoning
-        ? profile.reasoning
-        : typeof opts.tomlReasoning === 'string' && opts.tomlReasoning
-          ? opts.tomlReasoning
-          : null
+    const configuredReasoningEffort = profile?.reasoningEffort
+    if (configuredReasoningEffort !== undefined && configuredReasoningEffort !== null && (typeof configuredReasoningEffort !== 'string' || !configuredReasoningEffort.trim() || configuredReasoningEffort.trim().length > 64)) {
+      throw new Error('roleProfiles.' + role + '.reasoningEffort must be null or a non-empty provider-owned string of at most 64 characters.')
+    }
+    const reasoningEffort = typeof configuredReasoningEffort === 'string' ? configuredReasoningEffort.trim() : null
 
     const promptFile =
       typeof profile?.promptFile === 'string' && profile.promptFile.trim()
@@ -1503,7 +1508,7 @@ function makeProfiles(util, config) {
       model,
       modelSource,
       modelFallbacks,
-      reasoning,
+      reasoningEffort,
       promptFile,
       tools,
       sessionControl,
@@ -1673,7 +1678,13 @@ function makeModelParse() {
       ? { provider: parsed.provider, model: parsed.model, modelSource: profile.modelSource ?? null }
       : { provider: null, model: null, modelSource: profile.modelSource ?? null }
     if (Number.isInteger(profile.maxTokens) && profile.maxTokens > 0) result.maxTokens = profile.maxTokens
-    return result.provider || result.model || result.maxTokens ? result : null
+    // DSH owns the effort vocabulary; validate shape here and let the selected
+    // adapter validate provider-specific values.
+    const effort = typeof profile.reasoningEffort === 'string' && profile.reasoningEffort.trim()
+      ? profile.reasoningEffort.trim()
+      : ''
+    if (effort && effort.length <= 64) result.reasoningEffort = effort
+    return result.provider || result.model || result.maxTokens || result.reasoningEffort ? result : null
   }
 
   return mp
@@ -1745,6 +1756,7 @@ function makeRoleRunner(deps = {}) {
       provider: typeof agentOptions?.provider === 'string' ? agentOptions.provider : null,
       model: typeof agentOptions?.model === 'string' ? agentOptions.model : null,
       maxTokens: Number.isInteger(agentOptions?.maxTokens) ? agentOptions.maxTokens : null,
+      reasoningEffort: typeof agentOptions?.reasoningEffort === 'string' ? agentOptions.reasoningEffort : null,
     }
   }
 
@@ -2150,7 +2162,11 @@ function makeRoleRunner(deps = {}) {
     const baseAgentOptions = { ...(params.agentOptions ?? {}) }
     delete baseAgentOptions.maxTokens
     const contractBound = Boolean(params.runDir)
-    const groupId = params.logicalGroupKey ? logicalId(params.logicalGroupKey) : 'lg-' + core.sha256Text(JSON.stringify({ role: params.role, task: params.task ?? '' })).slice(0, 24)
+    const routeIdentity = requestedRoute({ ...params.agentOptions, maxTokens: configuredMaxTokens })
+    const logicalGroupKey = params.logicalGroupKey
+      ? { ...params.logicalGroupKey, route: { ...(util.isPlainObject(params.logicalGroupKey.route) ? params.logicalGroupKey.route : {}), ...routeIdentity } }
+      : null
+    const groupId = logicalGroupKey ? logicalId(logicalGroupKey) : 'lg-' + core.sha256Text(JSON.stringify({ role: params.role, task: params.task ?? '', route: routeIdentity })).slice(0, 24)
     if (contractBound && !params.logicalGroupKey) throw new Error('logicalGroupKey is required for contract-bound role calls.')
     const maxAttemptsValue = Number.isInteger(params.maxAttempts) && params.maxAttempts > 0 ? Math.min(params.maxAttempts, maxAttemptsCeiling) : defaultMaxAttempts
     const retryDelayMs = Number.isInteger(params.retryDelayMs) && params.retryDelayMs >= 0 ? params.retryDelayMs : 0
@@ -2206,12 +2222,18 @@ function makeRoleRunner(deps = {}) {
     const manifestPath = contractBound ? pathutil.resolveInside(params.runDir, 'packets/role-attempts/' + groupId + '/manifest.json') : null
     const groupDir = contractBound ? pathutil.resolveInside(params.runDir, 'packets/role-attempts/' + groupId) : null
     const claimPath = contractBound ? pathutil.resolveInside(params.runDir, 'packets/role-attempts/' + groupId + '/claim.json') : null
+    const ownerPath = contractBound ? pathutil.resolveInside(params.runDir, 'packets/role-attempts/' + groupId + '/owner.json') : null
     let manifest = contractBound ? (await params.fops.readJson(manifestPath) ?? { logicalGroupId: groupId, status: 'running', attempts: [] }) : { logicalGroupId: groupId, status: 'running', attempts: [] }
     const existingRecords = contractBound ? await readAttemptRecords(params.fops, groupDir, manifest) : []
     const attempts = [...existingRecords]
     const terminalStatus = (envelope) => envelope.outcomeClass === 'aborted' ? 'aborted' : envelope.outcomeClass === 'timeout' ? 'timed-out' : 'failed'
     if (contractBound) {
       await ensureDir(params.fops, groupDir)
+      const ownerId = String(params.owner ?? 'coordinator')
+      const ownerMarker = { schemaVersion: 1, ownerId, logicalGroupId: groupId, runDir: pathutil.relativePath('.', params.runDir) }
+      const existingOwner = await params.fops.readJson(ownerPath)
+      if (existingOwner && existingOwner.ownerId !== ownerId) throw new Error('role attempt group is owned by another coordinator: ' + groupId)
+      if (!existingOwner) await writeJsonNew(params.fops, ownerPath, ownerMarker)
       if (manifest.status === 'succeeded' && manifest.selectedAttempt) {
         const selected = attempts.find((item) => item.attemptId === manifest.selectedAttempt)
         if (selected?.outputRef?.complete === true) return { ...selected, cached: true, attempts }
@@ -3194,7 +3216,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makePlanVa
 function makeProjectState(pathutil, util, planvalidate) {
   const projectstate = {}
 
-  projectstate.STATE_SCHEMA_VERSION = 1
+  projectstate.STATE_SCHEMA_VERSION = 2
   projectstate.MAX_CURSOR_IDS = 500
 
   projectstate.projectsDir = function (baseDir, artifactRoot = 'research-agent') {
@@ -3245,6 +3267,10 @@ function makeProjectState(pathutil, util, planvalidate) {
         hasFinal: false,
         finalCommentId: '',
         receipts: [],
+        causalHolds: [],
+        nodeRevision: 1,
+        linearProjection: null,
+        projectionStatus: 'none',
         updatedAt: '',
       }
     }
@@ -3281,23 +3307,22 @@ function makeProjectState(pathutil, util, planvalidate) {
     }
     // Heal schema drift silently: ensure every plan node has an entry.
     const nodes = { ...(util.isPlainObject(raw.nodes) ? raw.nodes : {}) }
+    const defaults = projectstate.emptyState(plan).nodes
     for (const node of plan.nodes ?? []) {
-      if (!util.isPlainObject(nodes[node.id])) {
-        nodes[node.id] = projectstate.emptyState(plan).nodes[node.id]
-      }
+      if (!util.isPlainObject(nodes[node.id])) nodes[node.id] = defaults[node.id]
     }
     const state = {
       ...raw,
-      schemaVersion: raw.schemaVersion ?? projectstate.STATE_SCHEMA_VERSION,
+      schemaVersion: projectstate.STATE_SCHEMA_VERSION,
       nodes,
       commentCursors: util.isPlainObject(raw.commentCursors) ? raw.commentCursors : {},
     }
     return { state, path, missing: false, invalid: false }
   }
 
-  projectstate.saveState = async function (fops, baseDir, projectId, state, artifactRoot = 'research-agent', statePathOverride = '') {
+  projectstate.saveState = async function (fops, baseDir, projectId, state, artifactRoot = 'research-agent', statePathOverride = '', writeMode = undefined) {
     state.updatedAt = new Date().toISOString()
-    await fops.writeJson(statePathOverride || projectstate.statePath(baseDir, projectId, artifactRoot), state)
+    await fops.writeJson(statePathOverride || projectstate.statePath(baseDir, projectId, artifactRoot), state, writeMode)
   }
 
   // Receipt-safe single-node patch: applies a shallow merge, appends
@@ -3306,6 +3331,8 @@ function makeProjectState(pathutil, util, planvalidate) {
   projectstate.patchNode = async function (fops, baseDir, projectId, nodeId, patch) {
     const plan = await projectstate.loadPlan(fops, baseDir, projectId)
     if (!plan.ok) throw new Error(plan.error)
+    const statePath = projectstate.statePath(baseDir, projectId, plan.artifactRoot)
+    const stateStat = typeof fops.statInfo === 'function' ? await fops.statInfo(statePath) : null
     const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
     const { state } = loaded
     const entry = state.nodes[nodeId]
@@ -3316,8 +3343,92 @@ function makeProjectState(pathutil, util, planvalidate) {
       entry.receipts = [...seen, ...patch.receipts.filter((receipt) => !seen.has(receipt))]
     }
     entry.updatedAt = new Date().toISOString()
-    await projectstate.saveState(fops, baseDir, projectId, state, plan.artifactRoot, loaded.path)
+    const writeMode = stateStat?.version ? { kind: 'replaceIfVersion', version: stateStat.version } : undefined
+    await projectstate.saveState(fops, baseDir, projectId, state, plan.artifactRoot, loaded.path, writeMode)
     return state
+  }
+
+  projectstate.transitionNode = async function (fops, baseDir, projectId, nodeId, transition, patch = {}) {
+    const allowed = { claim: 'in_progress', complete: 'done', hold: 'todo', retry: 'todo', fail: 'todo' }
+    if (!allowed[transition]) throw new Error('unknown node transition: ' + transition)
+    const plan = await projectstate.loadPlan(fops, baseDir, projectId)
+    if (!plan.ok) throw new Error(plan.error)
+    const statePath = projectstate.statePath(baseDir, projectId, plan.artifactRoot)
+    const stateStat = typeof fops.statInfo === 'function' ? await fops.statInfo(statePath) : null
+    const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
+    const entry = loaded.state.nodes?.[nodeId]
+    if (!entry) throw new Error('Unknown node id: ' + nodeId)
+    if (entry.status === 'blocked' && transition !== 'hold') throw new Error('user-decision blocked node cannot be transitioned automatically: ' + nodeId)
+    const next = { ...patch, status: allowed[transition], updatedAt: new Date().toISOString() }
+    if (transition === 'hold' && !Array.isArray(patch.causalHolds)) throw new Error('hold transition requires causalHolds')
+    if (transition === 'fail' && typeof patch.failureReason !== 'string' || transition === 'fail' && !patch.failureReason.trim()) throw new Error('fail transition requires failureReason')
+    if (transition === 'complete') next.causalHolds = []
+    const linearProjectId = loaded.state.project?.linearProjectId
+    if (typeof linearProjectId === 'string' && linearProjectId.trim()) {
+      next.projectionStatus = 'pending'
+      next.linearProjection = {
+        projectId,
+        nodeId,
+        status: next.status,
+        blockedBy: (next.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []),
+        reason: (next.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; '),
+        updatedAt: next.updatedAt,
+      }
+    }
+    Object.assign(entry, next)
+    if (transition === 'complete') {
+      for (const [otherId, other] of Object.entries(loaded.state.nodes ?? {})) {
+        if (otherId === nodeId || !Array.isArray(other?.causalHolds)) continue
+        const before = core.stableStringify(other.causalHolds)
+        other.causalHolds = other.causalHolds.map((hold) => ({ ...hold, blockedBy: (hold.blockedBy ?? []).filter((id) => id !== nodeId) })).filter((hold) => hold.blockedBy.length > 0)
+        if (core.stableStringify(other.causalHolds) === before) continue
+        other.updatedAt = next.updatedAt
+        if (typeof linearProjectId === 'string' && linearProjectId.trim()) {
+          other.projectionStatus = 'pending'
+          other.linearProjection = { projectId: linearProjectId, nodeId: otherId, status: other.status, blockedBy: other.causalHolds.flatMap((hold) => hold.blockedBy ?? []), reason: other.causalHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: next.updatedAt }
+        }
+      }
+    }
+    const writeMode = stateStat?.version ? { kind: 'replaceIfVersion', version: stateStat.version } : undefined
+    await projectstate.saveState(fops, baseDir, projectId, loaded.state, plan.artifactRoot, loaded.path, writeMode)
+    return { nodeId, transition, state: loaded.state }
+  }
+
+  // Machine causal holds are an overlay, separate from user-decision blocked.
+  projectstate.hasCausalHold = function (entry) {
+    return Array.isArray(entry?.causalHolds) && entry.causalHolds.some((hold) => util.isPlainObject(hold) && Array.isArray(hold.blockedBy) && hold.blockedBy.length > 0)
+  }
+
+  projectstate.downstreamClosure = function (plan, nodeId) {
+    const descendants = new Set()
+    const nodes = Array.isArray(plan?.nodes) ? plan.nodes : []
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const node of nodes) {
+        const deps = Array.isArray(node.dependsOn) ? node.dependsOn : []
+        if (deps.includes(nodeId) || deps.some((dep) => descendants.has(dep))) {
+          if (!descendants.has(node.id)) { descendants.add(node.id); changed = true }
+        }
+      }
+    }
+    return [...descendants]
+  }
+
+  projectstate.failNode = async function (fops, baseDir, projectId, nodeId, failureReason) {
+    const failed = await projectstate.transitionNode(fops, baseDir, projectId, nodeId, 'fail', { failureReason })
+    const loadedPlan = await projectstate.loadPlan(fops, baseDir, projectId)
+    if (!loadedPlan.ok) throw new Error(loadedPlan.error)
+    const heldNodeIds = []
+    for (const descendantId of projectstate.downstreamClosure(loadedPlan.plan, nodeId)) {
+      const entry = failed.state.nodes?.[descendantId]
+      if (!entry || entry.status === 'done' || entry.status === 'blocked') continue
+      const hold = { schemaVersion: 1, nodeId: descendantId, blockedBy: [nodeId], reason: 'upstream node failed: ' + failureReason, sourceEventDigest: null }
+      await projectstate.transitionNode(fops, baseDir, projectId, descendantId, 'hold', { causalHolds: [hold] })
+      heldNodeIds.push(descendantId)
+    }
+    const refreshed = await projectstate.loadState(fops, baseDir, projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+    return { nodeId, heldNodeIds, state: refreshed.state }
   }
 
   // Deterministic ready set (plan §4.2.2): nodes whose dependsOn are all
@@ -3332,7 +3443,7 @@ function makeProjectState(pathutil, util, planvalidate) {
     for (const id of order) {
       if (id === (plan.integrationId ?? 'integration')) continue
       const entry = nodes[id]
-      if (!entry || entry.status === 'done' || entry.status === 'blocked') continue
+      if (!entry || entry.status !== 'todo' || projectstate.hasCausalHold(entry)) continue
       const deps = (byId[id]?.dependsOn ?? []).filter((dep) => dep !== id)
       const allDone = deps.every((dep) => nodes[dep]?.status === 'done')
       if (allDone) ready.push(id)
@@ -3477,6 +3588,10 @@ function makeProjectState(pathutil, util, planvalidate) {
       if (entry && issue && entry.issueId && issue.id !== entry.issueId) {
         drift.push('linear-id-mismatch')
       }
+      if (issue && (issue.archivedAt || issue.trashed === true)) {
+        drift.push(issue.trashed === true ? 'linear-issue-trashed' : 'linear-issue-archived')
+        errors.push('Linear issue is archived or trashed; do not recreate or unarchive it automatically.')
+      }
       const linearDone = issue?.state?.type === 'completed' || issue?.state?.name === 'Done' || issue?.state?.name === 'Completed'
       const expectedLinearState = entry?.linearState?.trim() || (entry?.status === 'done' ? 'Done' : 'Todo')
       if (entry && issue && entry.status === 'done' && issue?.state?.name !== expectedLinearState) drift.push('linear-behind')
@@ -3486,10 +3601,14 @@ function makeProjectState(pathutil, util, planvalidate) {
 
       const desiredStatus = entry?.status ?? 'todo'
       let nextAction
-      if (!entry) {
+      if (issue && (issue.archivedAt || issue.trashed === true)) {
+        nextAction = 'stop: resolve the archived or trashed Linear issue manually; do not recreate or unarchive it.'
+      } else if (!entry) {
         nextAction = 'create the Linear issue (marker) and the state.json receipt, then run the AutoReason loop.'
       } else if (entry.status === 'blocked') {
         nextAction = 'node is blocked on a user decision; surface the decision via ask_user_question.'
+      } else if (projectstate.hasCausalHold(entry)) {
+        nextAction = 'wait on causal holds for upstream nodes: ' + entry.causalHolds.flatMap((hold) => hold.blockedBy ?? []).join(', ') + '; do not reopen or mutate the approved DAG.'
       } else if (entry.status === 'done') {
         nextAction = 'await integration (and goal completion).'
       } else if (summary.runStatus === 'complete') {
@@ -3592,8 +3711,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = 'b6ea766621ac'
-export const EMBEDDED_BUILD_ID = '09fb0ba864ec5744dc419951505d93cfb3d47396343a5bc950e41dd8be577581'
+export const EMBEDDED_GENERATION = '836c5e1f5fa7'
+export const EMBEDDED_BUILD_ID = '1141e5056c8674e89ab8321832ce0fd19d4697c517d4b4ffadcf8b1278888dce'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -3787,26 +3906,44 @@ async function resolveExecutable(subprocessService, name) {
 // Strict TeX build: latexmk -pdf -interaction=nonstopmode -halt-on-error
 // -file-line-error -recorder, never -f. Records log/.fls/PDF hashes.
 async function strictTexBuild(fops, subprocessService, baseDir, dir, mainFile) {
-  const latexmk = await resolveExecutable(subprocessService, 'latexmk')
-  const result = await runSubprocess(subprocessService, dir, [
-    latexmk, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', mainFile,
-  ])
-  const stem = String(mainFile).replace(/\.tex$/i, '')
-  const logPath = pathutil.join(dir, stem + '.log')
-  const flsPath = pathutil.join(dir, stem + '.fls')
-  const pdfPath = pathutil.join(dir, stem + '.pdf')
-  const logHash = await hashFile(fops, logPath)
-  const flsHash = await hashFile(fops, flsPath)
-  const pdfHash = await hashFile(fops, pdfPath)
-  return {
-    clean: result.exitCode === 0,
-    exitCode: result.exitCode,
-    logHash,
-    flsHash,
-    pdfHash,
-    pdfExists: pdfHash !== '',
-    logTail: String(result.stdout + result.stderr).slice(-2000),
+  if (typeof fops.removeTree !== 'function' || typeof fops.ensureDir !== 'function' || typeof fops.copy !== 'function') throw new Error('compiler scratch requires confined removeTree, ensureDir, and copy operations')
+  const scratchDir = pathutil.resolveInside(dir, '.autoresearch-compiler')
+  const compilerMarker = pathutil.join(scratchDir, '.autoresearch-compiler.json')
+  const compilerOwner = { schemaVersion: 1, owner: 'autoresearch-compiler-v1', runDir: pathutil.relativePath(baseDir, dir), mainFile: String(mainFile) }
+  if (await fops.exists(scratchDir)) {
+    const marker = typeof fops.readJson === 'function' ? await fops.readJson(compilerMarker) : null
+    const entries = typeof fops.listDir === 'function' ? await fops.listDir(scratchDir) : []
+    if (entries.length > 0 && marker?.owner !== 'autoresearch-compiler-v1') throw new Error('compiler scratch is not owned by AutoResearch; refusing cleanup: ' + scratchDir)
+    await fops.removeTree(scratchDir)
   }
+  await fops.ensureDir(scratchDir)
+  if (typeof fops.writeJson === 'function') await fops.writeJson(compilerMarker, compilerOwner)
+  else if (typeof fops.writeText === 'function') await fops.writeText(compilerMarker, JSON.stringify(compilerOwner, null, 2) + '\n')
+  else throw new Error('compiler ownership marker requires filesystem write support')
+  let buildError = null
+  let output = null
+  try {
+    const latexmk = await resolveExecutable(subprocessService, 'latexmk')
+    const result = await runSubprocess(subprocessService, dir, [latexmk, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-outdir=' + scratchDir, mainFile])
+    const stem = pathutil.basename(String(mainFile)).replace(/\.tex$/i, '')
+    const logPath = pathutil.join(scratchDir, stem + '.log')
+    const flsPath = pathutil.join(scratchDir, stem + '.fls')
+    const scratchPdfPath = pathutil.join(scratchDir, stem + '.pdf')
+    const destinationPdfPath = pathutil.join(dir, String(mainFile).replace(/\.tex$/i, '') + '.pdf')
+    const logHash = await hashFile(fops, logPath)
+    const flsHash = await hashFile(fops, flsPath)
+    const pdfHash = await hashFile(fops, scratchPdfPath)
+    if (result.exitCode === 0 && pdfHash) await fops.copy(scratchPdfPath, destinationPdfPath)
+    output = { clean: result.exitCode === 0, exitCode: result.exitCode, logHash, flsHash, pdfHash, pdfExists: pdfHash !== '', logTail: String(result.stdout + result.stderr).slice(-2000), scratchCleaned: true }
+  } catch (error) {
+    buildError = error
+  }
+  try { await fops.removeTree(scratchDir) } catch (cleanupError) {
+    if (buildError) buildError.cleanupError = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+    else throw cleanupError
+  }
+  if (buildError) throw buildError
+  return output
 }
 
 // Render a compiled PDF to per-page PNGs for visual inspection. Builds the PDF
@@ -3828,11 +3965,19 @@ async function renderPreview(fops, subprocessService, baseDir, runDir, opts = {}
   const previewDir = pathutil.resolveInside(runDir, 'preview')
   const prefix = 'page'
 
-  // Clear and recreate the preview dir so page counts never include stale pages.
-  const rm = await subprocessService.resolveExecutable('/bin/rm')
-  await runSubprocess(subprocessService, runDir, [rm, '-rf', previewDir])
-  const mkdir = await subprocessService.resolveExecutable('/bin/mkdir')
-  await runSubprocess(subprocessService, runDir, [mkdir, '-p', previewDir])
+  // Clear and recreate the preview dir through the confined fs adapter so
+  // preview cleanup cannot target an arbitrary path supplied by a caller.
+  if (typeof fops.removeTree !== 'function' || typeof fops.ensureDir !== 'function') throw new Error('preview cleanup requires confined filesystem operations')
+  const previewMarker = pathutil.join(previewDir, '.autoresearch-preview.json')
+  if (await fops.exists(previewDir)) {
+    const marker = typeof fops.readJson === 'function' ? await fops.readJson(previewMarker) : null
+    const entries = typeof fops.listDir === 'function' ? await fops.listDir(previewDir) : []
+    const unmarkedEntries = entries.filter((entry) => entry.name !== '.autoresearch-preview.json')
+    if (unmarkedEntries.length > 0 && (!marker || marker.owner !== 'autoresearch-preview-v1')) throw new Error('preview directory is not owned by AutoResearch; refusing cleanup: ' + previewDir)
+    await fops.removeTree(previewDir)
+  }
+  await fops.ensureDir(previewDir)
+  if (typeof fops.writeJson === 'function') await fops.writeJson(previewMarker, { schemaVersion: 1, owner: 'autoresearch-preview-v1', runDir: pathutil.relativePath(baseDir, runDir) })
 
   let renderer = null
   let argv = null
@@ -4108,7 +4253,7 @@ async function resolveTexInputs(fops, runDir, mainRel, opts = {}) {
   const files = []
   const unresolved = []
   const readRel = async (rel) => {
-    try { return await fops.readText(pathutil.join(runDir, rel)) } catch { return '' }
+    try { return await fops.readText(pathutil.resolveInside(runDir, rel)) } catch { return '' }
   }
   const queue = [{ rel: main, depth: 0, text: await readRel(main) }]
   while (queue.length > 0) {
@@ -4116,13 +4261,26 @@ async function resolveTexInputs(fops, runDir, mainRel, opts = {}) {
     for (const match of item.text.matchAll(/\\(?:input|include)\s*\{([^}]+)\}/g)) {
       const target = String(match[1]).trim()
       if (!target) continue
-      const rel = /\.(tex|sty)$/i.test(target) ? target : target + '.tex'
-      if (seen.has(target) || seen.has(rel)) continue
-      seen.add(target)
+      const targetWithExt = /\.(tex|sty)$/i.test(target) ? target : target + '.tex'
+      if (pathutil.isAbsolute(targetWithExt) || targetWithExt.includes('\\')) { unresolved.push(target + ' (path escapes run directory)'); continue }
+      const rel = pathutil.normalize(pathutil.join(pathutil.dirname(item.rel), targetWithExt))
+      if (seen.has(rel) || seen.has(stripExt(rel))) continue
       seen.add(rel)
+      seen.add(stripExt(rel))
+      if (!isSafeRelPath(rel)) { unresolved.push(target + ' (path escapes run directory)'); continue }
       if (item.depth + 1 > maxDepth) { unresolved.push(target); continue }
       let exists = false
-      try { exists = await fops.exists(pathutil.join(runDir, rel)) } catch { exists = false }
+      try {
+        let symlinked = false
+        if (typeof fops.lstat === 'function') {
+          const segments = rel.split('/').filter(Boolean)
+          for (let index = 1; index <= segments.length; index += 1) {
+            const info = await fops.lstat(pathutil.resolveInside(runDir, segments.slice(0, index).join('/')))
+            if (info?.type === 'symlink') { symlinked = true; break }
+          }
+        }
+        exists = !symlinked && await fops.exists(pathutil.resolveInside(runDir, rel))
+      } catch { exists = false }
       if (!exists) { unresolved.push(target); continue }
       const childText = await readRel(rel)
       files.push({ relPath: rel, text: childText })
@@ -4255,6 +4413,11 @@ function deriveNodeOutputDocument(params) {
     nodeRevision,
     contractDigest: String(params.contractDigest ?? contract.digest ?? ''),
     artifactFormat,
+    artifact: {
+      path: String(params.artifactPath ?? contract.outputContract?.artifactPath ?? (artifactFormat === 'tex' ? 'output.tex' : 'final.md')),
+      format: artifactFormat,
+      sha256: String(params.outputHash ?? ''),
+    },
     contributions: units,
   }
 }
@@ -4267,7 +4430,11 @@ function deriveNodeOutputDocument(params) {
 // for pass/fail; the hand-filled contract declared list only produces
 // recorded drift warnings (record.warnings / record.derivedDeclared).
 async function validateNodeTex(fops, subprocessService, baseDir, runDir, contract, opts = {}) {
-  const outputPath = pathutil.resolveInside(runDir, 'output.tex')
+  const artifactRel = typeof opts.artifactPath === 'string' && opts.artifactPath.trim()
+    ? opts.artifactPath.trim()
+    : (typeof contract.outputContract?.artifactPath === 'string' && contract.outputContract.artifactPath.trim() ? contract.outputContract.artifactPath.trim() : 'output.tex')
+  if (!core.isSafeRelFilePath(artifactRel) || !artifactRel.toLowerCase().endsWith('.tex')) throw new Error('TeX artifactPath must be a safe relative .tex path: ' + artifactRel)
+  const outputPath = pathutil.resolveInside(runDir, artifactRel)
   const outputExists = await fops.exists(outputPath)
   const outputText = outputExists ? await readFileSafe(fops, outputPath) : ''
   const texMode = opts.texMode ?? contract.outputContract?.texMode ?? 'fragment'
@@ -4299,7 +4466,7 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     errors: [],
   }
   if (!outputExists) {
-    record.errors = [await missingSourceDiagnostic(fops, runDir, 'output.tex')]
+    record.errors = [await missingSourceDiagnostic(fops, runDir, artifactRel, { format: 'tex' })]
     record.violations = record.errors
     return record
   }
@@ -4309,7 +4476,7 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
   const templateRel = opts.templatePath ?? contract.verification?.templatePath
   const hasTemplate = typeof templateRel === 'string' && templateRel.trim() !== ''
   if (texMode === 'fragment' && !hasTemplate && (/\documentclass\b/.test(outputText) || /\\begin\s*\{\s*document\s*\}/.test(outputText))) {
-    record.errors = ['output.tex is a complete standalone document (\\documentclass / \\begin{document} present) but texMode is "fragment" with no frozen template available. Set texMode: standalone (node outputContract — init_run normalizes assembly nodes — or the texMode argument to record_acceptance / tex_check) so the document compiles directly.']
+    record.errors = [artifactRel + ' is a complete standalone document (\\documentclass / \\begin{document} present) but texMode is "fragment" with no frozen template available. Set texMode: standalone (node outputContract — init_run normalizes assembly nodes — or the texMode argument to record_acceptance / tex_check) so the document compiles directly.']
     record.violations = record.errors
     return record
   }
@@ -4348,7 +4515,7 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     record.pdfExists = build.pdfExists
     if (!build.clean) record.errors = ['strict TeX build failed with exit ' + build.exitCode + ': ' + build.logTail.slice(0, 400)]
   } else {
-    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, 'output.tex')
+    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, artifactRel)
     record.compiled = true
     record.clean = build.clean
     record.exitCode = build.exitCode
@@ -4501,9 +4668,15 @@ async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
   const resetNodeIds = []
   for (const id of dependents) {
     const entry = util.isPlainObject(nodes[id]) ? nodes[id] : {}
+    const isUserBlocked = entry.status === 'blocked'
+    const isDependent = id !== nodeId
+    const nextStatus = isUserBlocked ? 'blocked' : 'todo'
+    const nextHolds = isDependent && !isUserBlocked
+      ? [{ schemaVersion: 1, nodeId: id, blockedBy: [nodeId], reason: 'upstream revision requested; await fresh acceptance', sourceEventDigest: options.metadata?.sourceEventDigest ?? null }]
+      : (Array.isArray(entry.causalHolds) ? entry.causalHolds : [])
     nodes[id] = {
       ...entry,
-      status: 'todo',
+      status: nextStatus,
       runDir: '',
       runStatus: '',
       currentStep: '',
@@ -4511,7 +4684,13 @@ async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
       hasFinal: false,
       finalCommentId: '',
       receipts: [],
+      nodeRevision: id === nodeId && options.metadata?.created === true ? (Number(entry.nodeRevision) || 1) + 1 : (Number(entry.nodeRevision) || 1),
+      causalHolds: nextHolds,
       updatedAt: new Date().toISOString(),
+    }
+    if (typeof state.project?.linearProjectId === 'string' && state.project.linearProjectId.trim()) {
+      nodes[id].projectionStatus = 'pending'
+      nodes[id].linearProjection = { projectId: state.project.linearProjectId, nodeId: id, status: nextStatus, blockedBy: nextHolds.flatMap((hold) => hold.blockedBy ?? []), reason: nextHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: nodes[id].updatedAt }
     }
     resetNodeIds.push(id)
   }
@@ -4559,11 +4738,13 @@ async function requestRevision(fops, baseDir, args) {
   } catch (error) {
     if (!util.isAlreadyExistsError(error)) throw error
   }
-  const reset = await resetDownstreamState(fops, baseDir, plan.plan, retargetedTo, {
-    artifactRoot: plan.artifactRoot,
-    ...(util.isPlainObject(args.resetOptions) ? args.resetOptions : {}),
-    metadata: { created },
-  })
+  const reset = created
+    ? await resetDownstreamState(fops, baseDir, plan.plan, retargetedTo, {
+      artifactRoot: plan.artifactRoot,
+      ...(util.isPlainObject(args.resetOptions) ? args.resetOptions : {}),
+      metadata: { ...(util.isPlainObject(args.resetOptions?.metadata) ? args.resetOptions.metadata : {}), created, sourceEventDigest: requestDigest },
+    })
+    : await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
   return {
     ok: true,
     created,
@@ -4571,7 +4752,8 @@ async function requestRevision(fops, baseDir, args) {
     marker,
     commentBody: core.revisionCommentBody(fullRequest, marker),
     requestPath: pathutil.relativePath(baseDir, filePath),
-    resetNodes: reset.resetNodeIds,
+    resetNodes: reset.resetNodeIds ?? [],
+    state: reset.state,
     consumerNodeId,
     retargetedTo,
     nodeState: 'revision_requested',
@@ -4885,15 +5067,13 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
   // retry. Cleanup failures are reported, never fatal.
   const cleanupReport = await (async () => {
     try {
-      const outputRoot = typeof run?.outputRoot === 'string' && run.outputRoot.trim()
-        ? run.outputRoot
-        : typeof run?.config?.outputRoot === 'string' && run.config.outputRoot.trim()
-          ? run.config.outputRoot
-          : 'outputs'
+      const outputRoot = typeof params.outputRoot === 'string' && params.outputRoot.trim()
+        ? params.outputRoot
+        : 'outputs'
       let outputsAbs
       try { outputsAbs = pathutil.resolve(baseDir, outputRoot) } catch { outputsAbs = null }
       if (!outputsAbs) return null
-      const owner = typeof run?.issueId === 'string' && run.issueId ? run.issueId : pathutil.basename(runDir)
+      const owner = typeof params.issueId === 'string' && params.issueId ? params.issueId : pathutil.basename(runDir)
       return await cleanupTempOwners(fops, baseDir, outputsAbs, { ownerId: owner, runId: owner })
     } catch {
       return null
@@ -5471,12 +5651,19 @@ async function computePublishSet(params) {
       if (!fb || typeof fb.sourcePath !== 'string' || !fb.sourceHash || typeof fb.flsPath !== 'string' || !fb.flsHash) {
         errors.push('rebuildable: true requires an accepted finalBuild record (sourcePath + sourceHash + flsPath + flsHash); the acceptance receipt does not carry one — the final build was not verified at acceptance time')
       } else {
-        const srcAbs = pathutil.join(runDirAbs, fb.sourcePath)
+        const safeBuildPath = (value, field) => {
+          if (!isSafeRelPath(value)) {
+            errors.push('finalBuild ' + field + ' must be a safe relative path under the run directory: ' + String(value))
+            return pathutil.join(runDirAbs, '__invalid-final-build-path__')
+          }
+          return pathutil.resolveInside(runDirAbs, value)
+        }
+        const srcAbs = safeBuildPath(fb.sourcePath, 'sourcePath')
         const srcHash = await hashFile(fops, srcAbs)
         if (srcHash !== fb.sourceHash) {
           errors.push('finalBuild record is stale: sourcePath ' + fb.sourcePath + ' changed after acceptance (recorded ' + String(fb.sourceHash).slice(0, 12) + '… now ' + (srcHash || 'missing').slice(0, 12) + '…); rebuild and re-accept')
         }
-        const flsAbs = pathutil.join(runDirAbs, fb.flsPath)
+        const flsAbs = safeBuildPath(fb.flsPath, 'flsPath')
         const flsHash = await hashFile(fops, flsAbs)
         if (flsHash !== fb.flsHash) {
           errors.push('finalBuild record is stale: flsPath ' + fb.flsPath + ' changed after acceptance (recorded ' + String(fb.flsHash).slice(0, 12) + '… now ' + (flsHash || 'missing').slice(0, 12) + '…)')
@@ -5511,7 +5698,7 @@ async function computePublishSet(params) {
             if (typeof fb.pdfPath !== 'string' || !fb.pdfHash) {
               errors.push('rebuildable: true requires the finalBuild PDF pair (pdfPath + pdfHash) because the deliverable set exposes a PDF')
             } else {
-              const pdfAbs = pathutil.join(runDirAbs, fb.pdfPath)
+              const pdfAbs = safeBuildPath(fb.pdfPath, 'pdfPath')
               const pdfHash = await hashFile(fops, pdfAbs)
               if (pdfHash !== fb.pdfHash) {
                 errors.push('finalBuild record is stale: pdfPath ' + fb.pdfPath + ' changed after acceptance (recorded ' + String(fb.pdfHash).slice(0, 12) + '… now ' + (pdfHash || 'missing').slice(0, 12) + '…)')
@@ -5920,6 +6107,16 @@ function isoNowPlus(ms) {
 
 // Journal sync (plan WS4 item 1): merge the final state into the node entry,
 // preserving every other field. Idempotent — write only on change.
+async function recordNodeFailure(fops, baseDir, contractFile, reason) {
+  try {
+    const loaded = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+    if (!loaded.ok) return { ok: false, skipped: true }
+    return await projectstate.failNode(fops, baseDir, contractFile.projectId, contractFile.nodeId, String(reason).slice(0, 1000))
+  } catch {
+    return { ok: false, skipped: true }
+  }
+}
+
 async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptance, outputHash) {
   const artifactRoot = typeof contractFile.artifactRoot === 'string' && contractFile.artifactRoot ? contractFile.artifactRoot : 'research-agent'
   const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, artifactRoot)
@@ -5935,6 +6132,7 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
     status: 'done',
     runDir: pathutil.relativePath(baseDir, runDirAbs),
     runStatus: 'complete',
+    causalHolds: [],
     receipts: [
       typeof acceptance?.receiptHash === 'string' ? acceptance.receiptHash : '',
       typeof outputHash === 'string' ? outputHash : '',
@@ -6194,21 +6392,23 @@ async function runBuildProbe(subprocessService, baseDir) {
   const presetRoot = pathutil.dirname(pathutil.dirname(MANIFEST_PATH))
   const graph = {}
   const failures = []
+  const configDrift = []
+  const scope = Array.isArray(manifest.aggregateScope) ? manifest.aggregateScope : Object.keys(manifest.files ?? {})
+  const immutableScope = new Set(scope)
   for (const [relPath, expectedHash] of Object.entries(manifest.files ?? {})) {
     try {
       const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, relPath)])
       const match = String(result.stdout).match(/^([0-9a-f]{64})\s+/m)
       if (!match) {
-        failures.push(relPath + ': shasum produced no hash')
+        (immutableScope.has(relPath) ? failures : configDrift).push(relPath + ': shasum produced no hash')
         continue
       }
       graph[relPath] = match[1]
-      if (match[1] !== expectedHash) failures.push(relPath + ': hash mismatch')
+      if (match[1] !== expectedHash) (immutableScope.has(relPath) ? failures : configDrift).push(relPath + ': hash mismatch')
     } catch (error) {
-      failures.push(relPath + ': ' + (error instanceof Error ? error.message : String(error)))
+      (immutableScope.has(relPath) ? failures : configDrift).push(relPath + ': ' + (error instanceof Error ? error.message : String(error)))
     }
   }
-  const scope = Array.isArray(manifest.aggregateScope) ? manifest.aggregateScope : Object.keys(graph)
   const scopeGraph = {}
   for (const rel of scope) {
     if (graph[rel] !== undefined) scopeGraph[rel] = graph[rel]
@@ -6225,6 +6425,7 @@ async function runBuildProbe(subprocessService, baseDir) {
     graphMatches,
     graph,
     mismatches: failures,
+    configDrift,
     mountedUrl: import.meta.url,
   }
 }
@@ -6803,6 +7004,12 @@ const ORCHESTRATOR_PLUGIN = {
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const result = await lifecycle.initRun(fops, { ...args, baseDir }, PRESET_CONFIG_PATH)
+      if (args.projectId && args.nodeId) {
+        await projectstate.transitionNode(fops, baseDir, args.projectId, args.nodeId, 'claim', {
+          leaseId: String(args.issueId) + ':' + String(result.runId ?? ''),
+          runDir: result.runDir ?? '',
+        })
+      }
       for (const role of config.ALL_RESEARCH_ROLES) {
         if (role === 'implementation_worker' || role === 'review_worker') continue
         const target = abs(baseDir, (result.artifactRoot || 'research-agent') + '/roles/' + role + '.md')
@@ -6891,7 +7098,28 @@ const ORCHESTRATOR_PLUGIN = {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
-      return await resume.validateResume(fops, abs(baseDir, args.runDir))
+      const runDir = abs(baseDir, args.runDir)
+      const result = await resume.validateResume(fops, runDir)
+      const contractFile = await loadRunContract(fops, runDir)
+      let linearProjection = null
+      if (contractFile) {
+        try {
+          const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+          if (loadedPlan.ok) {
+            const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+            const entry = loadedState.state.nodes?.[contractFile.nodeId]
+            if (entry && typeof loadedState.state.project?.linearProjectId === 'string' && loadedState.state.project.linearProjectId.trim()) {
+              const updatedAt = new Date().toISOString()
+              entry.projectionStatus = 'pending'
+              entry.linearProjection = { projectId: loadedState.state.project.linearProjectId, nodeId: contractFile.nodeId, status: entry.status, blockedBy: (entry.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []), reason: 'resume reconciliation', updatedAt }
+              entry.updatedAt = updatedAt
+              await projectstate.saveState(fops, baseDir, contractFile.projectId, loadedState.state, loadedPlan.artifactRoot, loadedState.path)
+              linearProjection = entry.linearProjection
+            }
+          }
+        } catch { /* resume diagnosis remains authoritative; projection intent is best-effort */ }
+      }
+      return { ...result, linearProjection }
     })
 
     // ── 6. regenerate_checklist ────────────────────────────────────────────
@@ -7123,6 +7351,7 @@ const ORCHESTRATOR_PLUGIN = {
       const agentOptions = {
         ...(resolvedOptions.provider ? { provider: resolvedOptions.provider } : {}),
         ...(resolvedOptions.model ? { model: resolvedOptions.model } : {}),
+        ...(resolvedOptions.reasoningEffort ? { reasoningEffort: resolvedOptions.reasoningEffort } : {}),
         ...(Number.isInteger(resolvedOptions.maxTokens) && resolvedOptions.maxTokens > 0 ? { maxTokens: resolvedOptions.maxTokens } : {}),
       }
       const runRoot = args.runDir ? abs(baseDir, args.runDir) : null
@@ -7148,7 +7377,7 @@ const ORCHESTRATOR_PLUGIN = {
             role: role.role,
             judgeIndex: args.judgeIndex ?? null,
             packetHash: args.packetRef?.packetHash ?? null,
-            route: { provider: agentOptions.provider ?? null, model: agentOptions.model ?? null },
+            route: { provider: agentOptions.provider ?? null, model: agentOptions.model ?? null, reasoningEffort: agentOptions.reasoningEffort ?? null },
           }
         }
       } else {
@@ -7163,11 +7392,18 @@ const ORCHESTRATOR_PLUGIN = {
       const breakerPath = typeof cfg.artifactRoot === 'string' && cfg.artifactRoot.trim()
         ? abs(baseDir, pathutil.join(cfg.artifactRoot, 'model-breaker.json'))
         : null
+      let resolvedModelInfo = null
+      const routeWarnings = []
+      if (llm && typeof llm.resolveModelInfo === 'function' && agentOptions.provider && agentOptions.model) {
+        resolvedModelInfo = await llm.resolveModelInfo(agentOptions.provider, agentOptions.model)
+        const warning = profiles.reasoningEffortWarning(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort, resolvedModelInfo)
+        if (warning) routeWarnings.push(warning)
+      }
       const result = await roleRunner.runRole({
         fops,
         startSubagent: (request) => subagents.start('spawn', request),
         resolveModelDefault: llm && typeof llm.resolveModelInfo === 'function'
-          ? async (provider, model) => (await llm.resolveModelInfo(provider, model))?.defaultMaxTokens
+          ? async (provider, model) => (provider === agentOptions.provider && model === agentOptions.model ? resolvedModelInfo : await llm.resolveModelInfo(provider, model))?.defaultMaxTokens
           : undefined,
         role: role.role,
         task,
@@ -7199,6 +7435,7 @@ const ORCHESTRATOR_PLUGIN = {
         modelSource: role.modelSource ?? null,
         model: role.model ?? null,
         modelFallbacks: role.modelFallbacks ?? [],
+        routeWarnings,
         tools: role.tools,
         profile: { maxTokens: role.maxTokens, timeoutMs: role.timeoutMs, maxAttempts: role.maxAttempts, retryDelayMs: role.retryDelayMs, leaseMs: role.leaseMs, modelFallbackCooldownMs: execution.modelFallbackCooldownMs ?? null },
       }
@@ -7368,6 +7605,10 @@ const ORCHESTRATOR_PLUGIN = {
       } catch (error) {
         writable = false
         writableError = error instanceof Error ? error.message : String(error)
+      } finally {
+        if (typeof fops.remove === 'function') {
+          try { await fops.remove(probePath) } catch { /* cleanup is best-effort and must not hide the probe result */ }
+        }
       }
       checks.push({ name: 'artifact-root-writable', ok: writable, severity: writable ? 'info' : 'error', message: writable ? 'Artifact root writable: ' + artifactRootPath : 'Artifact root not writable: ' + writableError })
       if (!writable) recommendations.push('Fix permissions on the workspace artifact root: ' + artifactRootPath)
@@ -7643,6 +7884,23 @@ const ORCHESTRATOR_PLUGIN = {
       }
     })
 
+    tool('autoresearch_node_transition', 'Coordinator-only: persist one focused node lifecycle transition in state.json. Linear projection is a separate explicit step through linear_project_node.', {
+      type: 'object', additionalProperties: false,
+      required: ['projectId', 'nodeId', 'transition'],
+      properties: { projectId: str('AutoResearch project id.'), nodeId: str('Focused node id.'), transition: str('claim, complete, hold, or retry.'), causalHolds: { type: 'array', items: { type: 'object', additionalProperties: true } }, leaseId: str('Claim lease identifier.'), runDir: str('Focused run directory.'), receipt: { type: 'object', additionalProperties: true }, baseDir: str('Workspace root.') },
+    }, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const patch = {}
+      for (const key of ['causalHolds', 'leaseId', 'runDir', 'receipt']) if (args[key] !== undefined) patch[key] = args[key]
+      const projectId = util.requiredString(args.projectId, 'projectId')
+      const nodeId = util.requiredString(args.nodeId, 'nodeId')
+      const transition = await projectstate.transitionNode(fops, baseDir, projectId, nodeId, args.transition, patch)
+      const projectionStatus = transition.state.nodes[nodeId]?.status ?? 'todo'
+      return { ok: true, ...transition, linearProjection: { projectId, nodeId, status: projectionStatus, blockedBy: (transition.state.nodes[nodeId]?.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []), reason: (transition.state.nodes[nodeId]?.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; ') } }
+    })
+
     // ── 19. project_status (with spec-block drift + Linear fallback) ───────
 
     tool('autoresearch_project_status', "Reconcile the approved plan.json, the state.json journal, Linear issues (optional) and local runs for one AutoResearch project. Read-only for the plan; the only mutation is the explicit per-node comment-id cursor advance (idempotent). Reports drift — including generated-spec-block drift and the deterministic legacy Linear-state fallback source — and never rewrites the plan.", {
@@ -7760,6 +8018,7 @@ const ORCHESTRATOR_PLUGIN = {
         : (contract.artifactFormat === 'tex' ? 'output.tex' : 'final.md')
       const outputHash = await hashFile(fops, pathutil.resolveInside(runDir, outputName))
       if (!outputHash) {
+         await recordNodeFailure(fops, baseDir, contractFile, 'acceptance artifact missing: ' + outputName)
         // Opaque blocker → recipe (SOD #1): name the precondition, list the
         // candidate files actually present, and share the missing-source
         // diagnostic (SOD #9). Format-aware: no LaTeX mentions for
@@ -7777,9 +8036,11 @@ const ORCHESTRATOR_PLUGIN = {
           texMode: args.texMode,
           declared: args.declared,
           templatePath: args.templatePath,
+          artifactPath: outputName,
         })
         if (!tex.clean) {
-          throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
+          await recordNodeFailure(fops, baseDir, contractFile, 'strict TeX validation failed: ' + (tex.errors ?? []).join('; '))
+           throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
         }
       }
       const classification = args.artifactClassification ? core.classifyArtifact(args.artifactClassification) : null
@@ -7836,6 +8097,7 @@ const ORCHESTRATOR_PLUGIN = {
           contract,
           outputText: await readFileSafe(fops, pathutil.resolveInside(runDir, outputName)),
           outputHash,
+          artifactPath: outputName,
           nodeRevision: nodeRevisionValue,
           nodeId: contract.nodeId,
           contractDigest: contract.digest,

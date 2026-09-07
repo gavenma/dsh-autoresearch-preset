@@ -37,9 +37,10 @@ to this same workflow. A single work item is a one-node DAG plus its mandatory
 - **Binary hashing:** `.pdf/.png/.jpg/.jpeg/.gif/.gz/.zip/.bin` artifacts are
   hashed as raw bytes (64 MiB cap); text artifacts keep UTF-8 text hashes.
 - **Revision routing:** `autoresearch_revision_request` resets the owning
-  node AND its transitive downstream dependents to `todo` in `state.json`, so
-  `autoresearch_integration_preflight` (which reads the journal) cannot
-  accept stale downstream artifacts.
+  node and its transitive downstream dependents in the local journal, while
+  projecting causal holds to Linear. It never rewrites the approved DAG or
+  clears user-decision blocks, so integration cannot accept stale downstream
+  artifacts.
 - **Planning directories are not `validate_resume`-resumable** (planning
   scaffolds carry `planning: true` and are excluded with a clear message).
 
@@ -93,12 +94,18 @@ not the source of the AutoResearch skill or tool implementation.
    run dirs, comment cursor, integration revision). The coordinator writes it
    with the fs write tool after every side effect; `autoresearch_project_status`
    reads it and advances only the comment cursor.
-3. **Linear is a derived view.** Any disagreement is DRIFT, surfaced per node
-   by `autoresearch_project_status`; resolve drift through
-   `ask_user_question`, never by rewriting `plan.json`.
-4. **Work advances only while you (the coordinator) have an active turn.**
-   The goal is lifecycle/status only. Resuming after interruption: call
-   `autoresearch_project_status` and follow each node's `nextAction`.
+3. **Linear is the operational projection and scheduling surface.** It carries
+   node status, dependency relations, causal-hold labels/comments, claims, and
+   operator-visible progress. It is not the authority for the approved DAG,
+   immutable facts, or an atomic event log. Mutations are recorded first in the
+   local `linear-sync/` WAL/outbox and reconciled by marker, digest, and read-back. Use `linear_sync_plan_relations` for approved DAG edges and `linear_project_node` for focused transitions. Causal holds emit digest-marked comments; `linear_sync_reconcile` dead-letters after its bounded retry ceiling.
+4. **`state.json` is the local lifecycle and recovery journal.** It records
+   claims, receipts, causal holds, revisions, and projection status; local-only
+   projects never call Linear. Linear outages are surfaced as projection outages,
+   not silently downgraded to a different project mode.
+5. **Work advances only while you (the coordinator) have an active turn.**
+   Resuming after interruption: reconcile the outbox first, refresh the graph,
+   then call `autoresearch_project_status` and follow each node's `nextAction`.
 
 ## Phase 1 — Plan via the planning AutoReason loop → review → approve → create
 
@@ -393,7 +400,7 @@ delete it to fall back to the preset default) and re-run
 3. **Revision routing.** For a substantive/conflict finding:
    `autoresearch_revision_request` creates one idempotent request file and
    returns the marker
-   `autoresearch-revision-request:<projectId>:<epoch>:<nodeId>:<digest>` and
+   `autoresearch-causal-event:<projectId>:<epoch>:<nodeId>:<digest>` and
    comment body; post it with `linear_create_comment(id, body,
    idempotencyMarker: marker)` (exactly one comment under replay), move the
    issue to In Progress, rerun the node in targeted revision mode, preserve
@@ -626,6 +633,10 @@ Do not spawn any role until the user confirms.
 5. Stop when stop criteria are met (consecutive-A-wins ≥ convergenceThreshold,
    or pass ≥ maxPasses).
 
+### Lifecycle projection (Linear-backed projects)
+
+Before role work, call `autoresearch_node_transition` with `claim` and a lease/run reference, then call `linear_project_node` with the same focused node and the team-scoped In Progress state. On successful finalization, persist `complete` locally first, then project `done`; on retryable failure, persist `retry` or `hold` locally with structured `causalHolds`, then project the matching Linear state/hold. Run `linear_sync_reconcile` after any remote error and before resuming. Never mark a node done remotely before its local acceptance, artifact, ledger, and finalize receipts are durable.
+
 ### Final reporting
 
 1. `research_reporter` → `final.md`.
@@ -713,8 +724,12 @@ request a decision; only the user's chosen option mutates state.
 ## Resume prompt
 
 "Resume the AutoResearch project <projectId>" — then run
-`autoresearch_dependency_check`, `autoresearch_project_status`, and follow
-each node's `nextAction`. Never re-derive a ready set from Linear alone.
+`linear_sync_reconcile` first for the project, refresh the focused Linear graph,
+run `autoresearch_dependency_check` and `autoresearch_project_status`, and follow
+each node's `nextAction`. Before a node turn, claim only that node; after
+acceptance or failure, append the local WAL event, reconcile the outbox, project
+status/causal holds and relations, then recompute readiness. Never re-derive a
+ready set from Linear alone.
 
 ## Failure handling
 

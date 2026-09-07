@@ -46,8 +46,11 @@ const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-ledger-'))
     'This longer first sentence in the section body qualifies as an anchor.',
     '\\end{document}',
   ].join('\n')
-  const ledger = derive({ outputText: tex })
+  const ledger = derive({ outputText: tex, artifactPath: 'sections/methods.tex' })
   assert.equal(ledger.ledgerVersion, 1)
+  assert.equal(ledger.artifact.path, 'sections/methods.tex')
+  assert.equal(ledger.artifact.format, 'tex')
+  assert.equal(ledger.artifact.sha256, 'hash-1')
   assert.equal(ledger.nodeId, 'methods')
   assert.equal(ledger.outputHash, 'hash-1')
   assert.equal(ledger.nodeRevision, 1)
@@ -67,7 +70,7 @@ const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-ledger-'))
   assert.equal(check.ok, true, JSON.stringify(check.errors))
 
   // Deterministic: same input → same bytes.
-  assert.equal(JSON.stringify(derive({ outputText: tex })), JSON.stringify(ledger))
+  assert.equal(JSON.stringify(derive({ outputText: tex, artifactPath: 'sections/methods.tex' })), JSON.stringify(ledger))
 
   // Reordering sections keeps the ids.
   const reordered = [
@@ -322,6 +325,7 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
     nodeRevision: 1,
     outputHash: 'sha-legacy',
     artifactFormat: 'tex',
+    artifact: { path: 'sections/custom.tex' },
     criteria: [{ id: 'MET-01', result: 'PASS' }],
     overall: 'PASS',
     receiptHash: 'x',
@@ -329,7 +333,8 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
   const receiptText = JSON.stringify(receipt, null, 2) + '\n'
   await fs.writeFile(path.join(runAbs, 'acceptance.json'), receiptText)
   const tex = '\\documentclass{article}\n\\section{Old Section Name}\nThe old section body carries a first sentence long enough to anchor.\n\\end{document}\n'
-  await fs.writeFile(path.join(runAbs, 'output.tex'), tex)
+  await fs.mkdir(path.join(runAbs, 'sections'), { recursive: true })
+  await fs.writeFile(path.join(runAbs, 'sections', 'custom.tex'), tex)
 
   // Import the script module (guards prevent main from running).
   const { backfillRun, discoverRuns } = await import(pathToFileURL(scriptPath).href)
@@ -349,6 +354,7 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
   const ledger = JSON.parse(await fs.readFile(path.join(runAbs, 'node-output.json'), 'utf8'))
   assert.deepEqual(ledger.contributions.map((unit) => unit.id), ['old-section-name'])
   assert.equal(ledger.outputHash, 'sha-legacy')
+  assert.equal(ledger.artifact.path, 'sections/custom.tex')
   assert.equal(await fs.readFile(path.join(runAbs, 'acceptance.json'), 'utf8'), receiptText, 'backfill must never modify the receipt')
 
   // Re-run: already current.
@@ -379,6 +385,7 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
   await fs.mkdir(unbound, { recursive: true })
   const unboundReceipt = { ...receipt, nodeId: undefined }
   delete unboundReceipt.nodeId
+  delete unboundReceipt.artifact
   await fs.writeFile(path.join(unbound, 'acceptance.json'), JSON.stringify(unboundReceipt, null, 2) + '\n')
   await fs.writeFile(path.join(unbound, 'output.tex'), tex)
   result = await backfillRun(unbound, {})
