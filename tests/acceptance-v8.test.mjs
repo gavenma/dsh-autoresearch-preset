@@ -301,7 +301,14 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
     await recordAcceptance.execute({ runDir: inits.integration.runDir, criteria: [{ id: 'INT-01', result: 'PASS' }] }, exec)
   } catch (err) { error = err }
   assert.ok(error, 'acceptance must fail when the exposed master has a missing input')
-  assert.ok(String(error.message).includes('missing local input for the exposed TeX source final.tex: ghost'), String(error.message))
+  const msg3 = String(error.message)
+  if (texAvailable) {
+    assert.ok(msg3.includes('missing local input for the exposed TeX source final.tex: ghost'), msg3)
+  } else {
+    // Toolchain-less runners fail at the strict build first (the wrapped
+    // diagnostic), which is still a hard failure, never a pass.
+    assert.ok(msg3.includes('Strict TeX validation failed before acceptance'), msg3)
+  }
 }
 
 // ── 4. Unresolved \ref names the owning node when identifiable ─────────────
@@ -353,8 +360,12 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
   } catch (err) { error = err }
   assert.ok(error, 'acceptance must fail on an unresolved ref in the exposed master')
   const msg = String(error.message)
-  assert.ok(msg.includes('unresolved \\ref target "eq:other"'), msg)
-  assert.ok(msg.includes('node author'), 'diagnostic must name the owning node: ' + msg)
+  if (texAvailable) {
+    assert.ok(msg.includes('unresolved \\ref target "eq:other"'), msg)
+    assert.ok(msg.includes('node author'), 'diagnostic must name the owning node: ' + msg)
+  } else {
+    assert.ok(msg.includes('Strict TeX validation failed before acceptance'), msg)
+  }
 }
 
 // ── 5. Resolvable exposed master passes (real build when available) ────────
