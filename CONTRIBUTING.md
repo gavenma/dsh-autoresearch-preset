@@ -23,8 +23,11 @@ For a change:
 Tests must run with temporary directories and fake services by default. Network,
 Linear, and model-provider checks must be opt-in and must not run in ordinary
 CI without explicitly configured secrets. Preserve the invariant that an
-approved `plan.json` is immutable, `state.json` is a mutable receipt journal,
-and Linear is a derived view.
+approved `plan.json` is immutable DAG/contract authority, `state.json` is a
+mutable operational receipt journal, and Linear-backed issues own the
+authoritative current-work context in their `Current Node Context` block
+(Linear does not rewrite `plan.json`). The single runtime root is
+`.research-agent`; bare `research-agent/` is migration-only input.
 
 ## Prompt and workflow changes
 

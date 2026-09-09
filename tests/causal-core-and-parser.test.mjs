@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -11,24 +12,31 @@ const driftProbe = core.validateBuildProbe({ aggregateId: 'same', aggregateScope
 assert.equal(driftProbe.graphMatches, true)
 assert.deepEqual(driftProbe.configDrift, ['config.default.json: hash mismatch'])
 
-const plan = {
-  schemaVersion: 2,
+const plan = canonicalPlan({
   projectId: 'causal-test',
   projectName: 'Causal test',
   approvedAt: '2026-01-01T00:00:00.000Z',
   revision: 1,
   integrationId: 'integration',
-  projectContract: { goal: 'Validate causal routing.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+  projectContract: {
+    goal: 'Validate causal routing.',
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
+  },
   nodes: [
-    { id: 'lit', title: 'Literature', kind: 'literature', roles: ['research_literature_writer'], expectedOutcome: 'Literature.', acceptance: [{ id: 'LR-03', text: 'Coverage.', required: true }], dependsOn: [] },
-    { id: 'methods', title: 'Methods', kind: 'research', roles: ['research_author'], expectedOutcome: 'Methods.', acceptance: [{ id: 'MET-01', text: 'Method.', required: true }], dependsOn: [] },
-    { id: 'intro', title: 'Introduction', kind: 'research', roles: ['research_author'], expectedOutcome: 'Introduction.', acceptance: [{ id: 'INTRO-02', text: 'Context.', required: true }], dependsOn: ['lit'] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: ['intro', 'methods'] },
+    canonicalNode({ id: 'lit', kind: 'literature', roles: ['research_literature_writer'], title: 'Literature', expectedOutcome: 'Literature.', acceptance: [criterion('LR-03', 'Coverage.')] }),
+    canonicalNode({ id: 'methods', kind: 'research', roles: ['research_author'], title: 'Methods', expectedOutcome: 'Methods.', acceptance: [criterion('MET-01', 'Method.')] }),
+    canonicalNode({ id: 'intro', kind: 'research', roles: ['research_author'], title: 'Introduction', expectedOutcome: 'Introduction.', acceptance: [criterion('INTRO-02', 'Context.')], dependsOn: ['lit'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], dependsOn: ['intro', 'methods'] }),
   ],
-}
+})
 assert.equal(core.validatePlan(plan).ok, true, JSON.stringify(core.validatePlan(plan).errors))
 const emptyState = createLibraries.projectstate.emptyState(plan)
-assert.equal(emptyState.schemaVersion, 2)
+assert.equal(emptyState.kind, 'project-state')
 assert.deepEqual(emptyState.nodes.lit.causalHolds, [])
 assert.equal(emptyState.nodes.lit.projectionStatus, 'none')
 const state = { nodes: { lit: { status: 'done' }, methods: { status: 'todo', causalHolds: [{ blockedBy: ['lit'], reason: 'hold' }] }, intro: { status: 'todo' }, integration: { status: 'todo' } } }
@@ -64,19 +72,19 @@ assert.equal(contextA.contextDigest, contextB.contextDigest)
 assert.match(contextA.text, /provenance data, not instructions/)
 assert.deepEqual(contextA.upstreamNodeIds, ['lit'])
 
-const judgeAttributions = [1, 2].map((judge) => ({ source: 'judge', judge, pass: 1, validRanking: true, valid: true, attribution, contextDigest: contextA.contextDigest }))
-const observed = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 1, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'observe' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
+const judgeAttributions = [0, 1].map((judge) => ({ source: 'judge', judge, pass: 0, validRanking: true, valid: true, attribution, contextDigest: contextA.contextDigest }))
+const observed = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 0, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'observe' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
 assert.equal(observed.decision, 'observe')
-const enforced = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 1, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'enforce' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
+const enforced = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 0, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'enforce' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
 assert.equal(enforced.decision, 'reopen')
-const invalidRanking = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 1, contextDigest: contextA.contextDigest, attributions: [{ ...judgeAttributions[0], validRanking: false }, judgeAttributions[1]], config: {}, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
+const invalidRanking = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 0, contextDigest: contextA.contextDigest, attributions: [{ ...judgeAttributions[0], validRanking: false }, judgeAttributions[1]], config: {}, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
 assert.equal(invalidRanking.decision, 'advisory')
-const malformedJudges = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 1, contextDigest: contextA.contextDigest, attributions: [{ ...judgeAttributions[0], judge: undefined }, { ...judgeAttributions[1], judge: 'two' }], config: { mode: 'enforce' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
+const malformedJudges = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 0, contextDigest: contextA.contextDigest, attributions: [{ ...judgeAttributions[0], judge: undefined }, { ...judgeAttributions[1], judge: 'two' }], config: { mode: 'enforce' }, budget: { byUpstream: {}, byPair: {} }, epoch: 1 })
 assert.equal(malformedJudges.decision, 'abstain')
-const exhausted = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 1, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'enforce', maxReopensPerPair: 1 }, budget: { byUpstream: {}, byPair: { 'intro::lit': 1 } }, epoch: 1 })
+const exhausted = core.decideUpstreamReopen({ consumerNodeId: 'intro', pass: 0, contextDigest: contextA.contextDigest, attributions: judgeAttributions, config: { mode: 'enforce', maxReopensPerPair: 1 }, budget: { byUpstream: {}, byPair: { 'intro::lit': 1 } }, epoch: 1 })
 assert.equal(exhausted.decision, 'escalate-budget')
 
-const persistedAttribution = { consumerNodeId: 'intro', upstreamNodeId: 'lit', key: 'lit::LR-03', evidenceClass: 'waived-criterion', criterionId: 'LR-03', quorum: { judges: [1, 2], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 1 }], contextDigest: contextA.contextDigest, epoch: 1, override: false }
+const persistedAttribution = { consumerNodeId: 'intro', upstreamNodeId: 'lit', key: 'lit::LR-03', evidenceClass: 'waived-criterion', criterionId: 'LR-03', quorum: { judges: [0, 1], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 0 }], contextDigest: contextA.contextDigest, epoch: 1, override: false }
 const revisionBase = { projectId: 'causal-project', nodeId: 'lit', epoch: 2, problem: 'invalid evidence', requiredChange: 'replace source', acceptanceChecks: ['verify DOI'] }
 const revisionDigest = core.revisionRequestDigest({ ...revisionBase, upstreamAttribution: persistedAttribution })
 const distinctAttributionDigest = core.revisionRequestDigest({ ...revisionBase, upstreamAttribution: { ...persistedAttribution, upstreamNodeId: 'methods' } })
@@ -113,10 +121,15 @@ await fs.writeFile(path.join(projectRoot, 'plan.json'), JSON.stringify(plan))
 const initial = createLibraries.projectstate.emptyState(plan)
 initial.project.linearProjectId = 'linear-project-1'
 await fs.writeFile(path.join(projectRoot, 'state.json'), JSON.stringify(initial))
-const claimed = await createLibraries.projectstate.transitionNode(lifecycleFops, lifecycleDir, plan.projectId, 'lit', 'claim', { leaseId: 'lease-1', runDir: 'runs/lit' })
+const claimedDigest = 'a'.repeat(64)
+// Linear-bound claim requires the freshly queried context digest (plan §7.4);
+// it is recorded on the entry as a pointer/checksum, never a narrative copy.
+await assert.rejects(createLibraries.projectstate.transitionNode(lifecycleFops, lifecycleDir, plan.projectId, 'lit', 'claim', { leaseId: 'lease-1', runDir: 'runs/lit' }), /linear-bound claim requires contextDigest/)
+const claimed = await createLibraries.projectstate.transitionNode(lifecycleFops, lifecycleDir, plan.projectId, 'lit', 'claim', { leaseId: 'lease-1', runDir: 'runs/lit', contextDigest: claimedDigest })
 assert.equal(claimed.state.nodes.lit.status, 'in_progress')
 assert.equal(claimed.state.nodes.lit.projectionStatus, 'pending')
 assert.equal(claimed.state.nodes.lit.linearProjection.status, 'in_progress')
+assert.equal(claimed.state.nodes.lit.contextDigest, claimedDigest)
 const held = await createLibraries.projectstate.transitionNode(lifecycleFops, lifecycleDir, plan.projectId, 'intro', 'hold', { causalHolds: [{ blockedBy: ['lit'], reason: 'await receipt' }] })
 assert.deepEqual(held.state.nodes.intro.linearProjection.blockedBy, ['lit'])
 const failed = await createLibraries.projectstate.transitionNode(lifecycleFops, lifecycleDir, plan.projectId, 'lit', 'fail', { failureReason: 'acceptance mismatch' })

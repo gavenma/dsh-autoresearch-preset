@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -14,7 +15,7 @@ assert.equal('tools/' + mountedMatch[1], manifest.entries.orchestrator, 'mounted
 const mountedLinearMatch = composition.match(/\.\/tools\/(linear-[0-9a-f]{12}\.mjs)/)
 assert.ok(mountedLinearMatch, 'agent.cordis.yml must mount a generated linear bundle')
 assert.equal('tools/' + mountedLinearMatch[1], manifest.entries.linear, 'mounted linear must match build manifest')
-const { default: orchestrator } = await import(pathToFileURL(path.join(root, manifest.entries.orchestrator)).href)
+const { default: orchestrator, createLibraries } = await import(pathToFileURL(path.join(root, manifest.entries.orchestrator)).href)
 const { default: linearPlugin } = await import(pathToFileURL(path.join(root, manifest.entries.linear)).href)
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex')
 const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-causal-mounted-'))
@@ -23,25 +24,33 @@ const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
 const upstreamRun = path.join(baseDir, '.research-agent', 'runs', 'upstream')
 const consumerRun = path.join(baseDir, '.research-agent', 'runs', 'consumer')
 await fs.mkdir(path.join(projectDir, 'revision-requests'), { recursive: true })
-await fs.mkdir(path.join(consumerRun, 'pass_01'), { recursive: true })
+await fs.mkdir(path.join(consumerRun, 'pass_00'), { recursive: true })
 await fs.mkdir(upstreamRun, { recursive: true })
 
-const plan = {
-  schemaVersion: 2, projectId, projectName: 'Mounted adversarial routing', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
-  projectContract: { goal: 'Exercise mounted causal routing.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+const plan = canonicalPlan({
+  projectId, projectName: 'Mounted adversarial routing', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
+  projectContract: {
+    goal: 'Exercise mounted causal routing.',
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
+  },
   nodes: [
-    { id: 'upstream', title: 'Upstream', kind: 'research', roles: ['research_author'], expectedOutcome: 'Input.', acceptance: [{ id: 'UP-01', text: 'Input.', required: true }], dependsOn: [] },
-    { id: 'consumer', title: 'Consumer', kind: 'research', roles: ['research_author'], expectedOutcome: 'Output.', acceptance: [{ id: 'CON-01', text: 'Output.', required: true }], dependsOn: ['upstream'] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: ['consumer'] },
+    canonicalNode({ id: 'upstream', kind: 'research', roles: ['research_author'], title: 'Upstream', expectedOutcome: 'Input.', acceptance: [criterion('UP-01', 'Input.')] }),
+    canonicalNode({ id: 'consumer', kind: 'research', roles: ['research_author'], title: 'Consumer', expectedOutcome: 'Output.', acceptance: [criterion('CON-01', 'Output.')], dependsOn: ['upstream'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], dependsOn: ['consumer'] }),
   ],
-}
-const state = {
-  schemaVersion: 1, projectId, integration: { epoch: 1 },
-  nodes: Object.fromEntries(plan.nodes.map((node) => [node.id, {
+})
+const state = createLibraries.projectstate.emptyState(plan)
+for (const node of plan.nodes) {
+  Object.assign(state.nodes[node.id], {
     status: 'done', issueId: node.id + '-issue', identifier: node.id.toUpperCase(), url: 'https://example.invalid/' + node.id, linearState: 'Done',
     runDir: node.id === 'upstream' ? path.relative(baseDir, upstreamRun) : node.id === 'consumer' ? path.relative(baseDir, consumerRun) : '',
-    runStatus: 'complete', currentStep: 'complete', currentPass: 1, hasFinal: true, finalCommentId: node.id + '-comment', receipts: [],
-  }])),
+    runStatus: 'complete', currentStep: 'complete', currentPass: 0, hasFinal: true, finalCommentId: node.id + '-comment', receipts: [],
+  })
 }
 const upstreamAcceptance = { criteria: [{ id: 'UP-01', result: 'WAIVED', waiver: { userDecision: 'Approved', rationale: 'Deferred.', scope: 'Input.', planRevision: 1 } }] }
 const upstreamOutput = { contributions: [{ id: 'upstream-1', importance: 'required', mutability: 'locked' }] }
@@ -81,7 +90,7 @@ const durableRequest = {
   projectId, nodeId: 'upstream',
   upstreamAttribution: {
     consumerNodeId: 'consumer', upstreamNodeId: 'upstream', key: 'upstream::UP-01', evidenceClass: 'waived-criterion', criterionId: 'UP-01',
-    quorum: { judges: [1, 2], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 1 }, { source: 'judge', judge: 2 }], contextDigest: sha256('context'), epoch: 1, override: false,
+    quorum: { judges: [0, 1], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 0 }, { source: 'judge', judge: 1 }], contextDigest: sha256('context'), epoch: 1, override: false,
   },
 }
 await fs.writeFile(path.join(projectDir, 'revision-requests', 'orphan.json'), JSON.stringify(durableRequest, null, 2) + '\n')

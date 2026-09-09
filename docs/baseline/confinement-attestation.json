@@ -1,0 +1,73 @@
+{
+  "kind": "confinement-attestation",
+  "attested": false,
+  "status": "confinement-unattested",
+  "probedAt": "2026-09-08T09:37:46.685Z",
+  "probeToken": "0de7d3a4",
+  "declared": {
+    "writeRoot": "/home/gaven/dsh_autoresearch_dev",
+    "readRoots": [
+      "/home/gaven/dsh_autoresearch_dev"
+    ],
+    "egress": "none"
+  },
+  "probes": [
+    {
+      "scope": "write",
+      "enforced": false,
+      "control": {
+        "expected": "allowed",
+        "observed": "allowed"
+      },
+      "escapes": [
+        {
+          "target": "/tmp/.confinement-spike-1788860266628-0de7d3a4.txt",
+          "expected": "blocked",
+          "observed": "ALLOWED (write escaped declared root)"
+        },
+        {
+          "target": "/home/gaven/.confinement-spike-1788860266628-0de7d3a4.txt",
+          "expected": "blocked",
+          "observed": "blocked"
+        }
+      ]
+    },
+    {
+      "scope": "read",
+      "enforced": false,
+      "control": {
+        "expected": "allowed",
+        "observed": "allowed"
+      },
+      "escapes": [
+        {
+          "target": "/etc/hostname",
+          "expected": "blocked",
+          "observed": "ALLOWED (read outside declared roots): cs658a"
+        }
+      ]
+    },
+    {
+      "scope": "egress",
+      "enforced": false,
+      "control": {
+        "expected": "n/a (no declared network capability)",
+        "observed": "n/a"
+      },
+      "escapes": [
+        {
+          "target": "http://example.com",
+          "expected": "blocked",
+          "observed": "ALLOWED (HTTP 200)"
+        }
+      ]
+    }
+  ],
+  "unattestedScopes": [
+    "write",
+    "read",
+    "egress"
+  ],
+  "consequence": "fail closed: roles keep the narrow least-privilege profile for this run; no role manifest or prompt may claim confinement the adapter did not demonstrate",
+  "digest": "sha256:e4ab2ea82b90fae2534616e6980b468a7c5372818670a7835c4a603cba4d4dea"
+}

@@ -4,11 +4,12 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
 const core = await import(pathToFileURL(path.join(root, manifest.entries.core)).href)
-const { default: orchestrator } = await import(pathToFileURL(path.join(root, manifest.entries.orchestrator)).href)
+const { default: orchestrator, createLibraries } = await import(pathToFileURL(path.join(root, manifest.entries.orchestrator)).href)
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex')
 const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-causal-routing-'))
 const projectId = 'causal-routing'
@@ -16,18 +17,26 @@ const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
 const upstreamRun = path.join(baseDir, '.research-agent', 'runs', 'lit')
 const consumerRun = path.join(baseDir, '.research-agent', 'runs', 'intro')
 await fs.mkdir(path.join(projectDir, 'revision-requests'), { recursive: true })
-await fs.mkdir(path.join(consumerRun, 'pass_01'), { recursive: true })
+await fs.mkdir(path.join(consumerRun, 'pass_00'), { recursive: true })
 await fs.mkdir(upstreamRun, { recursive: true })
 
-const plan = {
-  schemaVersion: 2, projectId, projectName: 'Causal routing', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
-  projectContract: { goal: 'Exercise causal routing.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+const plan = canonicalPlan({
+  projectId, projectName: 'Causal routing', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
+  projectContract: {
+    goal: 'Exercise causal routing.',
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
+  },
   nodes: [
-    { id: 'lit', title: 'Literature', kind: 'literature', roles: ['research_literature_writer'], expectedOutcome: 'Literature.', acceptance: [{ id: 'LR-03', text: 'Coverage.', required: true }], dependsOn: [] },
-    { id: 'intro', title: 'Introduction', kind: 'research', roles: ['research_author'], expectedOutcome: 'Introduction.', acceptance: [{ id: 'INTRO-02', text: 'Context.', required: true }], dependsOn: ['lit'] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: ['intro'] },
+    canonicalNode({ id: 'lit', kind: 'literature', roles: ['research_literature_writer'], title: 'Literature', expectedOutcome: 'Literature.', acceptance: [criterion('LR-03', 'Coverage.')] }),
+    canonicalNode({ id: 'intro', kind: 'research', roles: ['research_author'], title: 'Introduction', expectedOutcome: 'Introduction.', acceptance: [criterion('INTRO-02', 'Context.')], dependsOn: ['lit'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], dependsOn: ['intro'] }),
   ],
-}
+})
 assert.equal(core.validatePlan(plan).ok, true)
 const litContract = core.nodeContract(plan, 'lit')
 const introContract = core.nodeContract(plan, 'intro')
@@ -35,20 +44,16 @@ const upstreamAcceptance = { overall: 'PASS', receiptHash: 'acceptance-lit', cri
 const upstreamOutput = { contributions: [{ id: 'lit-coverage', importance: 'required', mutability: 'locked', evidence: [] }] }
 const upstreamOutputText = JSON.stringify(upstreamOutput, null, 2) + '\n'
 await fs.writeFile(path.join(projectDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n')
-await fs.writeFile(path.join(upstreamRun, 'node-contract.json'), JSON.stringify({ projectId, nodeId: 'lit', planRevision: 1, artifactFormat: 'md', contractDigest: litContract.digest, contract: litContract }, null, 2) + '\n')
+await fs.writeFile(path.join(upstreamRun, 'node-contract.json'), JSON.stringify({ kind: 'node-contract', projectId, nodeId: 'lit', planRevision: 1, artifactFormat: 'md', contractDigest: litContract.digest, contract: litContract }, null, 2) + '\n')
 await fs.writeFile(path.join(upstreamRun, 'acceptance.json'), JSON.stringify(upstreamAcceptance, null, 2) + '\n')
 await fs.writeFile(path.join(upstreamRun, 'node-output.json'), upstreamOutputText)
-await fs.writeFile(path.join(consumerRun, 'node-contract.json'), JSON.stringify({ projectId, nodeId: 'intro', planRevision: 1, artifactFormat: 'md', contractDigest: introContract.digest, contract: introContract }, null, 2) + '\n')
-await fs.writeFile(path.join(consumerRun, 'run.json'), JSON.stringify({ currentPass: 1, config: { backtracking: { mode: 'observe' } } }) + '\n')
+await fs.writeFile(path.join(consumerRun, 'node-contract.json'), JSON.stringify({ kind: 'node-contract', projectId, nodeId: 'intro', planRevision: 1, artifactFormat: 'md', contractDigest: introContract.digest, contract: introContract }, null, 2) + '\n')
+await fs.writeFile(path.join(consumerRun, 'run.json'), JSON.stringify({ currentPass: 0, config: { backtracking: { mode: 'observe' } } }) + '\n')
 
-const state = {
-  schemaVersion: 1, projectId, integration: { epoch: 1 },
-  nodes: {
-    lit: { status: 'done', issueId: 'lit-issue', identifier: 'LIT', url: 'https://example.invalid/lit', linearState: 'Done', runDir: path.relative(baseDir, upstreamRun), runStatus: 'complete', currentStep: 'complete', currentPass: 1, hasFinal: true, finalCommentId: 'lit-comment', receipts: [] },
-    intro: { status: 'done', issueId: 'intro-issue', identifier: 'INTRO', url: 'https://example.invalid/intro', linearState: 'Done', runDir: path.relative(baseDir, consumerRun), runStatus: 'complete', currentStep: 'complete', currentPass: 1, hasFinal: true, finalCommentId: 'intro-comment', receipts: [] },
-    integration: { status: 'done', issueId: 'integration-issue', identifier: 'INT', url: 'https://example.invalid/integration', linearState: 'Done', runDir: '', runStatus: 'complete', currentStep: 'complete', currentPass: 1, hasFinal: true, finalCommentId: 'integration-comment', receipts: [] },
-  },
-}
+const state = createLibraries.projectstate.emptyState(plan)
+Object.assign(state.nodes.lit, { status: 'done', issueId: 'lit-issue', identifier: 'LIT', url: 'https://example.invalid/lit', linearState: 'Done', runDir: path.relative(baseDir, upstreamRun), runStatus: 'complete', currentStep: 'complete', currentPass: 0, hasFinal: true, finalCommentId: 'lit-comment', receipts: [] })
+Object.assign(state.nodes.intro, { status: 'done', issueId: 'intro-issue', identifier: 'INTRO', url: 'https://example.invalid/intro', linearState: 'Done', runDir: path.relative(baseDir, consumerRun), runStatus: 'complete', currentStep: 'complete', currentPass: 0, hasFinal: true, finalCommentId: 'intro-comment', receipts: [] })
+Object.assign(state.nodes.integration, { status: 'done', issueId: 'integration-issue', identifier: 'INT', url: 'https://example.invalid/integration', linearState: 'Done', runDir: '', runStatus: 'complete', currentStep: 'complete', currentPass: 0, hasFinal: true, finalCommentId: 'integration-comment', receipts: [] })
 await fs.writeFile(path.join(projectDir, 'state.json'), JSON.stringify(state, null, 2) + '\n')
 const contextDigest = core.buildUpstreamContextText({
   plan, consumerNodeId: 'intro', records: {
@@ -60,10 +65,10 @@ const attribution = {
   explanation: 'The introduction lacks the waived literature coverage needed for its context criterion.', evidenceAnchor: 'waived:lit:LR-03',
 }
 const transcript = '## Reasoning\n\nRANKING: X, Y, Z\n\n## Upstream attribution\n```attribution\n' + JSON.stringify(attribution, null, 2) + '\n```\n'
-await fs.writeFile(path.join(consumerRun, 'pass_01', 'judge-1.md'), transcript)
-await fs.writeFile(path.join(consumerRun, 'pass_01', 'judge-2.md'), transcript)
+await fs.writeFile(path.join(consumerRun, 'pass_00', 'judge-0.md'), transcript)
+await fs.writeFile(path.join(consumerRun, 'pass_00', 'judge-1.md'), transcript)
 const evidenceHash = sha256(transcript)
-const attributions = [1, 2].map((judge) => ({ source: 'judge', judge, pass: 1, validRanking: true, allowedLabels: ['X', 'Y', 'Z'], evidenceFile: 'pass_01/judge-' + judge + '.md', evidenceHash, contextDigest, attribution }))
+const attributions = [0, 1].map((judge) => ({ source: 'judge', judge, pass: 0, validRanking: true, allowedLabels: ['X', 'Y', 'Z'], evidenceFile: 'pass_00/judge-' + judge + '.md', evidenceHash, contextDigest, attribution }))
 await fs.mkdir(path.join(baseDir, '.research-agent'), { recursive: true })
 await fs.writeFile(path.join(baseDir, '.research-agent', 'config.json'), JSON.stringify({ backtracking: { mode: 'observe' } }) + '\n')
 
@@ -79,16 +84,16 @@ orchestrator.apply({ get(name) { return name === 'fs' ? fileService : name === '
 const tool = registered.get('autoresearch_revision_request')
 const exec = { agent: { session: { header: { cwd: baseDir, delegationDepth: 0 } } } }
 await fs.writeFile(path.join(baseDir, '.research-agent', 'config.json'), JSON.stringify({ backtracking: { mode: 'enforce', maxReopensPerPair: 1 } }) + '\n')
-await fs.writeFile(path.join(projectDir, 'revision-requests', 'existing.json'), JSON.stringify({ projectId, nodeId: 'lit', upstreamAttribution: { consumerNodeId: 'intro', upstreamNodeId: 'lit', key: 'lit::LR-03', evidenceClass: 'waived-criterion', criterionId: 'LR-03', quorum: { judges: [1, 2], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 1 }], contextDigest, epoch: 1, override: false } }) + '\n')
+await fs.writeFile(path.join(projectDir, 'revision-requests', 'existing.json'), JSON.stringify({ projectId, nodeId: 'lit', upstreamAttribution: { consumerNodeId: 'intro', upstreamNodeId: 'lit', key: 'lit::LR-03', evidenceClass: 'waived-criterion', criterionId: 'LR-03', quorum: { judges: [0, 1], criticConcord: false, mode: 'two-judge' }, attributions: [{ source: 'judge', judge: 0 }], contextDigest, epoch: 1, override: false } }) + '\n')
 const stateBeforeCap = await fs.readFile(path.join(projectDir, 'state.json'), 'utf8')
-const capped = await tool.execute({ projectId, nodeId: 'intro', pass: 1, attributions }, exec)
+const capped = await tool.execute({ projectId, nodeId: 'intro', pass: 0, attributions }, exec)
 assert.equal(capped.decision, 'escalate-budget')
 assert.equal(await fs.readFile(path.join(projectDir, 'state.json'), 'utf8'), stateBeforeCap)
 assert.equal((await fs.readdir(path.join(projectDir, 'revision-requests'))).length, 1)
 await fs.rm(path.join(projectDir, 'revision-requests', 'existing.json'))
 await fs.writeFile(path.join(baseDir, '.research-agent', 'config.json'), JSON.stringify({ backtracking: { mode: 'observe' } }) + '\n')
 
-const observe = await tool.execute({ projectId, nodeId: 'intro', pass: 1, attributions }, exec)
+const observe = await tool.execute({ projectId, nodeId: 'intro', pass: 0, attributions }, exec)
 assert.equal(observe.decision, 'observe')
 assert.equal(observe.observed, true)
 assert.equal((await fs.readdir(path.join(projectDir, 'revision-requests'))).length, 0)
@@ -102,14 +107,14 @@ const consumerContractText = await fs.readFile(consumerContractPath, 'utf8')
 const forgedContract = JSON.parse(consumerContractText)
 forgedContract.contractDigest = 'forged'
 await fs.writeFile(consumerContractPath, JSON.stringify(forgedContract, null, 2) + '\n')
-const forged = await tool.execute({ projectId, nodeId: 'intro', pass: 1, attributions }, exec)
+const forged = await tool.execute({ projectId, nodeId: 'intro', pass: 0, attributions }, exec)
 assert.equal(forged.decision, 'abstain')
 assert.equal((await fs.readdir(path.join(projectDir, 'revision-requests'))).length, 0)
 assert.equal(JSON.parse(await fs.readFile(path.join(projectDir, 'state.json'), 'utf8')).nodes.intro.status, 'done')
 await fs.writeFile(consumerContractPath, consumerContractText)
 
 await fs.writeFile(path.join(baseDir, '.research-agent', 'config.json'), JSON.stringify({ backtracking: { mode: 'enforce' } }) + '\n')
-const enforce = await tool.execute({ projectId, nodeId: 'intro', pass: 1, attributions }, exec)
+const enforce = await tool.execute({ projectId, nodeId: 'intro', pass: 0, attributions }, exec)
 assert.equal(enforce.decision, 'reopen')
 assert.equal(enforce.retargetedTo, 'lit')
 assert.deepEqual(enforce.resetNodes, ['integration', 'intro', 'lit'])

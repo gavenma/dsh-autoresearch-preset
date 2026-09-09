@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -239,15 +240,23 @@ orchestrator.apply({
 const exec = { agent: { session: { header: { cwd: baseDir2, delegationDepth: 0 } } } }
 const projectDir = path.join(baseDir2, '.research-agent', 'projects', 'ledger-proj')
 await fs.mkdir(path.join(projectDir, 'revision-requests'), { recursive: true })
-const plan = {
-  schemaVersion: 2, projectId: 'ledger-proj', projectName: 'Ledger', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
-  projectContract: { goal: 'Ledger.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+const plan = canonicalPlan({
+  projectId: 'ledger-proj', projectName: 'Ledger', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
+  projectContract: {
+    goal: 'Ledger.',
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
+  },
   nodes: [
-    { id: 'notes', title: 'Notes', kind: 'research', roles: ['research_author'], artifactFormat: 'markdown', expectedOutcome: 'Notes.', acceptance: [{ id: 'NOT-01', text: 'Notes exist.', required: true }], dependsOn: [] },
-    { id: 'methods', title: 'Methods', kind: 'research', roles: ['research_author'], expectedOutcome: 'Methods.', acceptance: [{ id: 'MET-01', text: 'Methods exist.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: ['notes', 'methods'] },
+    canonicalNode({ id: 'notes', kind: 'research', roles: ['research_author'], artifactFormat: 'markdown', title: 'Notes', expectedOutcome: 'Notes.', acceptance: [criterion('NOT-01', 'Notes exist.')] }),
+    canonicalNode({ id: 'methods', kind: 'research', roles: ['research_author'], title: 'Methods', expectedOutcome: 'Methods.', acceptance: [criterion('MET-01', 'Methods exist.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], dependsOn: ['notes', 'methods'] }),
   ],
-}
+})
 await fs.writeFile(path.join(projectDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n')
 const initRun = registered.get('autoresearch_init_run')
 const recordAcceptance = registered.get('autoresearch_record_acceptance')
@@ -294,7 +303,14 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
     assert.equal(ledgerV1.nodeRevision, 1)
 
     // Revision 2: heading change → new slug; same hash + revision would not
-    // re-derive, but a new artifact hash forces the rewrite.
+    // re-derive, but a new artifact hash forces the rewrite. The journal
+    // revision is bumped first — the real flow routes this through
+    // autoresearch_revision_request, which is what record_acceptance's
+    // nodeRevision cross-check enforces.
+    const statePath2 = path.join(projectDir, 'state.json')
+    const stateBeforeRevision = JSON.parse(await fs.readFile(statePath2, 'utf8'))
+    stateBeforeRevision.nodes.methods.nodeRevision = 2
+    await fs.writeFile(statePath2, JSON.stringify(stateBeforeRevision, null, 2) + '\n')
     const texV2 = '\\documentclass{article}\n\\begin{document}\n\\section{Data Gathering}\nThe data gathering procedure follows the protocol described in the appendix.\n\\end{document}\n'
     await fs.writeFile(path.join(runAbs, 'output.tex'), texV2)
     const second = await recordAcceptance.execute({ runDir: run.runDir, criteria: [{ id: 'MET-01', result: 'PASS' }], nodeRevision: 2 }, exec)
@@ -316,7 +332,6 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
   const runAbs = path.join(ws, '.research-agent', 'runs', 'legacy', '2026-01-01T00-00-00-legacy')
   await fs.mkdir(runAbs, { recursive: true })
   const receipt = {
-    schemaVersion: 2,
     kind: 'acceptance-receipt',
     projectId: 'legacy-proj',
     planRevision: 1,

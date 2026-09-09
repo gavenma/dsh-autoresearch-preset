@@ -147,6 +147,14 @@ function makeUtil(pathutil) {
     return value
   }
 
+  // Zero-based loop pass number: the exact integer the loop used; no offset.
+  util.requiredNonNegativeInteger = function (value, name) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new Error(`${name} must be a zero-based non-negative integer (got ${JSON.stringify(value)}).`)
+    }
+    return value
+  }
+
   util.nonEmptyStringArray = function (value, fallback) {
     const items = Array.isArray(value)
       ? value.map(String).map((item) => item.trim()).filter(Boolean)
@@ -401,8 +409,8 @@ function makeConfig(pathutil, util) {
       '2. Spawn critic -> save `pass_N/critic.md`; checkpoint with `pass_N_author_b`. The critic is read-only: hand it the absolute resolved paths of the artifacts and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
       '3. Spawn author B -> save `pass_N/B.md`; checkpoint with `pass_N_synthesis`.',
       '4. Spawn synthesizer AB -> save `pass_N/AB.md`; checkpoint with `pass_N_judging`.',
-      '5. Call `autoresearch_anonymize_candidates`; judges only see `judge_N_candidates.md`, never maps or original IDs; save judge prompts.',
-      '6. Spawn blind judges -> save `pass_N/judge_N.md`; checkpoint with `pass_N_scoring` after all judges are saved. Each judge is read-only: hand it the absolute resolved packet paths and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
+      '5. Call `autoresearch_anonymize_candidates`; judges only see `judge_NN_candidates.md` (zero-based, zero-padded), never maps or original IDs; save judge prompts.',
+      '6. Spawn blind judges -> save `pass_NN/judge_NN.md` (same zero-based zero-padded NN as the packet); checkpoint with `pass_NN_scoring` after all judges are saved. Each judge is read-only: hand it the absolute resolved packet paths and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
       '7. Parse rankings with `autoresearch_parse_ranking` and score with `autoresearch_score_borda`.',
       '8. Save `pass_N/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`. When result.json carries `degraded: true` (unparseable or mis-mapped rankings, missing/duplicate labels, fewer than 2 candidates, all-tie, or fewer usable rankings than the quorum), the checkpoint mechanically forces the next action to the critic gate — spawn research_critic, no further judge spawns — per the result `degradedReasons`.',
       '9. If winner is A, increment consecutive A wins; otherwise reset to 0 and set incumbent to B or AB.',
@@ -433,10 +441,13 @@ function makeConfig(pathutil, util) {
   }
 
   // Resolve the artifact root without requiring a config file inside the root.
-  // Explicit input and the workspace bootstrap file are authoritative; when
-  // neither exists, preserve an evidenced legacy root and otherwise use the
-  // hidden root for new workspaces. User-facing deliverables are published
-  // separately under outputRoot.
+  // There is exactly one runtime root: the hidden .research-agent. Explicit
+  // input and the workspace bootstrap file are authoritative overrides;
+  // otherwise the hidden root is used whether or not it already contains
+  // artifacts. The bare 'research-agent/' directory is never a runtime
+  // alternative — artifacts found there are migration input, and the runtime
+  // fails with a pointer to the offline migrator. User-facing deliverables
+  // are published separately under outputRoot.
   config.resolveArtifactRoot = async function (fops, projectRoot, opts = {}) {
     const base = pathutil.resolve(projectRoot ?? '.')
     const normalizeRoot = (value) => {
@@ -453,22 +464,22 @@ function makeConfig(pathutil, util) {
     const bootstrapRoot = normalizeRoot(bootstrap?.artifactRoot)
     if (bootstrapRoot) return { absoluteRoot: bootstrapRoot, relativeRoot: relativeRoot(bootstrapRoot), source: 'bootstrap' }
 
-    const visible = pathutil.join(base, 'research-agent')
-    const legacy = pathutil.join(base, '.research-agent')
+    const bareRoot = pathutil.join(base, 'research-agent')
+    const canonicalRoot = pathutil.join(base, '.research-agent')
     const evidence = async (root) => {
       for (const marker of ['config.json', 'run.json', 'projects', 'runs', 'locks', 'roles']) {
         if (await fops.exists(pathutil.join(root, marker))) return true
       }
       return false
     }
-    const visibleEvidence = await evidence(visible)
-    const legacyEvidence = await evidence(legacy)
-    if (visibleEvidence && legacyEvidence) {
-      throw new Error('ambiguous-artifact-root: both research-agent/ and .research-agent/ contain artifacts; pass artifactRoot or create autoresearch.config.json.')
+    if (await evidence(bareRoot)) {
+      throw new Error(
+        'legacy-artifact-root: ' + base + '/research-agent/ contains artifacts, but the bare root is a migration input, not a runtime alternative. '
+        + 'Run node scripts/migrate-workspace.mjs --project <id> --workspace ' + base + ' --artifact-root research-agent for legacy plans, move the tree to .research-agent/, or pass an explicit artifactRoot.'
+      )
     }
-    const source = visibleEvidence || legacyEvidence ? 'evidence' : 'default-hidden'
-    const selected = visibleEvidence ? visible : legacyEvidence ? legacy : pathutil.join(base, '.research-agent')
-    return { absoluteRoot: selected, relativeRoot: relativeRoot(selected), source }
+    const source = (await evidence(canonicalRoot)) ? 'evidence' : 'default-hidden'
+    return { absoluteRoot: canonicalRoot, relativeRoot: relativeRoot(canonicalRoot), source }
   }
 
   // Resolution ladder: explicit/bootstrap/evidenced artifact root -> root
@@ -512,7 +523,7 @@ Standards: (1) one node = one self-contained work item with one explicit purpose
 
 Node roles are drawn from the 7 pipeline roles only (research_scout, evidence_verifier, research_author, research_critic, research_synthesizer, research_judge, research_reporter, plus configured roleProfiles — not research_planner).
 
-Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block matching the AutoResearch plan schema version 2: schemaVersion 2, projectId, projectName, optional teamId/teamKey, revision 1, integrationId "integration", artifactFormat "tex", projectContract { goal, exposurePolicyVersion: 1 (MANDATORY for every new plan), deliverables (an EXPLICIT array — the sole exposure request — of safe relative file paths of EVERY user-facing file the brief asks for, including requested companions like references.bib or process-issues.md; [] is the valid no-exposure value; no globs, no extension guessing, no companions.json, no filename-pattern discovery, and never a universal final.tex/final.pdf default — the format is whatever the brief asks for; optional rebuildable: true (TeX only, requires an exposed .tex deliverable) asks for a fully reproducible source package; optional diagnosticMappings exposes selected internal evidence under audit/), acceptance[] with stable criterion ids and text/required/verification, wordBudget { unit, limit } }, nodes[] where every node has id/title/kind (research | literature | abstract | code | experiment | experiments | assembly | integration)/artifactFormat (tex or markdown; TeX fields below apply to TeX nodes only — Markdown nodes never receive texMode or a template)/roles/expectedOutcome/acceptance (string entries with stable ids like "AA-01: ...")/test/verification { template, method }/outputContract { artifactPath (safe relative path of the promoted artifact), texMode, declaredPackageNeeds, declaredMacroNeeds, declaredInputNeeds, declaredGraphicsNeeds, declaredBibliographyNeeds }/budget { numScouts, numJudges, maxPasses, convergenceThreshold — integers; convergenceThreshold must be an integer >= 1 }/dependsOn. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. projectId and node ids are safe path segments; no approvedAt; no fabricated citations; every web claim carries a real URL.
+Output: a short "## Plan rationale" (PI-style justification, risks, integration verification), then "## Plan JSON" with a single fenced json block in the sole canonical AutoResearch plan shape — no schemaVersion, no policy-version markers, no compatibility defaults: { kind: "autoresearch-plan" (the ONLY identity — exactly this value), projectId (safe path segment), projectName, revision (positive integer; start at 1), approvedAt (ISO-8601 timestamp of the moment the plan is presented as approved), integrationId: "integration", projectContract { goal (non-empty), deliverables (ALWAYS an explicit array — the sole exposure request — of safe relative file paths of EVERY user-facing file the brief asks for, including requested companions like references.bib or process-issues.md; [] is the valid no-exposure value; no globs, no extension guessing, no filename-pattern discovery, and never a universal final.tex/final.pdf default — the format is whatever the brief asks for), acceptance (non-empty array of { id, text, required } objects with stable criterion ids), test (string naming the mechanical verification), wordBudget (positive integer word limit or null), rebuildable (boolean; true is TeX-only and requires an exposed .tex deliverable), diagnosticMappings (explicit array, usually []; entries { sourcePath, destinationPath } expose selected internal evidence under audit/ only) }, nodes[] where every node has: id (safe path segment, unique), title, expectedOutcome, kind (closed enum: research | literature | abstract | figure | code | experiment | experiments | assembly | integration), artifactFormat (tex | markdown | image | asset; image/asset are legal ONLY for figure nodes), roles, acceptance (non-empty array of { id, text, required } objects with stable ids like "AA-01"; string entries are not allowed), test (string; empty allowed when there is no command check), outputContract { artifactPath (safe relative path of the promoted artifact) plus texMode for TeX nodes }, budget { numScouts, numJudges, maxPasses, convergenceThreshold — explicit integers, no hidden defaults; numScouts>=1 iff research_scout is listed else 0; numJudges>=2 iff research_judge is listed else 0; positive maxPasses and convergenceThreshold }, dependsOn (array of node ids; may be empty), and — TeX nodes only — optional verification { texMode, templatePath, declared }: TeX fields are ILLEGAL on markdown/image/asset nodes, and image/asset fields (sourceAssets, imageTolerance, judgeWithImages) are legal ONLY on figure nodes. The integration node must have kind "integration", roles exactly [research_integration_editor, research_integration_verifier], no judges, and depend only on assembly/leaves. The assembly node's outputContract must set texMode: standalone (it merges complete documents; the contract derivation defaults omitted assembly texMode to standalone, but write it explicitly). Section-level decomposition is mandatory for document rewrites. No fabricated citations; every web claim carries a real URL.
 `,
 
     research_scout: `You are a research scout.
@@ -758,16 +769,20 @@ function makeResume(pathutil, util, config) {
     }
 
     const judgeCount = Number(run.config?.numJudges ?? DEFAULT_CONFIG.numJudges)
-    for (let judge = 1; judge <= judgeCount; judge += 1) {
-      if (!await exists(`${passDirName}/judge_${judge}.md`)) {
-        return { step: `${passDirName}_judging`, action: `Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates if judge packets/maps are missing, save judge prompts, spawn or rerun judge ${judge}, then save ${passDirName}/judge_${judge}.md.` }
+    // Zero-based, zero-padded judge naming matches buildBlindPackets and the
+    // flat dispatch primitives exactly (plan §6.5: no hidden +1/-1 offsets).
+    for (let judge = 0; judge < judgeCount; judge += 1) {
+      const judgeName = 'judge_' + String(judge).padStart(2, '0')
+      if (!await exists(`${passDirName}/${judgeName}.md`)) {
+        return { step: `${passDirName}_judging`, action: `Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates if judge packets/maps are missing, save judge prompts, spawn or rerun judge ${judge}, then save ${passDirName}/${judgeName}.md.` }
       }
     }
     // MANDATED FIX (plan §3.7): judge packets/maps are required before scoring,
     // not just the judge verdicts.
-    for (let judge = 1; judge <= judgeCount; judge += 1) {
-      if (!await exists(`${passDirName}/judge_${judge}_candidates.md`) || !await exists(`${passDirName}/judge_${judge}_map.json`)) {
-        return { step: `${passDirName}_judging`, action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates to regenerate missing judge packets/maps, then rerun the affected judge(s) and save judge_N.md.' }
+    for (let judge = 0; judge < judgeCount; judge += 1) {
+      const judgeName = 'judge_' + String(judge).padStart(2, '0')
+      if (!await exists(`${passDirName}/${judgeName}_candidates.md`) || !await exists(`${passDirName}/${judgeName}_map.json`)) {
+        return { step: `${passDirName}_judging`, action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates to regenerate missing judge packets/maps, then rerun the affected judge(s) and save judge_NN.md.' }
       }
     }
     if (!await exists(`${passDirName}/result.json`)) {
@@ -880,7 +895,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeResume
 function makeScoring(pathutil, util, config) {
   const scoring = {}
 
-  // scoring.anonymizeCandidates is assigned later as the v2 fail-closed
+  // scoring.anonymizeCandidates is assigned later as the contract fail-closed
   // override (plan §4.3); no legacy implementation exists here anymore.
 
   scoring.parseRanking = function (text, allowedLabels, anonymizedToOriginal) {
@@ -953,7 +968,7 @@ function makeScoring(pathutil, util, config) {
     for (const item of judgeRankings) {
       const hadRankingArray = Array.isArray(item && item.ranking)
       const ranking = hadRankingArray ? item.ranking.map(String) : []
-      const judge = (item && item.judge) ?? validRankings.length + invalidRankings.length + 1
+      const judge = (item && item.judge) ?? validRankings.length + invalidRankings.length
       const errors = validateCandidateRanking(ranking, candidateIds)
       if (errors.length > 0) {
         invalidRankings.push({ judge, ranking, errors })
@@ -999,7 +1014,11 @@ function makeScoring(pathutil, util, config) {
   }
 
   function extractRankingLine(text) {
-    const match = text.match(/^\s*RANKING\s*:\s*(.+)$/im)
+    // The LAST RANKING: line wins: deliberation or quoted instructions that
+    // mention "RANKING:" earlier in the response must not shadow the actual
+    // final ranking.
+    const matches = [...String(text ?? '').matchAll(/^\s*RANKING\s*:\s*(.+)$/gim)]
+    const match = matches[matches.length - 1]
     return match && match[1] ? match[1].trim() : ''
   }
 
@@ -1495,9 +1514,15 @@ function makeProfiles(util, config) {
     const rawFallbacks = Array.isArray(profile?.modelFallbacks) ? profile.modelFallbacks : []
     const modelFallbacks = []
     for (const candidate of rawFallbacks) {
-      if (typeof candidate !== 'string' || !candidate.trim()) continue
-      const trimmed = candidate.trim()
-      if (trimmed !== profileModel && !modelFallbacks.includes(trimmed)) modelFallbacks.push(trimmed)
+      if (util.isPlainObject(candidate) && candidate.reasoningEffort !== undefined && candidate.reasoningEffort !== null && (typeof candidate.reasoningEffort !== 'string' || !candidate.reasoningEffort.trim() || candidate.reasoningEffort.trim().length > 64)) {
+        throw new Error('roleProfiles.' + role + '.modelFallbacks[].reasoningEffort must be null or a non-empty provider-owned string of at most 64 characters.')
+      }
+      const model = typeof candidate === 'string' ? candidate.trim() : candidate?.model
+      if (typeof model !== 'string' || !model) continue
+      const reasoning = candidate && typeof candidate === 'object' && typeof candidate.reasoningEffort === 'string' && candidate.reasoningEffort.trim()
+        ? candidate.reasoningEffort.trim()
+        : null
+      if (model !== profileModel && !modelFallbacks.some((entry) => entry.model === model)) modelFallbacks.push({ model, reasoningEffort: reasoning })
     }
 
     const { actual, logical } = profiles.resolveRoleKeys(cfg, role)
@@ -1518,7 +1543,7 @@ function makeProfiles(util, config) {
       maxAttempts,
       retryDelayMs,
       leaseMs,
-      artifactRoot: typeof cfg.artifactRoot === 'string' ? cfg.artifactRoot : 'research-agent',
+      artifactRoot: typeof cfg.artifactRoot === 'string' ? cfg.artifactRoot : '.research-agent',
     }
   }
 
@@ -1593,6 +1618,7 @@ function makeSpawn(pathutil, util, profiles) {
       role,
       task: params.task,
       ...(typeof params.judgeIndex === 'number' ? { judgeIndex: params.judgeIndex } : {}),
+      ...(typeof params.nodeContextDigest === 'string' ? { nodeContextDigest: params.nodeContextDigest } : {}),
       toolFilter: { allow: [...profile.tools] },
       personaSource: profile.promptFile ?? `roles/${profile.role}.md (preset default or embedded fallback)`,
       model: model ?? null,
@@ -1894,9 +1920,7 @@ function makeRoleRunner(deps = {}) {
           lastAt: at,
           failures: Number.isInteger(prev.failures) ? prev.failures + 1 : 1,
         }
-        // Stamp the schema version on write (preserve any newer version a
-        // future writer left; readers today ignore the field).
-        return { ...base, schemaVersion: typeof base.schemaVersion === 'number' ? base.schemaVersion : 1, models }
+        return { ...base, kind: 'model-breaker-cache', models }
       })
     } catch {
       // Advisory state only; the in-memory breakerState already reflects it.
@@ -1910,7 +1934,7 @@ function makeRoleRunner(deps = {}) {
         const models = { ...base.models }
         pruneExpiredModels(models)
         delete models[model]
-        return { ...base, schemaVersion: typeof base.schemaVersion === 'number' ? base.schemaVersion : 1, models }
+        return { ...base, kind: 'model-breaker-cache', models }
       })
     } catch {
       // Advisory state only; the in-memory breakerState already reflects it.
@@ -1937,8 +1961,199 @@ function makeRoleRunner(deps = {}) {
         if (util.isPlainObject(record)) records.push(record)
       }
     }
-    records.sort((a, b) => Number(a.attemptNumber ?? 0) - Number(b.attemptNumber ?? 0))
+    records.sort((a, b) => Number(a.attempt ?? a.attemptNumber ?? 0) - Number(b.attempt ?? b.attemptNumber ?? 0))
     return records
+  }
+
+  // Canonical role-attempt record builder (plan §6.1/6.2): the closed
+  // role-attempt shape with the run identity; pending/running/terminal states
+  // share the shape, content fields null until observed.
+  function toAttemptRecord(ctx, fields) {
+    return core.makeRecord('role-attempt', {
+      runDigest: ctx.identity.runDigest,
+      projectId: ctx.identity.projectId,
+      nodeId: ctx.identity.nodeId,
+      contractDigest: ctx.identity.contractDigest,
+      logicalGroupId: ctx.groupId,
+      role: ctx.role,
+      pass: ctx.identity.pass,
+      attempt: fields.attemptNumber,
+      attemptId: fields.id,
+      status: fields.status,
+      createdAt: fields.createdAt,
+      childRunId: fields.childRunId ?? null,
+      requestedProvider: fields.requestedProvider ?? null,
+      requestedModel: fields.requestedModel ?? null,
+      requestedMaxTokens: Number.isInteger(fields.requestedMaxTokens) ? fields.requestedMaxTokens : null,
+      requestedReasoningEffort: typeof fields.requestedReasoningEffort === 'string' ? fields.requestedReasoningEffort : null,
+      actualReasoningEffort: typeof fields.actualReasoningEffort === 'string' ? fields.actualReasoningEffort : null,
+      modelDefaultMaxTokens: Number.isInteger(fields.modelDefaultMaxTokens) ? fields.modelDefaultMaxTokens : null,
+      configuredMaxTokens: Number.isInteger(fields.configuredMaxTokens) ? fields.configuredMaxTokens : null,
+      maxTokensSource: typeof fields.maxTokensSource === 'string' ? fields.maxTokensSource : null,
+      selectedModel: typeof fields.selectedModel === 'string' ? fields.selectedModel : null,
+      routeSource: typeof fields.routeSource === 'string' ? fields.routeSource : null,
+      actualProvider: typeof fields.actualProvider === 'string' ? fields.actualProvider : null,
+      actualModel: typeof fields.actualModel === 'string' ? fields.actualModel : null,
+      stopReason: typeof fields.stopReason === 'string' ? fields.stopReason : null,
+      sameChildRetry: fields.sameChildRetry === true,
+      firstStopReason: typeof fields.firstStopReason === 'string' ? fields.firstStopReason : null,
+      firstOutputPreview: typeof fields.firstOutputPreview === 'string' ? fields.firstOutputPreview : '',
+      firstOutputLength: Number.isInteger(fields.firstOutputLength) ? fields.firstOutputLength : 0,
+      outcomeClass: typeof fields.outcomeClass === 'string' ? fields.outcomeClass : null,
+      retryable: fields.retryable === true,
+      diagnostic: typeof fields.diagnostic === 'string' ? fields.diagnostic : null,
+      diagnosticUnavailable: fields.diagnosticUnavailable === true,
+      partialOutput: fields.partialOutput === true,
+      output: typeof fields.output === 'string' ? fields.output : '',
+      outputPreview: typeof fields.outputPreview === 'string' ? fields.outputPreview : '',
+      outputLength: Number.isInteger(fields.outputLength) ? fields.outputLength : 0,
+      outputRef: util.isPlainObject(fields.outputRef) ? fields.outputRef : null,
+      structured: fields.structured === undefined || fields.structured === null ? null : fields.structured,
+      cleanupDegraded: fields.cleanupDegraded === true,
+      cleanupError: typeof fields.cleanupError === 'string' ? fields.cleanupError : null,
+      leaseExpiresAtMs: Number.isInteger(fields.leaseExpiresAtMs) ? fields.leaseExpiresAtMs : null,
+      startedAt: typeof fields.startedAt === 'string' ? fields.startedAt : null,
+      completedAt: typeof fields.completedAt === 'string' ? fields.completedAt : null,
+      guardFindings: Array.isArray(fields.guardFindings) && fields.guardFindings.length > 0 ? fields.guardFindings : undefined,
+    })
+  }
+
+  // Canonical role-result record (plan §6.2): one per group, written when the
+  // terminal attempt becomes durable; idempotent on replay.
+  async function persistRoleResult(fops, groupDir, terminal, roleTask) {
+    const resultPath = pathutil.join(groupDir, 'result.json')
+    try {
+      const existing = await fops.readJson(resultPath)
+      if (util.isPlainObject(existing) && existing.kind === 'role-result') return existing
+    } catch {}
+    const outcome = typeof terminal.outcomeClass === 'string' && terminal.outcomeClass ? terminal.outcomeClass : 'error'
+    const limitations = []
+    if (Array.isArray(terminal.guardFindings)) {
+      for (const finding of terminal.guardFindings) {
+        if (!finding.authorized) limitations.push('guard: ' + finding.approvalClass + ' at ' + finding.path)
+      }
+    }
+    if (terminal.diagnosticUnavailable) limitations.push('diagnostic unavailable')
+    const record = core.makeRecord('role-result', {
+      runDigest: terminal.runDigest,
+      projectId: terminal.projectId,
+      nodeId: terminal.nodeId,
+      contractDigest: terminal.contractDigest,
+      logicalGroupId: terminal.logicalGroupId,
+      role: terminal.role,
+      pass: terminal.pass,
+      attempt: terminal.attempt,
+      attemptId: terminal.attemptId,
+      status: 'terminal',
+      outcomeClass: outcome,
+      outputRef: util.isPlainObject(terminal.outputRef) ? terminal.outputRef : null,
+      outputHash: util.isPlainObject(terminal.outputRef) && typeof terminal.outputRef.hash === 'string' ? terminal.outputRef.hash : null,
+      output: typeof terminal.output === 'string' && terminal.output ? terminal.output : null,
+      summary: 'role ' + terminal.role + ' attempt ' + terminal.attempt + ' outcome ' + outcome + (typeof terminal.diagnostic === 'string' && terminal.diagnostic ? ': ' + terminal.diagnostic.slice(0, 200) : ''),
+      limitations,
+      requestedProvider: terminal.requestedProvider ?? null,
+      requestedModel: terminal.requestedModel ?? null,
+      actualProvider: terminal.actualProvider ?? null,
+      actualModel: terminal.actualModel ?? null,
+      routeSource: terminal.routeSource ?? null,
+      tools: roleTask && Array.isArray(roleTask.tools) ? roleTask.tools : [],
+      nextAction: outcome === 'success'
+        ? 'Promote the declared artifact through autoresearch_promote_artifact using the recorded outputRef.'
+        : 'Inspect the attempt output, then retry with a recorded route decision or re-dispatch.',
+      createdAt: terminal.createdAt,
+      finishedAt: typeof terminal.completedAt === 'string' ? terminal.completedAt : nowIso(),
+    })
+    await fops.writeJson(resultPath, record)
+    return record
+  }
+
+  // Bounded path guard (plan §11): content-state diff over the declared scan
+  // roots (baseDir-relative). The PRE snapshot is taken before the attempt
+  // runs; the POST snapshot after it settles. Every new or modified file
+  // outside the declared write root is classified by
+  // core.classifyPathOperation and requires a valid coordinator approval
+  // token for its class. The group's own packet directory is the runner's
+  // write surface and is excluded.
+  function guardGroupPrefix(roleTask, groupId) {
+    const writeRoot = typeof roleTask.writeRoot === 'string' && roleTask.writeRoot ? roleTask.writeRoot : null
+    return (writeRoot ? writeRoot + '/' : '') + 'packets/role-attempts/' + groupId + '/'
+  }
+  async function guardSnapshot(opts) {
+    const { fops, guardScan, roleTask, groupId } = opts
+    const groupPrefix = guardGroupPrefix(roleTask, groupId)
+    const state = new Map()
+    const unverified = []
+    let truncated = false
+    let fileCount = 0
+    for (const root of guardScan.roots) {
+      const stack = [root]
+      while (stack.length > 0) {
+        const dirRel = stack.pop()
+        let entries = []
+        try { entries = await fops.listDir(dirRel) } catch (error) { unverified.push({ path: dirRel, reason: 'guard scan could not list ' + dirRel + ': ' + (error?.message ?? String(error)) }); continue }
+        for (const entry of entries) {
+          const rel = dirRel + '/' + entry.name
+          if (entry.dir) { stack.push(rel); continue }
+          if (rel.startsWith(groupPrefix)) continue
+          fileCount += 1
+          if (fileCount > 2000) { truncated = true; break }
+          // Byte-first hashing (plan §9): binary artifacts under the scanned
+          // roots (outputs, sibling runs) must be covered, and an unreadable
+          // file must surface as unverified — never silently skipped.
+          const bytes = await readBytesForHash(fops, rel)
+          if (bytes !== null) { state.set(rel, hashBytes(bytes)); continue }
+          try { state.set(rel, core.sha256Text(await fops.readText(rel))) } catch (error) { unverified.push({ path: rel, reason: 'guard scan could not read ' + rel + ': ' + (error?.message ?? String(error)) }) }
+        }
+      }
+      if (truncated) break
+    }
+    return { state, truncated, unverified }
+  }
+  function guardDiff(opts) {
+    const { pre, post, roleTask, guardScan, identity, tokens, truncated } = opts
+    const findings = []
+    const ctx = {
+      op: 'mutate',
+      writeRoot: roleTask.writeRoot ?? null,
+      otherRunRoots: Array.isArray(guardScan.otherRunRoots) ? guardScan.otherRunRoots : [],
+    }
+    // Any path the scan could not verify fails the attempt closed — the
+    // guard must never fail open on adapter errors.
+    if (pre?.failed) findings.push({ path: '(guard pre-scan failed)', approvalClass: 'out-of-scope', reason: 'guard pre-snapshot failed; the attempt is unverifiable', change: 'unverified', authorized: false })
+    if (post?.failed) findings.push({ path: '(guard post-scan failed)', approvalClass: 'out-of-scope', reason: 'guard post-snapshot failed; the attempt is unverifiable', change: 'unverified', authorized: false })
+    for (const item of [...(pre?.unverified ?? []), ...(post?.unverified ?? [])]) {
+      findings.push({ path: item.path, approvalClass: 'out-of-scope', reason: item.reason, change: 'unverified', authorized: false })
+    }
+    // Union of pre+post keys: a file present in PRE but absent in POST was
+    // DELETED by the attempt and must be classified like any other mutation.
+    const keys = new Set([...pre.state.keys(), ...post.state.keys()])
+    for (const rel of [...keys].sort()) {
+      const before = pre.state.get(rel)
+      const after = post.state.get(rel)
+      if (before !== undefined && before === after) continue
+      const verdict = core.classifyPathOperation(rel, ctx)
+      if (verdict.allowed) continue
+      const authorized = verdict.approvalClass !== 'out-of-scope'
+        && Array.isArray(tokens)
+        && tokens.some((token) => core.approvalTokenValid(token, { approvalClass: verdict.approvalClass, contractDigest: identity.contractDigest, nodeId: identity.nodeId }))
+      findings.push({ path: rel, approvalClass: verdict.approvalClass, reason: verdict.reason, change: after === undefined ? 'deleted' : (before === undefined ? 'created' : 'modified'), authorized })
+    }
+    if (truncated) findings.push({ path: '(scan truncated at 2000 files)', approvalClass: 'out-of-scope', reason: 'guard scan truncated; mutations beyond the bound are unverified', change: 'unverified', authorized: false })
+    return findings
+  }
+
+  // Route bookkeeping for returned envelopes (plan §6.2: fully recorded
+  // actual routes, never presented as the configured model when they were
+  // not).
+  function withRoute(value) {
+    return {
+      ...value,
+      route: {
+        requested: { provider: value.requestedProvider ?? null, model: value.requestedModel ?? null, maxTokens: Number.isInteger(value.requestedMaxTokens) ? value.requestedMaxTokens : null, reasoningEffort: value.requestedReasoningEffort ?? null },
+        actual: { provider: value.actualProvider ?? null, model: value.actualModel ?? null, reasoningEffort: value.actualReasoningEffort ?? null },
+        source: typeof value.routeSource === 'string' ? value.routeSource : null,
+      },
+    }
   }
 
   async function ensureDir(fops, dir) {
@@ -2123,6 +2338,8 @@ function makeRoleRunner(deps = {}) {
       requestedProvider: requested.provider,
       requestedModel: requested.model,
       requestedMaxTokens: requested.maxTokens,
+      requestedReasoningEffort: requested.reasoningEffort,
+      actualReasoningEffort: typeof run?.localAgent?.options?.reasoningEffort === 'string' ? run.localAgent.options.reasoningEffort : null,
       modelDefaultMaxTokens: Number.isInteger(params.modelDefaultMaxTokens) ? params.modelDefaultMaxTokens : null,
       configuredMaxTokens: Number.isInteger(params.configuredMaxTokens) ? params.configuredMaxTokens : null,
       maxTokensSource: Number.isInteger(params.configuredMaxTokens) ? 'configured-cap' : 'model-default',
@@ -2168,6 +2385,47 @@ function makeRoleRunner(deps = {}) {
       : null
     const groupId = logicalGroupKey ? logicalId(logicalGroupKey) : 'lg-' + core.sha256Text(JSON.stringify({ role: params.role, task: params.task ?? '', route: routeIdentity })).slice(0, 24)
     if (contractBound && !params.logicalGroupKey) throw new Error('logicalGroupKey is required for contract-bound role calls.')
+    // Typed handoff (plan §6.1): contract-bound calls carry the full run
+    // identity, and the coordinator may supply the canonical role-task record
+    // (validated closed shape) that the group persists as its dispatch packet.
+    let identity = null
+    if (contractBound) {
+      const key = params.logicalGroupKey
+      identity = {
+        runDigest: typeof key.runDigest === 'string' ? key.runDigest : '',
+        projectId: typeof key.projectId === 'string' ? key.projectId : '',
+        nodeId: typeof key.nodeId === 'string' ? key.nodeId : '',
+        contractDigest: typeof key.contractDigest === 'string' ? key.contractDigest : '',
+        pass: Number.isInteger(key.pass) ? key.pass : 0,
+      }
+      for (const field of ['runDigest', 'projectId', 'nodeId', 'contractDigest']) {
+        if (!identity[field]) throw new Error('logicalGroupKey.' + field + ' is required for contract-bound role calls (typed handoff).')
+      }
+      if (identity.pass < 0) throw new Error('logicalGroupKey.pass must be a zero-based non-negative integer.')
+    }
+    let roleTask = null
+    if (util.isPlainObject(params.roleTask)) {
+      // The dispatch packet is bound here: the runner owns the logical group
+      // id, so the canonical record is constructed (and validated closed) at
+      // the moment the group is derived. Incoming kind/digest are ignored —
+      // the digest is recomputed over the owned fields.
+      const incoming = { ...params.roleTask }
+      delete incoming.kind
+      delete incoming.digest
+      roleTask = core.makeRecord('role-task', { ...incoming, logicalGroupId: groupId })
+      if (contractBound) {
+        for (const field of ['runDigest', 'projectId', 'nodeId', 'contractDigest']) {
+          if (roleTask[field] !== identity[field]) throw new Error('roleTask.' + field + ' does not match the bound run identity.')
+        }
+      }
+    }
+    // Every returned envelope carries the bound dispatch packet (when one
+    // exists) so the coordinator can report and audit its digest.
+    const withTask = (value) => (roleTask ? { ...value, roleTask } : value)
+    // Explicit coordinator-declared route substitution (plan §6.2): appended
+    // AFTER configured + fallback routes so it never shadows them, and every
+    // use is recorded as route source 'coordinator-degradation'.
+    const degradedModel = typeof params.degradedModel === 'string' && params.degradedModel.trim() ? params.degradedModel.trim() : null
     const maxAttemptsValue = Number.isInteger(params.maxAttempts) && params.maxAttempts > 0 ? Math.min(params.maxAttempts, maxAttemptsCeiling) : defaultMaxAttempts
     const retryDelayMs = Number.isInteger(params.retryDelayMs) && params.retryDelayMs >= 0 ? params.retryDelayMs : 0
     // Model fallback chain (provider rate-limit handoff): `modelChain` lists
@@ -2177,13 +2435,19 @@ function makeRoleRunner(deps = {}) {
     // later or concurrent role runs skip a model that just hit a limit; a
     // success on a model clears its breaker entry. With no chain this
     // whole block is inert and behavior is byte-identical to before.
-    const chain = Array.isArray(params.modelChain)
-      ? [...new Set(params.modelChain.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))]
+    let chain = Array.isArray(params.modelChain)
+      ? params.modelChain.map((value) => {
+        if (typeof value === 'string' && value.trim()) return { model: value.trim(), reasoningEffort: 'inherit' }
+        if (util.isPlainObject(value) && typeof value.model === 'string' && value.model.trim()) return { model: value.model.trim(), reasoningEffort: typeof value.reasoningEffort === 'string' && value.reasoningEffort.trim() ? value.reasoningEffort.trim() : null }
+        return null
+      }).filter(Boolean).filter((entry, index, all) => all.findIndex((candidate) => candidate.model === entry.model) === index)
       : []
+    if (degradedModel && !chain.some((entry) => entry.model === degradedModel)) chain.push({ model: degradedModel, reasoningEffort: null })
     const fallbackCooldownMs = Number.isInteger(params.fallbackCooldownMs) && params.fallbackCooldownMs > 0 ? params.fallbackCooldownMs : 600000
     const blockedThisRun = new Set()
     let breakerState = new Map()
     let lastSelectedModel = null
+    let lastSelectedReasoningEffort = null
     if (params.breakerPath) {
       breakerState = await readBreakerState(params.fops, params.breakerPath)
       const breakerDirectory = breakerDir(params.breakerPath)
@@ -2197,21 +2461,25 @@ function makeRoleRunner(deps = {}) {
     }
     const pickModel = () => {
       if (chain.length === 0) return null
-      const fresh = chain.filter((model) => !blockedThisRun.has(model))
+      const fresh = chain.filter((entry) => !blockedThisRun.has(entry.model))
       if (fresh.length === 0) return null
-      const open = fresh.filter((model) => !isBreakerBlocked(model))
+      const open = fresh.filter((entry) => !isBreakerBlocked(entry.model))
       if (open.length > 0) return open[0]
       // Every remaining model is breaker-blocked: probe the one whose
       // cooldown expires soonest instead of failing the run outright.
-      return fresh.reduce((best, model) => {
-        const until = (breakerState.get(model) ?? {}).blockedUntilMs ?? Number.POSITIVE_INFINITY
-        const bestUntil = (breakerState.get(best) ?? {}).blockedUntilMs ?? Number.POSITIVE_INFINITY
-        return until < bestUntil ? model : best
+      return fresh.reduce((best, entry) => {
+        const until = (breakerState.get(entry.model) ?? {}).blockedUntilMs ?? Number.POSITIVE_INFINITY
+        const bestUntil = (breakerState.get(best.model) ?? {}).blockedUntilMs ?? Number.POSITIVE_INFINITY
+        return until < bestUntil ? entry : best
       })
     }
-    const withModel = (options, model) => {
+    const withModel = (options, route) => {
       const next = { ...options }
-      const parsed = parseChainModel(model)
+      if (route.reasoningEffort === 'inherit') {
+        // Legacy string fallbacks retain the historical inherited effort.
+      } else if (typeof route.reasoningEffort === 'string' && route.reasoningEffort) next.reasoningEffort = route.reasoningEffort
+      else if (route.model !== chain[0]?.model) delete next.reasoningEffort
+      const parsed = parseChainModel(route.model)
       if (parsed) {
         if (parsed.provider) next.provider = parsed.provider
         else delete next.provider
@@ -2230,17 +2498,23 @@ function makeRoleRunner(deps = {}) {
     if (contractBound) {
       await ensureDir(params.fops, groupDir)
       const ownerId = String(params.owner ?? 'coordinator')
-      const ownerMarker = { schemaVersion: 1, ownerId, logicalGroupId: groupId, runDir: pathutil.relativePath('.', params.runDir) }
+      const ownerMarker = { kind: 'owner-marker', owner: 'research-role-task', ownerId, logicalGroupId: groupId, runDir: pathutil.relativePath('.', params.runDir) }
       const existingOwner = await params.fops.readJson(ownerPath)
       if (existingOwner && existingOwner.ownerId !== ownerId) throw new Error('role attempt group is owned by another coordinator: ' + groupId)
       if (!existingOwner) await writeJsonNew(params.fops, ownerPath, ownerMarker)
       if (manifest.status === 'succeeded' && manifest.selectedAttempt) {
         const selected = attempts.find((item) => item.attemptId === manifest.selectedAttempt)
-        if (selected?.outputRef?.complete === true) return { ...selected, cached: true, attempts }
+        if (selected?.outputRef?.complete === true) {
+          await persistRoleResult(params.fops, groupDir, selected, roleTask)
+          return withTask(withRoute({ ...selected, cached: true, attempts }))
+        }
       }
       if (['failed', 'aborted', 'timed-out'].includes(manifest.status)) {
         const terminal = [...attempts].reverse().find((item) => item.status === 'terminal')
-        if (terminal) return { ...terminal, cached: true, attempts }
+        if (terminal) {
+          await persistRoleResult(params.fops, groupDir, terminal, roleTask)
+          return withTask(withRoute({ ...terminal, cached: true, attempts }))
+        }
         const stopReason = manifest.status === 'aborted' ? 'aborted' : manifest.status === 'timed-out' ? 'timeout' : 'error'
         return {
           logicalGroupId: groupId,
@@ -2260,6 +2534,7 @@ function makeRoleRunner(deps = {}) {
           cleanupError: null,
           attempts,
           cached: true,
+          ...(roleTask ? { roleTask } : {}),
         }
       }
       const claim = await params.fops.readJson(claimPath)
@@ -2269,6 +2544,19 @@ function makeRoleRunner(deps = {}) {
       const freshClaim = { logicalGroupId: groupId, status: 'running', owner: params.owner ?? 'coordinator', claimedAt: nowIso(), expiresAtMs: now + Math.max(Number(params.leaseMs) || 15 * 60 * 1000, 1000) }
       if (!claim) await writeJsonNew(params.fops, claimPath, freshClaim)
       else await replaceJson(params.fops, claimPath, freshClaim)
+      // Canonical role-task packet (plan §6.1): one per group, create-if-
+      // absent; a different task for the same logical group is a conflict.
+      if (roleTask) {
+        const taskPath = pathutil.join(groupDir, 'task.json')
+        const existingTask = await params.fops.readJson(taskPath)
+        if (existingTask) {
+          if (existingTask.kind !== 'role-task' || existingTask.digest !== roleTask.digest) {
+            throw new Error('role task packet conflict: group ' + groupId + ' already carries task digest ' + (existingTask.digest ?? 'unknown') + '; this dispatch carries ' + roleTask.digest + '.')
+          }
+        } else {
+          await writeJsonNew(params.fops, taskPath, roleTask)
+        }
+      }
     }
 
     // A crash can leave a terminal attempt durable while the manifest still
@@ -2278,7 +2566,8 @@ function makeRoleRunner(deps = {}) {
       if (lastTerminal && (!lastTerminal.retryable || attempts.length >= maxAttemptsValue)) {
         manifest = { ...manifest, status: terminalStatus(lastTerminal), attempts }
         await replaceJson(params.fops, manifestPath, manifest)
-        return { ...lastTerminal, cached: true, attempts }
+        await persistRoleResult(params.fops, groupDir, lastTerminal, roleTask)
+        return withTask(withRoute({ ...lastTerminal, cached: true, attempts }))
       }
     }
 
@@ -2288,12 +2577,19 @@ function makeRoleRunner(deps = {}) {
           const success = attempts.find((item) => item.outcomeClass === 'success' && item.outputRef?.complete === true)
           manifest = { ...manifest, status: 'succeeded', selectedAttempt: success.attemptId, attempts }
           if (contractBound) await replaceJson(params.fops, manifestPath, manifest)
-          return { ...success, cached: true, attempts }
+          await persistRoleResult(params.fops, groupDir, success, roleTask)
+          return withTask(withRoute({ ...success, cached: true, attempts }))
         }
         const id = attemptId(attemptNumber)
         const priorIndex = attempts.findIndex((item) => item.attemptId === id)
         if (priorIndex >= 0 && attempts[priorIndex].status === 'terminal') continue
-        const pending = { logicalGroupId: groupId, attemptNumber, attemptId: id, status: 'pending', createdAt: nowIso(), leaseExpiresAtMs: nowMs() + Math.max(Number(params.leaseMs) || 15 * 60 * 1000, 1000) }
+        const attemptCtx = contractBound
+          ? { identity, groupId, role: params.role }
+          : null
+        const pending = attemptCtx
+          ? toAttemptRecord(attemptCtx, { attemptNumber, id, status: 'pending', createdAt: nowIso(), leaseExpiresAtMs: nowMs() + Math.max(Number(params.leaseMs) || 15 * 60 * 1000, 1000) })
+          : { logicalGroupId: groupId, attemptNumber, attemptId: id, status: 'pending', createdAt: nowIso(), leaseExpiresAtMs: nowMs() + Math.max(Number(params.leaseMs) || 15 * 60 * 1000, 1000) }
+        const attemptStartedAt = nowIso()
         if (contractBound) {
           const recordPath = pathutil.join(groupDir, id + '.json')
           if (priorIndex >= 0) {
@@ -2305,13 +2601,16 @@ function makeRoleRunner(deps = {}) {
               throw error
             }
           }
-          const running = { ...pending, status: 'running', startedAt: nowIso() }
+          const running = attemptCtx
+            ? toAttemptRecord(attemptCtx, { attemptNumber, id, status: 'running', createdAt: pending.createdAt, leaseExpiresAtMs: pending.leaseExpiresAtMs, startedAt: attemptStartedAt })
+            : { ...pending, status: 'running', startedAt: attemptStartedAt }
           await replaceJson(params.fops, recordPath, running)
           manifest = { ...manifest, status: 'running', attempts: [...attempts, running] }
           await replaceJson(params.fops, manifestPath, manifest)
         }
-        const selectedModel = chain.length > 0 ? (pickModel() ?? lastSelectedModel) : null
-        const selectedAgentOptions = selectedModel !== null ? withModel(baseAgentOptions, selectedModel) : baseAgentOptions
+        const selectedRoute = chain.length > 0 ? (pickModel() ?? (lastSelectedModel ? { model: lastSelectedModel, reasoningEffort: lastSelectedReasoningEffort } : null)) : null
+        const selectedModel = selectedRoute?.model ?? null
+        const selectedAgentOptions = selectedRoute !== null ? withModel(baseAgentOptions, selectedRoute) : baseAgentOptions
         let modelDefaultMaxTokens = null
         if (typeof params.resolveModelDefault === 'function' && typeof selectedAgentOptions.provider === 'string' && typeof selectedAgentOptions.model === 'string') {
           try {
@@ -2327,6 +2626,17 @@ function makeRoleRunner(deps = {}) {
           : !hasModelDefaultResolver
             ? configuredMaxTokens
             : modelDefaultMaxTokens === null ? null : Math.min(configuredMaxTokens, modelDefaultMaxTokens)
+        // Phase 3 (plan §11): the guard's PRE snapshot is taken BEFORE the
+        // attempt so the content-state diff sees exactly what the child
+        // changed; the POST snapshot lands after the attempt settles.
+        const guardActive = contractBound && roleTask !== null && util.isPlainObject(params.guardScan) && Array.isArray(params.guardScan.roots)
+        let guardPre = null
+        if (guardActive) {
+          // Fail CLOSED: a snapshot failure means the attempt cannot be
+          // audited, which is itself an unauthorized finding — never an
+          // empty (passing) diff.
+          try { guardPre = await guardSnapshot({ fops: params.fops, guardScan: params.guardScan, roleTask, groupId }) } catch (error) { guardPre = { state: new Map(), truncated: false, unverified: [], failed: true, error: error?.message ?? String(error) } }
+        }
         const envelope = await runAttempt({
           ...params,
           agentOptions: selectedAgentOptions,
@@ -2335,8 +2645,10 @@ function makeRoleRunner(deps = {}) {
           modelDefaultMaxTokens,
         }, attemptNumber, groupId, groupDir)
         lastSelectedModel = selectedModel
+        lastSelectedReasoningEffort = selectedAgentOptions.reasoningEffort ?? null
+        const routeSource = core.routeSourceFor(selectedModel, chain.map((entry) => entry.model), degradedModel)
         const routeFailure = ROUTE_FAILURE_CLASSES.has(envelope.outcomeClass)
-        let report = envelope
+        let report = { ...envelope, selectedModel: selectedModel ?? null, routeSource }
         if (routeFailure && selectedModel) {
           blockedThisRun.add(selectedModel)
           if (params.breakerPath) {
@@ -2347,31 +2659,63 @@ function makeRoleRunner(deps = {}) {
           breakerState.delete(selectedModel)
           await breakerClearModel(params.fops, params.breakerPath, selectedModel)
         }
-        const terminal = { ...pending, ...report, status: 'terminal', completedAt: nowIso() }
+        let guardFindings = []
+        if (guardActive && guardPre) {
+          try {
+            const guardPost = await guardSnapshot({ fops: params.fops, guardScan: params.guardScan, roleTask, groupId })
+            guardFindings = guardDiff({ pre: guardPre, post: guardPost, roleTask, guardScan: params.guardScan, identity, tokens: Array.isArray(params.approvalTokens) ? params.approvalTokens : [], truncated: guardPre.truncated || guardPost.truncated })
+          } catch (error) {
+            // Fail closed on adapter errors: an unauditable attempt is an
+            // unauthorized finding, never silently cleared.
+            guardFindings = [{ path: '(guard diff failed)', approvalClass: 'out-of-scope', reason: 'path guard could not diff the attempt: ' + (error?.message ?? String(error)), change: 'unverified', authorized: false }]
+          }
+        }
+        const unauthorized = guardFindings.filter((finding) => !finding.authorized)
+        if (unauthorized.length > 0) {
+          report = { ...report, outcomeClass: 'approval-violation', retryable: false, diagnostic: 'path guard: ' + unauthorized.map((finding) => finding.approvalClass + ' at ' + finding.path).join(', ') }
+        }
+        const terminal = attemptCtx
+          ? toAttemptRecord(attemptCtx, { attemptNumber, id, status: 'terminal', createdAt: pending.createdAt, leaseExpiresAtMs: pending.leaseExpiresAtMs, startedAt: attemptStartedAt, completedAt: nowIso(), ...report, guardFindings: guardFindings.length > 0 ? guardFindings : undefined })
+          : { ...pending, ...report, status: 'terminal', completedAt: nowIso(), ...(guardFindings.length > 0 ? { guardFindings } : {}) }
         if (contractBound) {
           await replaceJson(params.fops, pathutil.join(groupDir, id + '.json'), terminal)
           attempts.push(terminal)
-          manifest = { ...manifest, attempts, status: envelope.outcomeClass === 'success' ? 'succeeded' : 'running', ...(envelope.outcomeClass === 'success' ? { selectedAttempt: id } : {}) }
+          manifest = { ...manifest, attempts, status: report.outcomeClass === 'success' ? 'succeeded' : 'running', ...(report.outcomeClass === 'success' ? { selectedAttempt: id } : {}) }
           await replaceJson(params.fops, manifestPath, manifest)
         } else {
           attempts.push(terminal)
         }
-        if (report === envelope && routeFailure && chain.length > 0 && pickModel() === null) {
-          report = { ...report, diagnostic: (report.diagnostic ? report.diagnostic + '\n' : '') + 'model fallback chain exhausted: no further models to try after ' + selectedModel + ' failed with ' + report.outcomeClass }
-          const terminalAnnotated = { ...pending, ...report, status: 'terminal', completedAt: nowIso() }
+        if (unauthorized.length > 0) {
+          if (contractBound) {
+            manifest = { ...manifest, status: 'failed', attempts }
+            await replaceJson(params.fops, manifestPath, manifest)
+            await persistRoleResult(params.fops, groupDir, terminal, roleTask)
+          }
+          return withTask(withRoute({ ...terminal, attempts, guardFindings }))
+        }
+        if (routeFailure && chain.length > 0 && pickModel() === null) {
+          const annotated = { ...report, diagnostic: (report.diagnostic ? report.diagnostic + '\n' : '') + 'model fallback chain exhausted: no further models to try after ' + selectedModel + ' failed with ' + report.outcomeClass }
+          report = annotated
+          const terminalAnnotated = attemptCtx
+            ? toAttemptRecord(attemptCtx, { attemptNumber, id, status: 'terminal', createdAt: pending.createdAt, leaseExpiresAtMs: pending.leaseExpiresAtMs, startedAt: attemptStartedAt, completedAt: nowIso(), ...annotated, guardFindings: guardFindings.length > 0 ? guardFindings : undefined })
+            : { ...terminal, ...annotated }
           if (contractBound) await replaceJson(params.fops, pathutil.join(groupDir, id + '.json'), terminalAnnotated)
-          const index = attempts.findIndex((item) => item.attemptId === report.attemptId)
+          const index = attempts.findIndex((item) => item.attemptId === id)
           if (index >= 0) attempts[index] = terminalAnnotated
         }
-        if (envelope.outcomeClass === 'success') return { ...envelope, attempts }
+        if (envelope.outcomeClass === 'success') {
+          if (contractBound) await persistRoleResult(params.fops, groupDir, terminal, roleTask)
+          return withTask(withRoute({ ...terminal, attempts, ...(guardFindings.length > 0 ? { guardFindings } : {}) }))
+        }
         const nextModelAvailable = routeFailure && chain.length > 0 && pickModel() !== null
         const canContinue = envelope.retryable || nextModelAvailable
         if (!canContinue || attemptNumber >= maxAttemptsValue) {
           if (contractBound) {
             manifest = { ...manifest, status: report.outcomeClass === 'aborted' ? 'aborted' : report.outcomeClass === 'timeout' ? 'timed-out' : 'failed', attempts }
             await replaceJson(params.fops, manifestPath, manifest)
+            await persistRoleResult(params.fops, groupDir, terminal, roleTask)
           }
-          return { ...report, attempts }
+          return withTask(withRoute({ ...report, attempts, ...(guardFindings.length > 0 ? { guardFindings } : {}) }))
         }
         await (typeof params.sleep === 'function' ? params.sleep(retryDelayMs, params.signal) : sleep(retryDelayMs, params.signal))
       }
@@ -2395,9 +2739,8 @@ function makeRoleRunner(deps = {}) {
 'use strict'
 // Role prompt resolution ladder (plan §3.9, option 1 wired):
 //   1. roleProfiles.<role>.promptFile  (explicit per-workspace override)
-//   2. <baseDir>/.research-agent/roles/<role>.md (or legacy visible
-//      <baseDir>/research-agent/roles/<role>.md), seeded at init and
-//      user-editable per workspace
+//   2. <baseDir>/<artifactRoot>/roles/<role>.md (single root; the canonical
+//      default is .research-agent), user-editable per workspace
 //   3. <presetRolesDir>/<role>.md  (global default shipped with the preset;
 //      only resolvable in the durable module, which knows its own directory)
 //   4. embedded default (dev/dynamic contexts and last-resort fallback)
@@ -2421,19 +2764,15 @@ function makeRolePrompt(pathutil) {
       }
     }
 
-    const configuredRoot = typeof opts.artifactRoot === 'string' && opts.artifactRoot.trim() ? opts.artifactRoot : 'research-agent'
-    const rootCandidates = [pathutil.resolve(baseDir, configuredRoot)]
-    const legacyRoot = pathutil.join(baseDir, '.research-agent')
-    const visibleRoot = pathutil.join(baseDir, 'research-agent')
-    if (!rootCandidates.includes(legacyRoot)) rootCandidates.push(legacyRoot)
-    if (!rootCandidates.includes(visibleRoot)) rootCandidates.push(visibleRoot)
-    for (const artifactRoot of rootCandidates) {
-      const workspacePath = pathutil.join(artifactRoot, 'roles', roleName + '.md')
-      try {
-        const text = await fops.readText(workspacePath)
-        if (text && text.trim()) return { text, source: pathutil.relativePath(baseDir, workspacePath) }
-      } catch {
-      }
+    // Single root: the configured artifact root (canonical default
+    // .research-agent). The bare 'research-agent/' directory is never a
+    // runtime candidate — it is migration input only.
+    const configuredRoot = typeof opts.artifactRoot === 'string' && opts.artifactRoot.trim() ? opts.artifactRoot : '.research-agent'
+    const workspacePath = pathutil.join(pathutil.resolve(baseDir, configuredRoot), 'roles', roleName + '.md')
+    try {
+      const text = await fops.readText(workspacePath)
+      if (text && text.trim()) return { text, source: pathutil.relativePath(baseDir, workspacePath) }
+    } catch {
     }
     if (opts.presetRolesDir) {
       const presetPath = pathutil.join(pathutil.normalize(opts.presetRolesDir), `${roleName}.md`)
@@ -2866,336 +3205,22 @@ function makeLifecycle(pathutil, util, config, resume) {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = makeLifecycle
 
-// ── lib/planvalidate.js ──
-'use strict'
-// Project-mode plan validation (plan §3, C4 + §10 settled decisions).
-// Pure functions: validates the immutable approved plan.json — schema
-// version, marker, single team, unique node ids, required fields, roles
-// (7 predefined ∪ configured roleProfiles), budget bounds + judge quorum,
-// dependsOn targets exist, acyclicity, integration node covering all leaves.
-// Factory pattern: no require/import, so the same body concatenates into a
-// dynamic Cordis plugin.
+// ── lib/planvalidate.js (canonical) ──
+// Plan validation has one home: autoresearch-core (one validator, one
+// canonical shape). This module keeps only the stable Linear marker helper
+// shared by the state journal and the Linear projection.
 function makePlanValidate(util, config) {
   const planvalidate = {}
 
-  planvalidate.PLAN_SCHEMA_VERSION = 1
-
-  // The 7 predefined research roles (plan §3: roles ∈ predefined 7 ∪
-  // configured roleProfiles). implementation_worker/review_worker are
-  // config-compat roles and are NOT valid plan-node roles.
-  planvalidate.PRESET_ROLES = [
-    'research_scout',
-    'evidence_verifier',
-    'research_author',
-    'research_critic',
-    'research_synthesizer',
-    'research_judge',
-    'research_reporter',
-  ]
-
-  // Judge quorum (plan §10.1): a node that runs judges needs >= 2, matching
-  // the escalation rule "fewer than 2 valid judges" and the shipped default
-  // numJudges: 2.
-  planvalidate.JUDGE_QUORUM = 2
-
-  // Per-node budget defaults when a node omits budget fields (plan D2, §10.1).
-  planvalidate.DEFAULT_NODE_BUDGET = {
-    numScouts: 2,
-    numJudges: 2,
-    maxPasses: 1,
-    convergenceThreshold: 2,
-  }
-
-  // Stable markers (must stay in sync with lib/linear-core.js marker
-  // helpers; asserted by the marker-consistency test).
+  // Stable markers (must stay in sync with the linear-core marker helpers;
+  // asserted by the marker-consistency test).
   planvalidate.projectMarker = function (projectId) {
     return `autoresearch-project:${projectId}`
   }
 
-  planvalidate.nodeMarker = function (projectId, nodeId) {
-    return `autoresearch-node:${projectId}:${nodeId}`
-  }
-
-  function isPlainObject(value) {
-    return util.isPlainObject(value)
-  }
-
-  function isNonEmptyString(value) {
-    return typeof value === 'string' && value.trim().length > 0
-  }
-
-  function positiveInt(value) {
-    return typeof value === 'number' && Number.isInteger(value) && value >= 1
-  }
-
-  function validRoleName(role, roleProfiles) {
-    if (!isNonEmptyString(role)) return false
-    if (planvalidate.PRESET_ROLES.includes(role)) return true
-    if (isPlainObject(roleProfiles)) {
-      for (const key of Object.keys(roleProfiles)) {
-        if (key === role) {
-          const entry = roleProfiles[key]
-          // A configured roleProfile is valid when it names a model or tools.
-          if (isNonEmptyString(entry) || isPlainObject(entry)) return true
-        }
-      }
-    }
-    return false
-  }
-
-  function safeId(value) {
-    try {
-      util.safeSegment(value)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  // DFS cycle detection over dependsOn edges. Returns the first cycle path
-  // or null when the graph is acyclic.
-  function findCycle(nodesById, nodeIds) {
-    const visiting = new Set()
-    const visited = new Set()
-    const stack = []
-    function visit(id) {
-      const node = nodesById[id]
-      if (!node) return null // dangling target: reported separately
-      if (visiting.has(id)) {
-        const start = stack.indexOf(id)
-        return [...stack.slice(start), id]
-      }
-      if (visited.has(id)) return null
-      visiting.add(id)
-      stack.push(id)
-      for (const dep of node.dependsOn) {
-        const cycle = visit(dep)
-        if (cycle) return cycle
-      }
-      stack.pop()
-      visiting.delete(id)
-      visited.add(id)
-      return null
-    }
-    for (const id of nodeIds) {
-      const cycle = visit(id)
-      if (cycle) return cycle
-    }
-    return null
-  }
-
-  // Validate one node's budget. Returns { budget, errors } where budget is
-  // the merged effective budget (defaults applied).
-  function validateBudget(node, errors, warnings) {
-    const raw = isPlainObject(node.budget) ? node.budget : {}
-    const usesScouts = (node.roles ?? []).includes('research_scout')
-    const usesJudges = (node.roles ?? []).includes('research_judge')
-    const budget = {
-      ...planvalidate.DEFAULT_NODE_BUDGET,
-      numScouts: usesScouts ? planvalidate.DEFAULT_NODE_BUDGET.numScouts : 0,
-      numJudges: usesJudges ? planvalidate.DEFAULT_NODE_BUDGET.numJudges : 0,
-    }
-    const fields = ['numScouts', 'numJudges', 'maxPasses', 'convergenceThreshold']
-    for (const field of fields) {
-      if (raw[field] !== undefined) {
-        const countField = field === 'numScouts' || field === 'numJudges'
-        const valid = countField ? Number.isInteger(raw[field]) && raw[field] >= 0 : positiveInt(raw[field])
-        if (!valid) {
-          errors.push(`node ${node.id}: budget.${field} must be ${countField ? 'a non-negative' : 'a positive'} integer.`)
-        } else {
-          budget[field] = raw[field]
-        }
-      }
-    }
-    if (usesScouts && budget.numScouts < 1) {
-      errors.push(`node ${node.id}: roles include research_scout but budget.numScouts=${budget.numScouts}; at least one scout is required.`)
-    }
-    if (!usesScouts && budget.numScouts !== 0) {
-      warnings.push(`node ${node.id}: budget.numScouts=${budget.numScouts} is unreachable because roles omit research_scout; executable count normalized to 0.`)
-      budget.numScouts = 0
-    }
-    if (usesJudges && budget.numJudges < planvalidate.JUDGE_QUORUM) {
-      errors.push(`node ${node.id}: roles include research_judge but budget.numJudges=${budget.numJudges} is below the quorum ${planvalidate.JUDGE_QUORUM} (plan §10.1).`)
-    }
-    if (!usesJudges && budget.numJudges !== 0) {
-      warnings.push(`node ${node.id}: budget.numJudges=${budget.numJudges} is unreachable because roles omit research_judge; executable count normalized to 0.`)
-      budget.numJudges = 0
-    }
-    return budget
-  }
-
-  // Validate the full approved plan. opts.roleProfiles carries the
-  // configured custom roles (from the effective project config).
-  planvalidate.validatePlan = function (plan, opts = {}) {
-    const errors = []
-    const warnings = []
-    const roleProfiles = isPlainObject(opts.roleProfiles) ? opts.roleProfiles : {}
-
-    if (!isPlainObject(plan)) {
-      return { ok: false, errors: ['plan must be a JSON object.'], warnings, schemaVersion: null, nodeCount: 0 }
-    }
-
-    if (plan.schemaVersion !== planvalidate.PLAN_SCHEMA_VERSION) {
-      errors.push(`plan.schemaVersion must be ${planvalidate.PLAN_SCHEMA_VERSION} (got ${JSON.stringify(plan.schemaVersion)}).`)
-    }
-
-    if (!isNonEmptyString(plan.projectId)) {
-      errors.push('plan.projectId must be a non-empty string.')
-    } else {
-      if (!safeId(plan.projectId)) errors.push(`plan.projectId is not a safe path segment: ${plan.projectId}`)
-      const expectedMarker = planvalidate.projectMarker(plan.projectId)
-      if (plan.marker !== undefined && plan.marker !== expectedMarker) {
-        errors.push(`plan.marker must equal the derived marker "${expectedMarker}".`)
-      }
-    }
-
-    if (!isNonEmptyString(plan.projectName)) {
-      errors.push('plan.projectName must be a non-empty string.')
-    }
-
-    // Linear plans may identify one approved team; local-only plans omit team
-    // metadata and never call the Linear mutation tools.
-    if (plan.teamId !== undefined && !isNonEmptyString(plan.teamId)) {
-      errors.push('plan.teamId must be a non-empty string when present.')
-    }
-    if (plan.teamKey !== undefined && !isNonEmptyString(plan.teamKey)) {
-      errors.push('plan.teamKey must be a non-empty string when present.')
-    }
-
-    if (!isNonEmptyString(plan.approvedAt)) warnings.push('plan.approvedAt is missing; approval provenance is incomplete.')
-    if (!positiveInt(plan.revision)) warnings.push('plan.revision is missing or invalid; defaulting to 1.')
-    const revision = positiveInt(plan.revision) ? plan.revision : 1
-
-    const nodes = Array.isArray(plan.nodes) ? plan.nodes : []
-    if (nodes.length === 0) {
-      errors.push('plan.nodes must be a non-empty array of work items.')
-    }
-
-    const nodeIds = []
-    const nodesById = {}
-    for (const node of nodes) {
-      if (!isPlainObject(node)) {
-        errors.push('every plan.nodes entry must be an object.')
-        continue
-      }
-      const id = node.id
-      if (!isNonEmptyString(id)) {
-        errors.push('every node needs a non-empty string id.')
-        continue
-      }
-      if (!safeId(id)) {
-        errors.push(`node id is not a safe path segment: ${id}`)
-        continue
-      }
-      if (nodesById[id] !== undefined) {
-        errors.push(`duplicate node id: ${id}`)
-        continue
-      }
-      // Normalize on a shallow clone — never mutate the caller's plan object
-      // (tool arguments can arrive frozen/read-only).
-      nodesById[id] = { ...node, dependsOn: Array.isArray(node.dependsOn) ? [...node.dependsOn] : [] }
-      nodeIds.push(id)
-
-      if (!isNonEmptyString(node.title)) errors.push(`node ${id}: title must be a non-empty string.`)
-      if (!isNonEmptyString(node.expectedOutcome)) errors.push(`node ${id}: expectedOutcome must be a non-empty string.`)
-      if (node.acceptance !== undefined && !(Array.isArray(node.acceptance) && node.acceptance.every(isNonEmptyString))) {
-        errors.push(`node ${id}: acceptance must be an array of non-empty strings.`)
-      }
-      if (node.test !== undefined && !isNonEmptyString(node.test)) {
-        errors.push(`node ${id}: test must be a non-empty string when present.`)
-      }
-
-      // roles: non-empty, every entry valid (7 predefined ∪ configured).
-      const roles = Array.isArray(node.roles) ? node.roles : []
-      if (roles.length === 0) {
-        errors.push(`node ${id}: roles must be a non-empty array (plan §10.3 role semantics).`)
-      } else {
-        for (const role of roles) {
-          if (!validRoleName(role, roleProfiles)) {
-            errors.push(`node ${id}: unknown role "${role}" (must be one of the 7 predefined roles or a configured roleProfiles role).`)
-          }
-        }
-      }
-
-      validateBudget(node, errors, warnings)
-
-      // dependsOn: array of strings; self/duplicate/dangling targets are
-      // validated in a second pass below (after every node is registered, so
-      // a later-defined dependency is not reported missing).
-      if (node.dependsOn !== undefined && !Array.isArray(node.dependsOn)) {
-        errors.push(`node ${id}: dependsOn must be an array.`)
-      }
-    }
-
-    // Second pass: dependsOn targets exist, no self, no duplicates.
-    for (const id of nodeIds) {
-      const node = nodesById[id]
-      const dependsOn = Array.isArray(node.dependsOn) ? node.dependsOn : []
-      const seen = new Set()
-      for (const dep of dependsOn) {
-        if (!isNonEmptyString(dep)) {
-          errors.push(`node ${id}: dependsOn entries must be non-empty strings.`)
-          continue
-        }
-        if (dep === id) {
-          errors.push(`node ${id}: dependsOn must not contain itself.`)
-          continue
-        }
-        if (seen.has(dep)) {
-          errors.push(`node ${id}: duplicate dependsOn entry "${dep}".`)
-          continue
-        }
-        seen.add(dep)
-        if (nodesById[dep] === undefined) {
-          errors.push(`node ${id}: dependsOn target "${dep}" does not exist.`)
-        }
-      }
-    }
-
-    // Acyclicity (multi-parent allowed; cycles rejected).
-    if (nodeIds.length > 0) {
-      const cycle = findCycle(nodesById, nodeIds)
-      if (cycle) errors.push(`plan DAG contains a cycle: ${cycle.join(' -> ')}`)
-    }
-
-    // Integration node: present, depends on nothing, covers all leaves.
-    const integrationId = isNonEmptyString(plan.integrationId) ? plan.integrationId : 'integration'
-    const integration = nodesById[integrationId]
-    if (!integration) {
-      errors.push(`integration node "${integrationId}" is missing (mandatory final node).`)
-    } else {
-      const integrationDeps = Array.isArray(integration.dependsOn) ? integration.dependsOn : []
-      const leafIds = nodeIds.filter((id) => id !== integrationId && !nodeIds.some((other) => other !== integrationId && (nodesById[other].dependsOn ?? []).includes(id)))
-      const uncovered = leafIds.filter((id) => !integrationDeps.includes(id))
-      if (uncovered.length > 0) {
-        errors.push(`integration node "${integrationId}" must cover all leaves; uncovered: ${uncovered.join(', ')}`)
-      }
-      const dependsOnIntegration = nodeIds.filter((id) => id !== integrationId && (nodesById[id].dependsOn ?? []).includes(integrationId))
-      if (dependsOnIntegration.length > 0) {
-        errors.push(`nothing may depend on the integration node; offenders: ${dependsOnIntegration.join(', ')}`)
-      }
-      if (integrationDeps.includes(integrationId)) {
-        errors.push(`integration node must not depend on itself.`)
-      }
-    }
-
-    return {
-      ok: errors.length === 0,
-      errors,
-      warnings,
-      schemaVersion: plan.schemaVersion ?? null,
-      projectId: plan.projectId ?? null,
-      marker: plan.projectId ? planvalidate.projectMarker(plan.projectId) : null,
-      teamId: plan.teamId ?? null,
-      revision,
-      nodeCount: nodeIds.length,
-      nodeIds,
-      integrationId: integration ? integrationId : null,
-    }
-  }
-
   return planvalidate
 }
+
 
 if (typeof module !== 'undefined' && module.exports) module.exports = makePlanValidate
 
@@ -3216,36 +3241,33 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makePlanVa
 function makeProjectState(pathutil, util, planvalidate) {
   const projectstate = {}
 
-  projectstate.STATE_SCHEMA_VERSION = 2
   projectstate.MAX_CURSOR_IDS = 500
 
-  projectstate.projectsDir = function (baseDir, artifactRoot = 'research-agent') {
+  projectstate.projectsDir = function (baseDir, artifactRoot = '.research-agent') {
     return pathutil.resolve(baseDir, artifactRoot, 'projects')
   }
 
-  projectstate.projectDir = function (baseDir, projectId, artifactRoot = 'research-agent') {
+  projectstate.projectDir = function (baseDir, projectId, artifactRoot = '.research-agent') {
     return pathutil.resolve(projectstate.projectsDir(baseDir, artifactRoot), util.safeSegment(projectId))
   }
 
-  projectstate.planPath = function (baseDir, projectId, artifactRoot = 'research-agent') {
+  projectstate.planPath = function (baseDir, projectId, artifactRoot = '.research-agent') {
     return pathutil.resolveInside(projectstate.projectDir(baseDir, projectId, artifactRoot), 'plan.json')
   }
 
-  projectstate.statePath = function (baseDir, projectId, artifactRoot = 'research-agent') {
+  projectstate.statePath = function (baseDir, projectId, artifactRoot = '.research-agent') {
     return pathutil.resolveInside(projectstate.projectDir(baseDir, projectId, artifactRoot), 'state.json')
   }
 
   // Read the immutable approved plan. Missing/invalid -> { ok:false, error }.
-  projectstate.loadPlan = async function (fops, baseDir, projectId, artifactRoot = 'research-agent') {
+  // Single root: no candidate fallback — the bare 'research-agent/' tree is
+  // migration input, not a runtime alternative (config.resolveArtifactRoot
+  // fails closed with a migrator pointer when it is the only evidence).
+  projectstate.loadPlan = async function (fops, baseDir, projectId, artifactRoot = '.research-agent') {
     const primaryPath = projectstate.planPath(baseDir, projectId, artifactRoot)
-    const legacyPath = projectstate.planPath(baseDir, projectId, '.research-agent')
-    const visiblePath = projectstate.planPath(baseDir, projectId, 'research-agent')
-    const candidates = [...new Set([primaryPath, legacyPath, visiblePath])]
-    for (const path of candidates) {
-      const plan = await fops.readJson(path)
-      if (util.isPlainObject(plan)) return { ok: true, plan, path, artifactRoot: pathutil.relativePath(pathutil.resolve(baseDir), path).split('/projects/')[0] || artifactRoot }
-    }
-    return { ok: false, plan: null, path: primaryPath, error: `plan.json missing or not valid JSON: ${primaryPath} (legacy fallback: ${legacyPath})` }
+    const plan = await fops.readJson(primaryPath)
+    if (util.isPlainObject(plan)) return { ok: true, plan, path: primaryPath, artifactRoot }
+    return { ok: false, plan: null, path: primaryPath, error: `plan.json missing or not valid JSON: ${primaryPath}` }
   }
 
   // Empty journal template for a validated plan (created lazily by the
@@ -3269,13 +3291,17 @@ function makeProjectState(pathutil, util, planvalidate) {
         receipts: [],
         causalHolds: [],
         nodeRevision: 1,
+        leaseId: '',
+        failureReason: '',
+        contextDigest: null,
+        contextDigestAt: null,
         linearProjection: null,
         projectionStatus: 'none',
         updatedAt: '',
       }
     }
     return {
-      schemaVersion: projectstate.STATE_SCHEMA_VERSION,
+      kind: 'project-state',
       projectId: plan.projectId,
       marker: planvalidate.projectMarker(plan.projectId),
       createdAt: now,
@@ -3284,6 +3310,7 @@ function makeProjectState(pathutil, util, planvalidate) {
       integrationRevision: 1,
       nodes,
       commentCursors: {},
+      integration: { epoch: 1, inputDigest: null, lastKnownGood: null, feedback: [] },
       lastError: '',
     }
   }
@@ -3291,11 +3318,10 @@ function makeProjectState(pathutil, util, planvalidate) {
   // Read the journal. Missing -> empty template + missing flag; invalid JSON
   // -> empty template + invalid flag (a broken journal is replayable:
   // everything reconciles from plan + Linear).
-  projectstate.loadState = async function (fops, baseDir, projectId, plan, artifactRoot = 'research-agent') {
-    const primaryPath = projectstate.statePath(baseDir, projectId, artifactRoot)
-    const legacyPath = projectstate.statePath(baseDir, projectId, '.research-agent')
-    const visiblePath = projectstate.statePath(baseDir, projectId, 'research-agent')
-    const path = await fops.exists(primaryPath) ? primaryPath : (await fops.exists(legacyPath) ? legacyPath : (await fops.exists(visiblePath) ? visiblePath : primaryPath))
+  projectstate.loadState = async function (fops, baseDir, projectId, plan, artifactRoot = '.research-agent') {
+    // Single root: the state journal lives next to the plan in the resolved
+    // artifact root; there is no bare-root fallback.
+    const path = projectstate.statePath(baseDir, projectId, artifactRoot)
     if (!await fops.exists(path)) {
       const state = projectstate.emptyState(plan)
       return { state, path, missing: true, invalid: false }
@@ -3305,22 +3331,38 @@ function makeProjectState(pathutil, util, planvalidate) {
       const state = projectstate.emptyState(plan)
       return { state, path, missing: false, invalid: true }
     }
-    // Heal schema drift silently: ensure every plan node has an entry.
+    // Canonical boundary: a journal carrying a schemaVersion is an old shape.
+    // It is replayable (the journal reconciles from plan + Linear) but is
+    // rejected here; the offline migrator writes a reviewed migrated workspace
+    // without treating this runtime load as migration authority.
+    if ('schemaVersion' in raw) {
+      const state = projectstate.emptyState(plan)
+      return { state, path, missing: false, invalid: true, error: core.NOT_CANONICAL_ERROR }
+    }
+    // Heal node drift silently: ensure every plan node has an entry.
     const nodes = { ...(util.isPlainObject(raw.nodes) ? raw.nodes : {}) }
-    const defaults = projectstate.emptyState(plan).nodes
+    const defaultState = projectstate.emptyState(plan)
+    const defaults = defaultState.nodes
     for (const node of plan.nodes ?? []) {
       if (!util.isPlainObject(nodes[node.id])) nodes[node.id] = defaults[node.id]
     }
     const state = {
+      kind: 'project-state',
       ...raw,
-      schemaVersion: projectstate.STATE_SCHEMA_VERSION,
       nodes,
       commentCursors: util.isPlainObject(raw.commentCursors) ? raw.commentCursors : {},
+    }
+    // Validate the canonical journal shape after healing node drift. This is
+    // read-only validation: malformed persisted state is replayed from the
+    // plan-derived empty template and is never migrated in place.
+    const canonical = core.validateRecord(state)
+    if (!canonical.ok) {
+      return { state: projectstate.emptyState(plan), path, missing: false, invalid: true, error: canonical.errors.join(' ') }
     }
     return { state, path, missing: false, invalid: false }
   }
 
-  projectstate.saveState = async function (fops, baseDir, projectId, state, artifactRoot = 'research-agent', statePathOverride = '', writeMode = undefined) {
+  projectstate.saveState = async function (fops, baseDir, projectId, state, artifactRoot = '.research-agent', statePathOverride = '', writeMode = undefined) {
     state.updatedAt = new Date().toISOString()
     await fops.writeJson(statePathOverride || projectstate.statePath(baseDir, projectId, artifactRoot), state, writeMode)
   }
@@ -3364,7 +3406,24 @@ function makeProjectState(pathutil, util, planvalidate) {
     if (transition === 'fail' && typeof patch.failureReason !== 'string' || transition === 'fail' && !patch.failureReason.trim()) throw new Error('fail transition requires failureReason')
     if (transition === 'complete') next.causalHolds = []
     const linearProjectId = loaded.state.project?.linearProjectId
-    if (typeof linearProjectId === 'string' && linearProjectId.trim()) {
+    const linearBound = typeof linearProjectId === 'string' && linearProjectId.trim() !== ''
+    if (linearBound) {
+      // Plan §7.4: claim/resume(retry)/complete on a Linear-backed project
+      // require the digest of the freshly queried Linear Current Node
+      // Context block. The digest is stored as a pointer/checksum only —
+      // state.json never carries a narrative context copy (plan §7.1).
+      if (typeof patch.contextDigest === 'string' && !core.isContextDigest(patch.contextDigest)) {
+        throw new Error('contextDigest must be a 64-hex SHA-256 digest of the Linear Current Node Context block (plan §7.4)')
+      }
+      if (['claim', 'complete', 'retry'].includes(transition) && !core.isContextDigest(patch.contextDigest)) {
+        throw new Error('linear-bound ' + transition + ' requires contextDigest: read the Linear issue with linear_get_node_context and pass the current Current Node Context block digest (plan §7.4).')
+      }
+      if (core.isContextDigest(patch.contextDigest)) {
+        next.contextDigest = patch.contextDigest
+        next.contextDigestAt = next.updatedAt
+      }
+    }
+    if (linearBound) {
       next.projectionStatus = 'pending'
       next.linearProjection = {
         projectId,
@@ -3423,7 +3482,7 @@ function makeProjectState(pathutil, util, planvalidate) {
     for (const descendantId of projectstate.downstreamClosure(loadedPlan.plan, nodeId)) {
       const entry = failed.state.nodes?.[descendantId]
       if (!entry || entry.status === 'done' || entry.status === 'blocked') continue
-      const hold = { schemaVersion: 1, nodeId: descendantId, blockedBy: [nodeId], reason: 'upstream node failed: ' + failureReason, sourceEventDigest: null }
+      const hold = { kind: 'causal-hold', nodeId: descendantId, blockedBy: [nodeId], reason: 'upstream node failed: ' + failureReason, sourceEventDigest: null }
       await projectstate.transitionNode(fops, baseDir, projectId, descendantId, 'hold', { causalHolds: [hold] })
       heldNodeIds.push(descendantId)
     }
@@ -3458,7 +3517,7 @@ function makeProjectState(pathutil, util, planvalidate) {
     const integrationId = plan.integrationId ?? 'integration'
     const nodes = util.isPlainObject(state.nodes) ? state.nodes : {}
     const entry = nodes[integrationId]
-    const planRevision = planvalidate.validatePlan(plan).revision
+    const planRevision = core.validatePlan(plan).revision
     const stateRevision = Number(state.integrationRevision ?? 1)
     const allLeavesDone = (plan.nodes ?? [])
       .filter((node) => node.id !== integrationId)
@@ -3487,7 +3546,7 @@ function makeProjectState(pathutil, util, planvalidate) {
   // Idempotent per-node comment-id cursor advance (plan §9.11): appends only
   // NEW ids, keeps the newest MAX_CURSOR_IDS, persists immediately. Returns
   // the delta so the coordinator knows what to append to comments.md.
-  projectstate.advanceCommentCursor = async function (fops, baseDir, projectId, nodeId, commentIds, artifactRoot = 'research-agent') {
+  projectstate.advanceCommentCursor = async function (fops, baseDir, projectId, nodeId, commentIds, artifactRoot = '.research-agent') {
     const plan = await projectstate.loadPlan(fops, baseDir, projectId, artifactRoot)
     if (!plan.ok) throw new Error(plan.error)
     const { state, path: statePath } = await projectstate.loadState(fops, baseDir, projectId, plan.plan, artifactRoot)
@@ -3674,10 +3733,10 @@ function makeProjectState(pathutil, util, planvalidate) {
 if (typeof module !== 'undefined' && module.exports) module.exports = makeProjectState
 
 
-// ── ORCHESTRATOR GLUE TAIL v2 (concatenated after the lib factory files) ──
+// ── ORCHESTRATOR GLUE TAIL (contract binding; after the lib factory files) ──
 // Generation-aware glue. Imports the shared pure core module (single source
 // of truth for the role manifest, contracts, blinding, receipts, and build
-// identity) and adds the v2 contract binding, fail-closed blinding, TeX node
+// identity) and adds the contract binding, fail-closed blinding, TeX node
 // acceptance, integration protocol helpers, and the runtime build probe.
 //
 // The audited lib factories below are unchanged; this tail derives all
@@ -3739,8 +3798,6 @@ for (const [alias, id] of Object.entries(core.ROLE_ALIASES)) {
   }
 }
 profiles.MINIMAL_DEFAULT_TOOLS = ['read']
-planvalidate.PRESET_ROLES = core.VALID_PLAN_ROLES
-
 // Tool ceilings: roleProfiles.<role>.tools may narrow a built-in ceiling but
 // may not expand it. The wrapper throws on expansion, so a workspace config
 // that grants the integration verifier write/edit/bash is rejected at profile
@@ -3748,15 +3805,63 @@ planvalidate.PRESET_ROLES = core.VALID_PLAN_ROLES
 const _resolveEffectiveProfile = profiles.resolveEffectiveProfile
 profiles.resolveEffectiveProfile = function (role, cfg, opts = {}) {
   const profile = _resolveEffectiveProfile(role, cfg, opts)
-  const resolved = core.roleToolsWithinCeiling(profile.role, profile.tools)
-  if (resolved !== null) profile.tools = resolved.tools
+  // Gated tool grant (canonical plan §3 invariant 7): when the caller
+  // supplies a run-scoped capability context, the ceiling is raised to the
+  // broad baseline ONLY behind a fresh, workspace-matched, all-enforced
+  // confinement attestation; config may still narrow within the ceiling.
+  // Without a context (list/profile/plan call sites) today's narrow
+  // ceiling behavior is unchanged.
+  if (opts.attestation !== undefined || opts.nodeContract !== undefined) {
+    // Narrowing applies ONLY to explicitly configured tools (the role's own
+    // defaultTools are the unattested baseline, not a config restriction):
+    // mirror the original resolution's transforms (web strip + minimal 'read')
+    // on the raw config entry so an attested role gets the full broad
+    // baseline unless the workspace config says otherwise.
+    const rawProfile = profiles.getRoleProfile(cfg, role)
+    let configuredTools = util.isPlainObject(rawProfile) && Array.isArray(rawProfile.tools) && rawProfile.tools.length > 0 ? [...rawProfile.tools] : null
+    if (configuredTools) {
+      if (cfg.externalResearch === false) configuredTools = configuredTools.filter((tool) => !profiles.WEB_TOOLS.includes(tool))
+      for (const required of profiles.MINIMAL_DEFAULT_TOOLS) {
+        if (!configuredTools.includes(required)) configuredTools.push(required)
+      }
+    }
+    const grant = core.resolveRoleToolGrant(profile.role, opts.nodeContract ?? null, opts.attestation ?? null, {
+      workspace: typeof opts.workspace === 'string' ? opts.workspace : null,
+      runDir: typeof opts.runDir === 'string' ? opts.runDir : null,
+      tools: configuredTools,
+    })
+    profile.tools = grant.tools
+    profile.toolGrant = { gated: grant.gated, confinement: grant.confinement, base: grant.base, ceiling: grant.ceiling }
+  } else {
+    const resolved = core.roleToolsWithinCeiling(profile.role, profile.tools)
+    if (resolved !== null) profile.tools = resolved.tools
+  }
   return profile
 }
 
-// projectstate consults planvalidate for markers/revision; route it through
-// the core validator so v2 plans keep working everywhere.
-planvalidate.validatePlan = function (plan, opts = {}) {
-  return core.validatePlan(plan, opts)
+// Run-scoped capability context for the gated tool grant: the run's
+// confinement attestation receipt (if any) plus the node contract (visual
+// evidence drives the read_image add-on). Missing files are legitimate —
+// they mean "no attestation yet" (fail closed, narrow profile).
+async function loadCapabilityContext(fops, baseDir, runDir) {
+  let attestation = null
+  let nodeContract = null
+  const runRoot = runDir ? absPath(baseDir, runDir) : null
+  if (runRoot) {
+    try {
+      const attFile = await fops.readJson(pathutil.join(runRoot, 'capability', 'confinement-attestation.json'))
+      if (util.isPlainObject(attFile)) attestation = attFile
+    } catch {
+      attestation = null
+    }
+    try {
+      const contractFile = await loadRunContract(fops, runRoot)
+      if (contractFile && util.isPlainObject(contractFile.contract)) nodeContract = contractFile.contract
+    } catch {
+      nodeContract = null
+    }
+  }
+  return { attestation, nodeContract }
 }
 
 // Embedded prompt fallbacks: installed prompt data (makeRoles) plus the
@@ -3783,6 +3888,107 @@ async function loadRunContract(fops, runDir) {
 async function loadAcceptance(fops, runDir) {
   const file = await fops.readJson(pathutil.resolveInside(runDir, 'acceptance.json'))
   return util.isPlainObject(file) ? file : null
+}
+
+// ── promote_artifact: the single hash-checked publication authority ────────
+// All accepted artifact publication goes through this helper (module scope
+// so the external test harness exercises the exact same code path).
+async function promoteArtifact(params) {
+  const base = pathutil.normalize(params.baseDir)
+  const runDir = pathutil.isAbsolute(params.runDir) ? pathutil.normalize(params.runDir) : pathutil.join(base, params.runDir)
+  // Reference promotion (plan §13 gate: promote by recorded reference,
+  // never by text reconstruction): an outputRef carries the path, the
+  // exact byte hash, and the completeness flag from the attempt record.
+  let sourceRel = String(params.sourcePath ?? '').trim()
+  const destinationRel = String(params.destinationPath ?? '').trim()
+  let sourceHash = params.sourceHash
+  let sourceComplete = params.sourceComplete
+  if (util.isPlainObject(params.outputRef)) {
+    if (typeof params.outputRef.path !== 'string' || !params.outputRef.path.trim()) throw new Error('outputRef.path is required when promoting by reference.')
+    if (typeof params.outputRef.hash !== 'string' || !params.outputRef.hash.trim()) throw new Error('outputRef.hash is required when promoting by reference: the published bytes must be hash-bound to the recorded attempt output.')
+    sourceRel = params.outputRef.path.trim()
+    sourceHash = params.outputRef.hash.trim()
+    sourceComplete = params.outputRef.complete === true
+  }
+  if (!sourceRel || !destinationRel) throw new Error('sourcePath (or outputRef.path) and destinationPath are required.')
+  const sourceAbs = pathutil.resolveInside(runDir, sourceRel)
+  const destinationAbs = pathutil.resolveInside(runDir, destinationRel)
+  // Contract-bound promotion is destination-checked: the declared artifact
+  // path is the only external destination; internal packets/ paths stay
+  // open for runner and coordinator artifacts.
+  const contractFile = await loadRunContract(params.fops, runDir)
+  if (contractFile) {
+    const declared = util.isPlainObject(contractFile.contract?.outputContract) && typeof contractFile.contract.outputContract.artifactPath === 'string'
+      ? contractFile.contract.outputContract.artifactPath.trim()
+      : ''
+    const normalizedDestination = pathutil.normalize(destinationRel)
+    if (declared && normalizedDestination !== declared && !normalizedDestination.startsWith('packets/')) {
+      throw new Error('undeclared destination: this run is bound to node ' + contractFile.nodeId + ' and may promote only to the declared artifact path ' + declared + ' (or an internal packets/ path); got ' + destinationRel + '.')
+    }
+  }
+  // Symlink-freedom must be ATTESTED, not assumed: without an lstat adapter
+  // the promotion fails closed. A nonexistent destination is the expected
+  // pre-promotion state and is allowed; only an actual symlink is rejected.
+  const hasLstat = typeof params.fops.lstat === 'function'
+  if (!hasLstat) throw new Error('cannot attest symlink-freedom: the filesystem adapter has no lstat capability; promotion fails closed.')
+  let sourceInfo = null
+  try {
+    sourceInfo = await params.fops.lstat(sourceAbs)
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && error?.code !== 'FS_NOT_OBSERVED') throw error
+  }
+  if (!sourceInfo) throw new Error('sourcePath does not exist or its symlink-freedom cannot be attested: ' + sourceRel)
+  if (sourceInfo.type === 'symlink') throw new Error('sourcePath must not be a symbolic link.')
+  let destinationInfo = null
+  try {
+    destinationInfo = await params.fops.lstat(destinationAbs)
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && error?.code !== 'FS_NOT_OBSERVED') throw error
+  }
+  if (destinationInfo && destinationInfo.type === 'symlink') throw new Error('destinationPath must not be a symbolic link.')
+  const extension = pathutil.basename(destinationRel).toLowerCase().split('.').pop()
+  if (params.expectedFormat === 'tex' && extension !== 'tex') throw new Error('destination format mismatch: expected .tex')
+  if (params.expectedFormat === 'json' && extension !== 'json') throw new Error('destination format mismatch: expected .json')
+  const binaryExt = BINARY_HASH_EXTENSIONS.has('.' + extension)
+  if (binaryExt) {
+    // Byte-exact binary promotion (plan §9): never decode/re-encode binary
+    // artifacts through the text path; a missing byte/copy adapter fails
+    // closed.
+    if (typeof params.fops.readBytes !== 'function' || typeof params.fops.copy !== 'function') {
+      throw new Error('binary promotion requires byte adapters (readBytes + copy); the adapter is unavailable, promotion fails closed.')
+    }
+    const sourceBytes = await params.fops.readBytes(sourceAbs, BINARY_HASH_MAX_BYTES)
+    if (sourceBytes === null) throw new Error('cannot read binary source bytes: ' + sourceRel)
+    const actualHash = hashBytes(sourceBytes)
+    if (sourceHash && sourceHash !== actualHash) throw new Error('source hash mismatch: expected ' + sourceHash + ', got ' + actualHash)
+    if (sourceComplete !== true) throw new Error('source artifact is not marked complete; partial role output cannot be promoted.')
+    const existingBytes = await params.fops.readBytes(destinationAbs, BINARY_HASH_MAX_BYTES).catch(() => null)
+    if (existingBytes !== null) {
+      const existingHash = hashBytes(existingBytes)
+      if (existingHash === actualHash) return { ok: true, idempotent: true, sourcePath: sourceRel, destinationPath: destinationRel, hash: actualHash }
+      throw new Error('destination conflict: destination exists with a different hash.')
+    }
+    if (typeof params.fops.ensureDir === 'function') await params.fops.ensureDir(pathutil.dirname(destinationAbs))
+    await params.fops.copy(sourceAbs, destinationAbs)
+    const publishedBytes = await params.fops.readBytes(destinationAbs, BINARY_HASH_MAX_BYTES)
+    if (publishedBytes === null || hashBytes(publishedBytes) !== actualHash) throw new Error('published destination hash mismatch: expected ' + actualHash)
+    return { ok: true, idempotent: false, sourcePath: sourceRel, destinationPath: destinationRel, hash: actualHash, length: sourceBytes.byteLength }
+  }
+  const sourceText = await params.fops.readText(sourceAbs)
+  const actualHash = core.sha256Text(sourceText)
+  if (sourceHash && sourceHash !== actualHash) throw new Error('source hash mismatch: expected ' + sourceHash + ', got ' + actualHash)
+  if (sourceComplete !== true) throw new Error('source artifact is not marked complete; partial role output cannot be promoted.')
+  const existing = await params.fops.readText(destinationAbs).catch(() => null)
+  if (existing !== null) {
+    const existingHash = core.sha256Text(existing)
+    if (existingHash === actualHash) return { ok: true, idempotent: true, sourcePath: sourceRel, destinationPath: destinationRel, hash: actualHash }
+    throw new Error('destination conflict: destination exists with a different hash.')
+  }
+  await params.fops.writeText(destinationAbs, sourceText, { kind: 'createIfAbsent' })
+  const published = await params.fops.readText(destinationAbs)
+  const publishedHash = core.sha256Text(published)
+  if (publishedHash !== actualHash) throw new Error('published destination hash mismatch: expected ' + actualHash + ', got ' + publishedHash)
+  return { ok: true, idempotent: false, sourcePath: sourceRel, destinationPath: destinationRel, hash: actualHash, length: sourceText.length }
 }
 
 function computeRunDigest(run, contractFile) {
@@ -3904,27 +4110,34 @@ async function resolveExecutable(subprocessService, name) {
 }
 
 // Strict TeX build: latexmk -pdf -interaction=nonstopmode -halt-on-error
-// -file-line-error -recorder, never -f. Records log/.fls/PDF hashes.
-async function strictTexBuild(fops, subprocessService, baseDir, dir, mainFile) {
+// -file-line-error -recorder, never -f and never -jobname (the job name is
+// always the source basename; no dot-prefixed compiler job names). When
+// opts.sourceDateEpoch is supplied the build pins SOURCE_DATE_EPOCH so
+// reproducible-profile PDFs compare byte-equal across machines. Records
+// log/.fls/PDF hashes plus typed failure evidence: first error, line
+// context, bounded tail, the exact command, and cleanup state.
+async function strictTexBuild(fops, subprocessService, baseDir, dir, mainFile, opts = {}) {
   if (typeof fops.removeTree !== 'function' || typeof fops.ensureDir !== 'function' || typeof fops.copy !== 'function') throw new Error('compiler scratch requires confined removeTree, ensureDir, and copy operations')
   const scratchDir = pathutil.resolveInside(dir, '.autoresearch-compiler')
   const compilerMarker = pathutil.join(scratchDir, '.autoresearch-compiler.json')
-  const compilerOwner = { schemaVersion: 1, owner: 'autoresearch-compiler-v1', runDir: pathutil.relativePath(baseDir, dir), mainFile: String(mainFile) }
+  const compilerOwner = { kind: 'owner-marker', owner: 'autoresearch-compiler', runDir: pathutil.relativePath(baseDir, dir), mainFile: String(mainFile) }
   if (await fops.exists(scratchDir)) {
     const marker = typeof fops.readJson === 'function' ? await fops.readJson(compilerMarker) : null
     const entries = typeof fops.listDir === 'function' ? await fops.listDir(scratchDir) : []
-    if (entries.length > 0 && marker?.owner !== 'autoresearch-compiler-v1') throw new Error('compiler scratch is not owned by AutoResearch; refusing cleanup: ' + scratchDir)
+    if (entries.length > 0 && marker?.owner !== 'autoresearch-compiler') throw new Error('compiler scratch is not owned by AutoResearch; refusing cleanup: ' + scratchDir)
     await fops.removeTree(scratchDir)
   }
   await fops.ensureDir(scratchDir)
   if (typeof fops.writeJson === 'function') await fops.writeJson(compilerMarker, compilerOwner)
   else if (typeof fops.writeText === 'function') await fops.writeText(compilerMarker, JSON.stringify(compilerOwner, null, 2) + '\n')
   else throw new Error('compiler ownership marker requires filesystem write support')
+  const sourceDateEpoch = Number.isInteger(opts.sourceDateEpoch) && opts.sourceDateEpoch > 0 ? opts.sourceDateEpoch : null
   let buildError = null
   let output = null
   try {
     const latexmk = await resolveExecutable(subprocessService, 'latexmk')
-    const result = await runSubprocess(subprocessService, dir, [latexmk, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-outdir=' + scratchDir, mainFile])
+    const argv = [latexmk, '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-outdir=' + scratchDir, mainFile]
+    const result = await runSubprocess(subprocessService, dir, argv, sourceDateEpoch !== null ? { env: { SOURCE_DATE_EPOCH: String(sourceDateEpoch) } } : {})
     const stem = pathutil.basename(String(mainFile)).replace(/\.tex$/i, '')
     const logPath = pathutil.join(scratchDir, stem + '.log')
     const flsPath = pathutil.join(scratchDir, stem + '.fls')
@@ -3934,16 +4147,58 @@ async function strictTexBuild(fops, subprocessService, baseDir, dir, mainFile) {
     const flsHash = await hashFile(fops, flsPath)
     const pdfHash = await hashFile(fops, scratchPdfPath)
     if (result.exitCode === 0 && pdfHash) await fops.copy(scratchPdfPath, destinationPdfPath)
-    output = { clean: result.exitCode === 0, exitCode: result.exitCode, logHash, flsHash, pdfHash, pdfExists: pdfHash !== '', logTail: String(result.stdout + result.stderr).slice(-2000), scratchCleaned: true }
+    const failureEvidence = extractBuildFailure(String(result.stdout + result.stderr))
+    output = {
+      clean: result.exitCode === 0,
+      exitCode: result.exitCode,
+      logHash,
+      flsHash,
+      pdfHash,
+      pdfExists: pdfHash !== '',
+      command: argv.join(' '),
+      firstError: failureEvidence.firstError,
+      errorLine: failureEvidence.errorLine,
+      errorContext: failureEvidence.errorContext,
+      logTail: String(result.stdout + result.stderr).slice(-2000),
+      scratchCleaned: true,
+      cleanupError: null,
+      ...(sourceDateEpoch !== null ? { sourceDateEpoch } : {}),
+    }
   } catch (error) {
     buildError = error
   }
   try { await fops.removeTree(scratchDir) } catch (cleanupError) {
-    if (buildError) buildError.cleanupError = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-    else throw cleanupError
+    if (buildError) {
+      buildError.cleanupError = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      if (output) output.cleanupError = buildError.cleanupError
+    } else throw cleanupError
   }
   if (buildError) throw buildError
   return output
+}
+
+// Typed build-failure evidence (plan §9): the first `! <message>` compiler
+// error and the `l.<line> <context>` line that follows it. Pure text scan.
+function extractBuildFailure(combined) {
+  const lines = String(combined).split(/\r?\n/)
+  let firstError = null
+  let errorLine = null
+  let errorContext = null
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (firstError === null) {
+      const bang = line.indexOf('! ')
+      if (bang !== -1) firstError = line.slice(bang + 2).trim()
+    } else {
+      const match = line.match(/^l\.(\d+)\s*(.*)$/)
+      if (match) {
+        errorLine = Number(match[1])
+        errorContext = match[2].trim()
+        break
+      }
+    }
+  }
+  return { firstError, errorLine, errorContext }
 }
 
 // Render a compiled PDF to per-page PNGs for visual inspection. Builds the PDF
@@ -3973,11 +4228,11 @@ async function renderPreview(fops, subprocessService, baseDir, runDir, opts = {}
     const marker = typeof fops.readJson === 'function' ? await fops.readJson(previewMarker) : null
     const entries = typeof fops.listDir === 'function' ? await fops.listDir(previewDir) : []
     const unmarkedEntries = entries.filter((entry) => entry.name !== '.autoresearch-preview.json')
-    if (unmarkedEntries.length > 0 && (!marker || marker.owner !== 'autoresearch-preview-v1')) throw new Error('preview directory is not owned by AutoResearch; refusing cleanup: ' + previewDir)
+    if (unmarkedEntries.length > 0 && (!marker || marker.owner !== 'autoresearch-preview')) throw new Error('preview directory is not owned by AutoResearch; refusing cleanup: ' + previewDir)
     await fops.removeTree(previewDir)
   }
   await fops.ensureDir(previewDir)
-  if (typeof fops.writeJson === 'function') await fops.writeJson(previewMarker, { schemaVersion: 1, owner: 'autoresearch-preview-v1', runDir: pathutil.relativePath(baseDir, runDir) })
+  if (typeof fops.writeJson === 'function') await fops.writeJson(previewMarker, { kind: 'owner-marker', owner: 'autoresearch-preview', runDir: pathutil.relativePath(baseDir, runDir) })
 
   let renderer = null
   let argv = null
@@ -4101,7 +4356,7 @@ function deliverableEntryPath(entry) {
 // so the diagnostic names the owner when identifiable (bounded scan of the
 // node run dirs from state.json).
 async function identifyOwnerNode(fops, baseDir, plan, contractFile, currentNodeId, probe) {
-  const loadedState = await projectstate.loadState(fops, baseDir, plan.projectId, plan, contractFile.artifactRoot || 'research-agent')
+  const loadedState = await projectstate.loadState(fops, baseDir, plan.projectId, plan, contractFile.artifactRoot || '.research-agent')
   const nodes = loadedState.state?.nodes ?? {}
   for (const node of plan.nodes ?? []) {
     if (node.id === currentNodeId) continue
@@ -4131,16 +4386,14 @@ async function identifyOwnerNode(fops, baseDir, plan, contractFile, currentNodeI
   return null
 }
 
-// The exposed TeX master's run-relative path (marker plan: first declared
-// .tex deliverable; legacy adapter: final.tex), or null when the project
-// exposes no TeX source.
+// The exposed TeX master's run-relative path (bound canonical plan: first
+// declared .tex deliverable; unbound run: final.tex), or null when the
+// project exposes no TeX source.
 function exposedTexMasterRel(plan) {
   if (plan) {
     const pc = core.projectContract(plan)
-    if (pc.exposurePolicyVersion === 1) {
-      const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
-      return texPaths.length > 0 ? texPaths[0] : null
-    }
+    const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
+    return texPaths.length > 0 ? texPaths[0] : null
   }
   return 'final.tex'
 }
@@ -4198,12 +4451,10 @@ async function captureFinalBuild(fops, runDirAbs, plan) {
   let pdfRel = 'final.pdf'
   if (plan) {
     const pc = core.projectContract(plan)
-    if (pc.exposurePolicyVersion === 1) {
-      const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
-      if (texPaths.length > 0) sourceRel = texPaths[0]
-      const pdfPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.pdf'))
-      if (pdfPaths.length > 0) pdfRel = pdfPaths[0]
-    }
+    const texPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.tex'))
+    if (texPaths.length > 0) sourceRel = texPaths[0]
+    const pdfPaths = (pc.deliverables ?? []).map(deliverableEntryPath).filter((p) => p && p.toLowerCase().endsWith('.pdf'))
+    if (pdfPaths.length > 0) pdfRel = pdfPaths[0]
   }
   const sourceAbs = pathutil.join(runDirAbs, sourceRel)
   const sourceHash = await hashFile(fops, sourceAbs)
@@ -4359,7 +4610,9 @@ function parseTexSections(text) {
 // reuse the exact same function.
 function deriveNodeOutputDocument(params) {
   const contract = util.isPlainObject(params.contract) ? params.contract : {}
-  const artifactFormat = contract.artifactFormat === 'markdown' ? 'markdown' : 'tex'
+  // Preserve the closed canonical format: image/asset nodes must not be
+  // mislabeled `tex` (section parsing below is TeX-only).
+  const artifactFormat = ['tex', 'markdown', 'image', 'asset'].includes(contract.artifactFormat) ? contract.artifactFormat : 'markdown'
   const outputText = String(params.outputText ?? '')
   const nodeRevision = Number.isInteger(params.nodeRevision) && params.nodeRevision > 0 ? params.nodeRevision : 1
   const passIds = (Array.isArray(params.criteria) ? params.criteria : [])
@@ -4433,6 +4686,11 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
   const artifactRel = typeof opts.artifactPath === 'string' && opts.artifactPath.trim()
     ? opts.artifactPath.trim()
     : (typeof contract.outputContract?.artifactPath === 'string' && contract.outputContract.artifactPath.trim() ? contract.outputContract.artifactPath.trim() : 'output.tex')
+  // Reproducible profiles pin SOURCE_DATE_EPOCH to the canonical plan's
+  // approval instant (immutable once approved); the same epoch is reused by
+  // every build of that plan so PDF bytes compare across machines.
+  const sourceDateEpoch = planApprovalEpoch(contract)
+  const buildOpts = sourceDateEpoch !== null ? { sourceDateEpoch } : {}
   if (!core.isSafeRelFilePath(artifactRel) || !artifactRel.toLowerCase().endsWith('.tex')) throw new Error('TeX artifactPath must be a safe relative .tex path: ' + artifactRel)
   const outputPath = pathutil.resolveInside(runDir, artifactRel)
   const outputExists = await fops.exists(outputPath)
@@ -4505,7 +4763,7 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     record.previewHash = core.sha256Text(preview)
     record.templateHash = core.sha256Text(templateText)
     await fops.writeText(pathutil.resolveInside(runDir, 'preview.tex'), preview)
-    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, 'preview.tex')
+    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, 'preview.tex', buildOpts)
     record.compiled = true
     record.clean = build.clean
     record.exitCode = build.exitCode
@@ -4513,9 +4771,18 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     record.flsHash = build.flsHash
     record.pdfHash = build.pdfHash
     record.pdfExists = build.pdfExists
+    if (build.sourceDateEpoch !== undefined) record.sourceDateEpoch = build.sourceDateEpoch
+    if (build.firstError !== null) {
+      record.firstError = build.firstError
+      record.errorLine = build.errorLine
+      record.errorContext = build.errorContext
+      record.buildCommand = build.command
+      record.scratchCleaned = build.scratchCleaned
+      record.cleanupError = build.cleanupError
+    }
     if (!build.clean) record.errors = ['strict TeX build failed with exit ' + build.exitCode + ': ' + build.logTail.slice(0, 400)]
   } else {
-    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, artifactRel)
+    const build = await strictTexBuild(fops, subprocessService, baseDir, runDir, artifactRel, buildOpts)
     record.compiled = true
     record.clean = build.clean
     record.exitCode = build.exitCode
@@ -4523,9 +4790,26 @@ async function validateNodeTex(fops, subprocessService, baseDir, runDir, contrac
     record.flsHash = build.flsHash
     record.pdfHash = build.pdfHash
     record.pdfExists = build.pdfExists
+    if (build.sourceDateEpoch !== undefined) record.sourceDateEpoch = build.sourceDateEpoch
+    if (build.firstError !== null) {
+      record.firstError = build.firstError
+      record.errorLine = build.errorLine
+      record.errorContext = build.errorContext
+      record.buildCommand = build.command
+      record.scratchCleaned = build.scratchCleaned
+      record.cleanupError = build.cleanupError
+    }
     if (!build.clean) record.errors = ['strict TeX build failed with exit ' + build.exitCode + ': ' + build.logTail.slice(0, 400)]
   }
   return record
+}
+
+// The deterministic SOURCE_DATE_EPOCH for a node contract: the approved
+// plan's approval instant in whole seconds, or null when unavailable.
+function planApprovalEpoch(contract) {
+  const stamp = typeof contract?.approvedAt === 'string' && contract.approvedAt.trim() ? Date.parse(contract.approvedAt) : NaN
+  if (Number.isNaN(stamp)) return null
+  return Math.floor(stamp / 1000)
 }
 
 // ── resume: artifact-format-aware step inference ───────────────────────────
@@ -4571,14 +4855,18 @@ resume.inferNextStep = async function (fops, runDir, run, history = []) {
   }
 
   const judgeCount = Number(run.config?.numJudges ?? config.DEFAULT_CONFIG.numJudges)
-  for (let judge = 1; judge <= judgeCount; judge += 1) {
-    if (!await exists(passDirName + '/judge_' + judge + '.md')) {
-      return { step: passDirName + '_judging', action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates if judge packets/maps are missing, save judge prompts, spawn or rerun judge ' + judge + ', then save ' + passDirName + '/judge_' + judge + '.md.' }
+  // Zero-based, zero-padded judge naming matches buildBlindPackets and the
+  // flat dispatch primitives exactly (plan §6.5: no hidden +1/-1 offsets).
+  for (let judge = 0; judge < judgeCount; judge += 1) {
+    const judgeName = 'judge_' + String(judge).padStart(2, '0')
+    if (!await exists(passDirName + '/' + judgeName + '.md')) {
+      return { step: passDirName + '_judging', action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates if judge packets/maps are missing, save judge prompts, spawn or rerun judge ' + judge + ', then save ' + passDirName + '/' + judgeName + '.md.' }
     }
   }
-  for (let judge = 1; judge <= judgeCount; judge += 1) {
-    if (!await exists(passDirName + '/judge_' + judge + '_candidates.md') || !await exists(passDirName + '/judge_' + judge + '_map.json')) {
-      return { step: passDirName + '_judging', action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates to regenerate missing judge packets/maps, then rerun the affected judge(s) and save judge_N.md.' }
+  for (let judge = 0; judge < judgeCount; judge += 1) {
+    const judgeName = 'judge_' + String(judge).padStart(2, '0')
+    if (!await exists(passDirName + '/' + judgeName + '_candidates.md') || !await exists(passDirName + '/' + judgeName + '_map.json')) {
+      return { step: passDirName + '_judging', action: 'Read autoreason_loop_checklist.md, call autoresearch_anonymize_candidates to regenerate missing judge packets/maps, then rerun the affected judge(s) and save judge_NN.md.' }
     }
   }
   if (!await exists(passDirName + '/result.json')) {
@@ -4648,7 +4936,7 @@ function preflightReadyNodes(plan, journal, nodeStates) {
 // (plan §4.5 revision routing): statuses reset to todo, run receipts cleared.
 // The helper is the single source of truth: it loads the journal itself.
 async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
-  const loaded = await projectstate.loadState(fops, baseDir, plan.projectId, plan, options.artifactRoot ?? 'research-agent')
+  const loaded = await projectstate.loadState(fops, baseDir, plan.projectId, plan, options.artifactRoot ?? '.research-agent')
   if (!util.isPlainObject(loaded) || !util.isPlainObject(loaded.state)) {
     throw new Error('Cannot reset downstream state: state journal unavailable for ' + plan.projectId)
   }
@@ -4672,7 +4960,7 @@ async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
     const isDependent = id !== nodeId
     const nextStatus = isUserBlocked ? 'blocked' : 'todo'
     const nextHolds = isDependent && !isUserBlocked
-      ? [{ schemaVersion: 1, nodeId: id, blockedBy: [nodeId], reason: 'upstream revision requested; await fresh acceptance', sourceEventDigest: options.metadata?.sourceEventDigest ?? null }]
+      ? [{ kind: 'causal-hold', nodeId: id, blockedBy: [nodeId], reason: 'upstream revision requested; await fresh acceptance', sourceEventDigest: options.metadata?.sourceEventDigest ?? null }]
       : (Array.isArray(entry.causalHolds) ? entry.causalHolds : [])
     nodes[id] = {
       ...entry,
@@ -4702,63 +4990,403 @@ async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
   return { state, path: statePath, resetNodeIds: [...resetNodeIds].sort() }
 }
 
-// Canonical request writer: load and validate the plan before durable intent is
-// created, then reset the requested node and all descendants through one path.
+// ── feedback records (plan §8.1/§8.2/§8.4) ─────────────────────────────────
+// Hash-addressed immutable versions under <projectDir>/feedback/:
+//   <feedbackDigest>.json                      user-feedback record versions
+//   triage-<feedbackId12>-<triageDigest>.json  feedback-triage records
+// The state journal carries digest + status pointers only (operational, never
+// narrative).
+
+function feedbackDir(baseDir, projectId, artifactRoot = '.research-agent') {
+  return pathutil.join(projectstate.projectDir(baseDir, projectId, artifactRoot), 'feedback')
+}
+
+const FEEDBACK_STATUS_RANK = { open: 0, triaged: 1, resolving: 2, resolved: 3 }
+
+async function listFeedbackRecords(fops, dir) {
+  const records = []
+  for (const entry of await fops.listDir(dir)) {
+    if (entry?.dir || !String(entry?.name ?? '').endsWith('.json')) continue
+    const value = await fops.readJson(pathutil.resolveInside(dir, entry.name))
+    if (util.isPlainObject(value)) records.push(value)
+  }
+  return records
+}
+
+async function findFeedbackByIdempotencyKey(fops, dir, idempotencyKey) {
+  const matches = (await listFeedbackRecords(fops, dir)).filter((record) => record.kind === 'user-feedback' && record.idempotencyKey === idempotencyKey)
+  if (matches.length === 0) return null
+  matches.sort((a, b) => (FEEDBACK_STATUS_RANK[b.status] ?? 0) - (FEEDBACK_STATUS_RANK[a.status] ?? 0) || (String(a.receivedAt) < String(b.receivedAt) ? -1 : 1))
+  return matches[0]
+}
+
+async function readFeedbackByDigest(fops, dir, digest) {
+  const value = await fops.readJson(pathutil.resolveInside(dir, digest + '.json'))
+  return util.isPlainObject(value) && value.digest === digest ? value : null
+}
+
+async function findTriageByDigest(fops, dir, triageDigest) {
+  return (await listFeedbackRecords(fops, dir)).find((record) => record.kind === 'feedback-triage' && record.digest === triageDigest) ?? null
+}
+
+// Re-triage guard: an open feedback version's file stays 'open' forever
+// (immutable), so "already triaged" is detected by an existing triage record
+// for the feedback, not by the file's status.
+async function findTriageForFeedback(fops, dir, feedbackDigest) {
+  return (await listFeedbackRecords(fops, dir)).find((record) => record.kind === 'feedback-triage' && record.feedbackId === feedbackDigest) ?? null
+}
+
+async function writeFeedbackRecord(fops, dir, record, fileName) {
+  await fops.ensureDir(dir)
+  const filePath = pathutil.resolveInside(dir, fileName)
+  try {
+    await fops.writeTextNew(filePath, JSON.stringify(record, null, 2) + '\n')
+    return { created: true, path: filePath, record }
+  } catch (error) {
+    if (!util.isAlreadyExistsError(error)) throw error
+    const existing = await fops.readJson(filePath)
+    if (util.isPlainObject(existing) && existing.digest === record.digest) return { created: false, path: filePath, record: existing }
+    throw new Error('feedback record file exists with a different digest: ' + fileName)
+  }
+}
+
+// Suggested integration-context fields for a triage projection (plan §8.2):
+// data for the coordinator to merge into a freshly fetched Current Node
+// Context; the CAS digest is always taken from a fresh linear_get_node_context.
+function suggestedIntegrationContextPatch(triage, feedbackId) {
+  const revisions = (Array.isArray(triage.items) ? triage.items : [])
+    .filter((item) => ['substantive', 'conflict'].includes(item.classification) && (item.requiredChange ?? '').trim())
+    .map((item) => ({ id: 'fb-' + item.id, reason: item.requiredChange, source: 'user-feedback:' + String(feedbackId).slice(0, 12), affectedCriteria: item.affectedCriteria ?? [], requiredChange: item.requiredChange }))
+  const nextActionText = {
+    'reopen': 'Reopen ' + (triage.targetNodeIds ?? []).join(', ') + ' (smallest responsible closure for feedback ' + String(feedbackId).slice(0, 12) + ') and rerun in dependency order; rerun integration after the closure.',
+    'editorial-only': 'Fix the editorial feedback items in the next integration pass.',
+    'conflict-user-choice': 'Ask the user to choose the responsible node(s) for the conflicting feedback item(s); nothing reopens until the choice is recorded.',
+    'scope-plan-revision': 'Prepare a plan revision for user approval; the feedback exceeds the approved scope.',
+    'ambiguous': 'Ask the user to clarify the ambiguous feedback item(s); nothing reopens yet.',
+  }
+  return {
+    nextAction: { text: nextActionText[triage.decision] ?? nextActionText.ambiguous, owner: 'coordinator' },
+    ...(revisions.length > 0 ? { requiredRevisions: revisions } : {}),
+    note: 'Merge into a freshly fetched integration Current Node Context (keep existing requiredRevisions; replace any entry with the same id).',
+  }
+}
+
+// Canonical request writer: load and validate the plan before durable intent
+// is created, then reset the requested targets and all descendants.
+// Single-target (causal) behavior is unchanged; multi-target (plan §8.3) runs
+// one state transaction: cycle check BEFORE closure, one request file per
+// direct target with supersedes/feedback/triage digest links, revision bump on
+// direct targets only, full blocker sets on dependents, epoch bump.
 async function requestRevision(fops, baseDir, args) {
   const projectId = util.requiredString(args.projectId, 'projectId')
-  const consumerNodeId = util.requiredString(args.nodeId, 'nodeId')
   const root = await config.resolveArtifactRoot(fops, baseDir, { artifactRoot: args.artifactRoot })
   const plan = await projectstate.loadPlan(fops, baseDir, projectId, root.relativeRoot)
   if (!plan.ok) throw new Error(plan.error)
   const validation = core.validatePlan(plan.plan)
   if (!validation.ok) throw new Error('approved plan is invalid: ' + validation.errors.join('; '))
-  const retargetedTo = typeof args.retargetedTo === 'string' && args.retargetedTo ? args.retargetedTo : consumerNodeId
-  if (!(plan.plan.nodes ?? []).some((node) => node?.id === retargetedTo)) throw new Error('Unknown revision target node: ' + retargetedTo)
+  const hasMulti = Array.isArray(args.nodeIds) && args.nodeIds.length > 0
+  const consumerNodeId = typeof args.nodeId === 'string' && args.nodeId.trim() ? args.nodeId.trim() : (plan.plan.integrationId ?? 'integration')
+  let targets
+  if (hasMulti) {
+    targets = [...new Set(args.nodeIds.map((value) => String(value).trim()).filter(Boolean))].sort()
+  } else {
+    const requiredConsumer = util.requiredString(args.nodeId, 'nodeId')
+    const retargetedTo = typeof args.retargetedTo === 'string' && args.retargetedTo ? args.retargetedTo : requiredConsumer
+    targets = [retargetedTo]
+  }
+  for (const id of targets) {
+    if (!(plan.plan.nodes ?? []).some((node) => node?.id === id)) throw new Error('Unknown revision target node: ' + id)
+  }
+  // Cycle detection BEFORE any closure is computed (plan §8.3).
+  const cycleCheck = core.detectDependencyCycles(plan.plan)
+  if (!cycleCheck.ok) {
+    throw new Error('approved plan contains a dependency cycle; no reopen closure is computed: ' + cycleCheck.cycles.map((cycle) => cycle.join(' -> ')).join('; '))
+  }
+  const closure = core.computeReopenClosure(plan.plan, targets)
+  const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
+  if (!util.isPlainObject(loaded) || !util.isPlainObject(loaded.state)) {
+    throw new Error('Cannot reset downstream state: state journal unavailable for ' + projectId)
+  }
+  const state = loaded.state
+  const stateNodes = util.isPlainObject(state.nodes) ? state.nodes : {}
+  const currentEpoch = Number(state.integration?.epoch) || 0
+  const suppliedEpochValue = Number(args.epoch)
+  const suppliedEpoch = Number.isInteger(suppliedEpochValue) && suppliedEpochValue > 0 ? suppliedEpochValue : (hasMulti ? (currentEpoch || 1) : 1)
+  // Monotonic epoch: a stale, zero, or negative caller-supplied epoch can
+  // never rewind the journal, and every derived artifact (request files,
+  // markers, result fields) uses the same effective epoch so new requests
+  // are never immediately stale.
+  const baseEpoch = Math.max(currentEpoch, suppliedEpoch)
   const request = util.isPlainObject(args.request) ? args.request : {}
-  const epoch = Number(args.epoch) || 1
-  const fullRequest = {
-    projectId,
-    nodeId: retargetedTo,
-    epoch,
-    affectedContributionIds: Array.isArray(request.affectedContributionIds) ? request.affectedContributionIds : [],
-    projectCriteria: Array.isArray(request.projectCriteria) ? request.projectCriteria : [],
-    problem: request.problem ?? '',
-    requiredChange: request.requiredChange ?? '',
-    acceptanceChecks: Array.isArray(request.acceptanceChecks) ? request.acceptanceChecks : [],
+  const feedbackDigest = typeof args.feedbackDigest === 'string' && args.feedbackDigest.trim() ? args.feedbackDigest.trim() : null
+  let triageDigest = typeof args.triageDigest === 'string' && args.triageDigest.trim() ? args.triageDigest.trim() : null
+
+  // Multi-target linkage: the triage record is the source of the per-target
+  // request fields and of the minimal-closure rule. Multi-target reopens
+  // REQUIRE linkage — the smallest-responsible-closure and
+  // ambiguous-opens-nothing invariants are mechanically enforced only on the
+  // linked path, so an unlinked node set is refused.
+  let triage = null
+  if (hasMulti && !(feedbackDigest || triageDigest)) {
+    throw new Error('multi-target reopen requires feedbackDigest or triageDigest linkage: an unlinked node set cannot establish the smallest responsible closure (plan §8.3).')
   }
-  if (util.isPlainObject(args.upstreamAttribution)) fullRequest.upstreamAttribution = args.upstreamAttribution
-  const requestDigest = core.revisionRequestDigest(fullRequest)
-  const marker = core.revisionRequestMarker(projectId, epoch, retargetedTo, requestDigest)
-  const dir = pathutil.join(pathutil.dirname(plan.path), 'revision-requests')
-  const filePath = pathutil.join(dir, retargetedTo + '-' + epoch + '-' + requestDigest + '.json')
-  let created = false
-  try {
-    await fops.writeTextNew(filePath, JSON.stringify({ ...fullRequest, requestDigest, marker, createdAt: new Date().toISOString() }, null, 2) + '\n')
-    created = true
-  } catch (error) {
-    if (!util.isAlreadyExistsError(error)) throw error
+  if (hasMulti && (feedbackDigest || triageDigest)) {
+    const dir = feedbackDir(baseDir, projectId, plan.artifactRoot)
+    if (triageDigest) triage = await findTriageByDigest(fops, dir, triageDigest)
+    else {
+      const feedback = await readFeedbackByDigest(fops, dir, feedbackDigest)
+      if (feedback?.triageDigest) triage = await findTriageByDigest(fops, dir, feedback.triageDigest)
+    }
+    if (!triage) throw new Error('feedback triage not found for the supplied linkage')
+    if (triage.decision !== 'reopen') throw new Error('feedback triage decision ' + triage.decision + ' reopens nothing; there is no closure to route')
+    // The request file binds to the triage digest itself, whether the caller
+    // passed it directly or resolved it through the feedback chain.
+    triageDigest = triage.digest
+    if (feedbackDigest) {
+      // Chain linkage: the supplied feedback version must carry this triage
+      // (triage.feedbackId is the OPEN version's digest; versions advance).
+      const linked = await readFeedbackByDigest(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), feedbackDigest)
+      if (!linked) throw new Error('feedback record not found: ' + feedbackDigest)
+      if (linked.triageDigest !== triage.digest) throw new Error('feedback ' + feedbackDigest + ' is not linked to triage ' + triage.digest)
+    }
+    const derived = core.deriveTriageTargets(Array.isArray(triage.items) ? triage.items : [])
+    if (JSON.stringify(derived) !== JSON.stringify(targets)) {
+      throw new Error('nodeIds must equal the triage derived reopen targets exactly (smallest responsible closure): ' + JSON.stringify(derived) + ' vs ' + JSON.stringify(targets))
+    }
+    if (JSON.stringify([...(Array.isArray(triage.targetNodeIds) ? triage.targetNodeIds : [])].sort()) !== JSON.stringify(targets)) {
+      throw new Error('nodeIds must equal the triage targetNodeIds exactly: ' + JSON.stringify(triage.targetNodeIds) + ' vs ' + JSON.stringify(targets))
+    }
   }
-  const reset = created
-    ? await resetDownstreamState(fops, baseDir, plan.plan, retargetedTo, {
-      artifactRoot: plan.artifactRoot,
-      ...(util.isPlainObject(args.resetOptions) ? args.resetOptions : {}),
-      metadata: { ...(util.isPlainObject(args.resetOptions?.metadata) ? args.resetOptions.metadata : {}), created, sourceEventDigest: requestDigest },
+
+  // Reopen-time bypass decision (plan §8.1): the judge-quorum bypass is
+  // valid only while the feedback's base digests match the CURRENT
+  // last-known-good — which is exactly true at reopen time, before the
+  // repair republish. The decision is stamped on every request file so the
+  // close gate records what was actually authorized, never a stale claim.
+  let reopenBypass = null
+  let linkedFeedbackRecord = null
+  let effectiveFeedbackDigest = feedbackDigest
+  if (!effectiveFeedbackDigest && triage) {
+    // Triage-only linkage: resolve the feedback chain through the triage's
+    // open-version digest so the reopen still creates the `resolving`
+    // feedback version and the request files carry a digest link.
+    const openRecord = await readFeedbackByDigest(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), triage.feedbackId)
+    if (!openRecord) throw new Error('feedback record for triage ' + triage.digest + ' could not be resolved; pass feedbackDigest explicitly.')
+    linkedFeedbackRecord = await findFeedbackByIdempotencyKey(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), openRecord.idempotencyKey) ?? openRecord
+    effectiveFeedbackDigest = linkedFeedbackRecord.digest
+  }
+  if (effectiveFeedbackDigest) {
+    if (!linkedFeedbackRecord) linkedFeedbackRecord = await readFeedbackByDigest(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), effectiveFeedbackDigest)
+    if (!linkedFeedbackRecord) throw new Error('feedback record not found: ' + effectiveFeedbackDigest)
+    const lkg = util.isPlainObject(state.integration) && util.isPlainObject(state.integration.lastKnownGood) ? state.integration.lastKnownGood : null
+    reopenBypass = core.classifyFeedbackAuthority(lkg, linkedFeedbackRecord.baseInputDigest, linkedFeedbackRecord.baseManifestDigest) === 'granted' ? 'applied' : 'not-applied'
+  }
+
+  const perTarget = {}
+  for (const target of targets) {
+    if (hasMulti && triage) {
+      const items = (Array.isArray(triage.items) ? triage.items : []).filter((item) => (Array.isArray(item?.ownerNodeIds) ? item.ownerNodeIds : []).includes(target))
+      perTarget[target] = {
+        affectedContributionIds: [...new Set(items.flatMap((item) => Array.isArray(item.affectedContributionIds) ? item.affectedContributionIds : []))].sort(),
+        projectCriteria: [...new Set(items.flatMap((item) => Array.isArray(item.affectedCriteria) ? item.affectedCriteria : []))].sort(),
+        problem: 'User feedback ' + String(triage.feedbackId).slice(0, 12) + ' (triage ' + String(triage.digest).slice(0, 12) + '): ' + (items.map((item) => item.id).join(', ') || 'closure target'),
+        requiredChange: items.map((item) => item.requiredChange).filter(Boolean).join(' '),
+        acceptanceChecks: [...new Set(items.flatMap((item) => Array.isArray(item.acceptanceChecks) ? item.acceptanceChecks : []))].sort(),
+      }
+    } else {
+      perTarget[target] = {
+        affectedContributionIds: Array.isArray(request.affectedContributionIds) ? request.affectedContributionIds : [],
+        projectCriteria: Array.isArray(request.projectCriteria) ? request.projectCriteria : [],
+        problem: request.problem ?? '',
+        requiredChange: request.requiredChange ?? '',
+        acceptanceChecks: Array.isArray(request.acceptanceChecks) ? request.acceptanceChecks : [],
+      }
+    }
+  }
+
+  // One canonical request file per direct target (sorted). supersedes links
+  // the target's current acceptance receipt; old receipts are never mutated.
+  const requestsDir = pathutil.join(pathutil.dirname(plan.path), 'revision-requests')
+  const requests = []
+  let createdAny = false
+  for (const target of targets) {
+    const priorReceipt = Array.isArray(stateNodes[target]?.receipts) ? stateNodes[target].receipts[0] : undefined
+    const supersedes = typeof priorReceipt === 'string' && priorReceipt ? [priorReceipt] : []
+    const fullRequest = {
+      projectId,
+      nodeId: target,
+      epoch: baseEpoch,
+      affectedContributionIds: perTarget[target].affectedContributionIds,
+      projectCriteria: perTarget[target].projectCriteria,
+      problem: perTarget[target].problem,
+      requiredChange: perTarget[target].requiredChange,
+      acceptanceChecks: perTarget[target].acceptanceChecks,
+      supersedes,
+      feedbackDigest: effectiveFeedbackDigest,
+      triageDigest,
+      ...(reopenBypass !== null ? { judgeQuorumBypass: reopenBypass } : {}),
+    }
+    if (!hasMulti && util.isPlainObject(args.upstreamAttribution)) fullRequest.upstreamAttribution = args.upstreamAttribution
+    const requestDigest = core.revisionRequestDigest(fullRequest)
+    const marker = core.revisionRequestMarker(projectId, baseEpoch, target, requestDigest)
+    const filePath = pathutil.join(requestsDir, target + '-' + baseEpoch + '-' + requestDigest + '.json')
+    let created = false
+    // Replay convergence: the digest identifies the request independently of
+    // the epoch slot in the file name. A retry after the integration epoch
+    // advanced (or after receipts rotated) finds the existing file and never
+    // re-resets an already re-opened node.
+    let resolvedPath = filePath
+    let storedRecord = null
+    const existingEntry = (await fops.listDir(requestsDir)).find((entry) => !entry.dir && entry.name.startsWith(target + '-') && entry.name.endsWith('-' + requestDigest + '.json'))
+    if (existingEntry) {
+      resolvedPath = pathutil.join(requestsDir, existingEntry.name)
+      storedRecord = await fops.readJson(resolvedPath)
+    } else {
+      try {
+        await fops.writeTextNew(filePath, JSON.stringify({ ...fullRequest, requestDigest, marker, createdAt: new Date().toISOString() }, null, 2) + '\n')
+        created = true
+      } catch (error) {
+        if (!util.isAlreadyExistsError(error)) throw error
+        storedRecord = await fops.readJson(filePath)
+      }
+    }
+    const canonicalRecord = util.isPlainObject(storedRecord) ? storedRecord : { ...fullRequest, requestDigest, marker }
+    createdAny = createdAny || created
+    requests.push({
+      nodeId: target,
+      created,
+      requestDigest: canonicalRecord.requestDigest ?? requestDigest,
+      marker: canonicalRecord.marker ?? marker,
+      commentBody: core.revisionCommentBody(canonicalRecord, canonicalRecord.marker ?? marker),
+      requestPath: pathutil.relativePath(baseDir, resolvedPath),
+      supersedes: Array.isArray(canonicalRecord.supersedes) ? canonicalRecord.supersedes : supersedes,
     })
-    : await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
-  return {
+  }
+
+  // Replay convergence with crash safety (plan §8.3 "one state transaction"):
+  // request files are durable intent, but the state reset must actually be
+  // applied. When a retry finds the files already written, detect per target
+  // whether the reset still needs to run and reset ONLY those targets and
+  // their dependency closure — a target whose superseded receipt has rotated
+  // (re-accepted since) is never re-reset or re-bumped.
+  let targetsNeedingReset = [...targets]
+  if (!createdAny) {
+    targetsNeedingReset = []
+    for (const target of targets) {
+      const requestFor = requests.find((entry) => entry.nodeId === target)
+      const supersedesList = Array.isArray(requestFor?.supersedes) ? requestFor.supersedes : []
+      const entry = util.isPlainObject(stateNodes[target]) ? stateNodes[target] : {}
+      const stillCarriesSuperseded = supersedesList.length > 0
+        && Array.isArray(entry.receipts)
+        && typeof entry.receipts[0] === 'string'
+        && entry.receipts[0] === supersedesList[0]
+      // No prior receipt: pre-reset state looks like done with an old
+      // runDir/hasFinal still set (canonical entries always carry
+      // receipts: [], so the pre-reset signal is the stale run state).
+      const preResetWithoutReceipt = supersedesList.length === 0
+        && entry.status === 'done'
+        && ((typeof entry.runDir === 'string' && entry.runDir !== '') || entry.hasFinal === true)
+      if (stillCarriesSuperseded || preResetWithoutReceipt) targetsNeedingReset.push(target)
+    }
+  }
+  const appliedReset = targetsNeedingReset.length > 0
+
+  let reset
+  if (appliedReset) {
+    if (!hasMulti) {
+      reset = await resetDownstreamState(fops, baseDir, plan.plan, targets[0], {
+        artifactRoot: plan.artifactRoot,
+        ...(util.isPlainObject(args.resetOptions) ? args.resetOptions : {}),
+        metadata: { ...(util.isPlainObject(args.resetOptions?.metadata) ? args.resetOptions.metadata : {}), created: true, sourceEventDigest: requests[0].requestDigest },
+      })
+    } else {
+      // Batched single-transaction reset (plan §8.3): reset ONLY the closure
+      // of the targets that still need it (a partial replay must not
+      // re-reset already re-accepted targets), nodeRevision +1 on those
+      // direct targets only, dependents hold the FULL blocker set, unrelated
+      // completed nodes preserved, integration epoch bumped.
+      const resetClosure = core.computeReopenClosure(plan.plan, targetsNeedingReset)
+      const now = new Date().toISOString()
+      const nodes = { ...stateNodes }
+      for (const id of resetClosure.closure) {
+        const entry = util.isPlainObject(nodes[id]) ? nodes[id] : {}
+        const isUserBlocked = entry.status === 'blocked'
+        const isTarget = targetsNeedingReset.includes(id)
+        const nextStatus = isUserBlocked ? 'blocked' : 'todo'
+        const blockerSet = resetClosure.blockers[id] ?? []
+        const keepHolds = isTarget || isUserBlocked
+        const nextHolds = keepHolds
+          ? (Array.isArray(entry.causalHolds) ? entry.causalHolds : [])
+          : [{ kind: 'causal-hold', nodeId: id, blockedBy: blockerSet, reason: 'upstream revision requested (feedback reopen); await fresh acceptance', sourceEventDigest: null }]
+        nodes[id] = {
+          ...entry,
+          status: nextStatus,
+          runDir: '',
+          runStatus: '',
+          currentStep: '',
+          currentPass: null,
+          hasFinal: false,
+          finalCommentId: '',
+          receipts: [],
+          nodeRevision: isTarget ? (Number(entry.nodeRevision) || 1) + 1 : (Number(entry.nodeRevision) || 1),
+          causalHolds: nextHolds,
+          updatedAt: now,
+        }
+        if (typeof state.project?.linearProjectId === 'string' && state.project.linearProjectId.trim()) {
+          nodes[id].projectionStatus = 'pending'
+          nodes[id].linearProjection = { projectId: state.project.linearProjectId, nodeId: id, status: nextStatus, blockedBy: nextHolds.flatMap((hold) => hold.blockedBy ?? []), reason: nextHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: now }
+        }
+      }
+      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+      // Monotonic: a stale caller-supplied epoch can never rewind the
+      // integration epoch (plan §8.3: new epoch = current + 1).
+      integration.epoch = Math.max(Number(state.integration?.epoch) || 0, baseEpoch) + 1
+      if (effectiveFeedbackDigest && linkedFeedbackRecord) {
+        // Every status change writes a NEW immutable version (phase-5
+        // discipline): the journal pointer advances to a real `resolving`
+        // record, never a status the record does not carry.
+        const resolving = core.makeRecord('user-feedback', core.feedbackVersion(linkedFeedbackRecord, { status: 'resolving' }))
+        await writeFeedbackRecord(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), resolving, resolving.digest + '.json')
+        const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === effectiveFeedbackDigest ? { feedbackId: resolving.digest, status: 'resolving' } : entry))
+        if (!pointers.some((entry) => entry?.feedbackId === resolving.digest)) pointers.push({ feedbackId: resolving.digest, status: 'resolving' })
+        integration.feedback = pointers
+      }
+      state.integration = integration
+      state.nodes = nodes
+      state.updatedAt = now
+      await fops.writeJson(loaded.path, state)
+      reset = { state, path: loaded.path, resetNodeIds: resetClosure.closure }
+    }
+  } else {
+    const fresh = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
+    reset = { state: fresh.state, path: fresh.path, resetNodeIds: [] }
+  }
+
+  const result = {
     ok: true,
-    created,
-    requestDigest,
-    marker,
-    commentBody: core.revisionCommentBody(fullRequest, marker),
-    requestPath: pathutil.relativePath(baseDir, filePath),
+    created: createdAny,
+    resetApplied: appliedReset,
+    epochBefore: baseEpoch,
+    epochAfter: appliedReset ? baseEpoch + 1 : currentEpoch,
+    requests,
     resetNodes: reset.resetNodeIds ?? [],
     state: reset.state,
     consumerNodeId,
-    retargetedTo,
+    retargetedTo: targets[0],
     nodeState: 'revision_requested',
     integrationState: 'blocked_on_revisions',
   }
+  if (hasMulti) {
+    result.targets = targets
+    result.closure = closure.closure
+    result.blockers = closure.blockers
+  } else {
+    result.requestDigest = requests[0].requestDigest
+    result.marker = requests[0].marker
+    result.commentBody = requests[0].commentBody
+    result.requestPath = requests[0].requestPath
+  }
+  return result
 }
 
 // Planning-mode scaffold for the planning loop's blind judging: compare-and-create
@@ -4834,7 +5462,7 @@ async function ensurePlanningScaffold(fops, baseDir, runDir, run, pass, judgeCou
 
 scoring.anonymizeCandidates = async function (fops, params) {
   const runDir = pathutil.resolve(params.runDir)
-  const pass = util.requiredPositiveInteger(params.pass, 'pass')
+  const pass = util.requiredNonNegativeInteger(params.pass, 'pass')
   const judgeCount = util.requiredPositiveInteger(params.judgeCount, 'judgeCount')
   const candidateIds = util.nonEmptyStringArray(params.candidateIds, ['A', 'B', 'AB'])
   const { run, contractFile } = await readRunAndDigest(fops, runDir)
@@ -4877,7 +5505,7 @@ scoring.anonymizeCandidates = async function (fops, params) {
     judgeCount,
     candidateIds,
     candidatePaths: effectiveCandidatePaths,
-    pathsCanonical: true,
+    judgeContext: typeof params.judgeContext === 'string' ? params.judgeContext : '',
     contents,
     anonymizedLabels: params.anonymizedLabels,
     seed: params.seed ?? '',
@@ -4887,26 +5515,15 @@ scoring.anonymizeCandidates = async function (fops, params) {
     runDigest: computeRunDigest(effectiveRun, contractFile),
     artifactFormat,
   })
+  // Maps stay inside the run dir (the resume gate, dispatch, and checklist
+  // all resolve them there), but they are COORDINATOR-only by declared scope:
+  // judge tasks narrow their readRoots to the exact packet file, so the
+  // reversible map is outside every judge's declared read surface (plan
+  // §6.5). The harness cannot enforce read roots today — this is declared +
+  // prompt defense, stated honestly in the role packet.
   for (const entry of built.judges) {
     await fops.writeText(pathutil.resolveInside(runDir, entry.packetPath), entry.packetText)
-    const map = {
-      pass,
-      judge: entry.judge,
-      labels: entry.anonymizedToOriginal ? Object.keys(entry.anonymizedToOriginal) : [],
-      anonymizedToOriginal: entry.anonymizedToOriginal,
-      originalToAnonymized: entry.originalToAnonymized,
-      runDigest: built.runDigest,
-      passDigest: built.passDigest,
-      candidateSetDigest: built.candidateSetDigest,
-      judgeCount: built.judges.length > 0 ? judgeCount : undefined,
-      pathsCanonical: true,
-      candidatePaths: effectiveCandidatePaths,
-      createdAt: new Date().toISOString(),
-    }
-    // Hash the exact written map payload, excluding the volatile timestamp.
-    const { createdAt, ...mapPayload } = map
-    const mapHash = core.sha256Text(core.stableStringify(mapPayload))
-    await fops.writeJson(pathutil.resolveInside(runDir, entry.mapPath), map)
+    await fops.writeJson(pathutil.resolveInside(runDir, entry.mapPath), entry.map)
   }
   return {
     runDir,
@@ -4916,36 +5533,21 @@ scoring.anonymizeCandidates = async function (fops, params) {
     runDigest: built.runDigest,
     passDigest: built.passDigest,
     candidateSetDigest: built.candidateSetDigest,
-    judges: built.judges.map((entry) => {
-      const map = {
-        pass,
-        judge: entry.judge,
-        labels: entry.anonymizedToOriginal ? Object.keys(entry.anonymizedToOriginal) : [],
-        anonymizedToOriginal: entry.anonymizedToOriginal,
-        originalToAnonymized: entry.originalToAnonymized,
-        runDigest: built.runDigest,
-        passDigest: built.passDigest,
-        candidateSetDigest: built.candidateSetDigest,
-        judgeCount,
-        pathsCanonical: true,
-        candidatePaths: effectiveCandidatePaths,
-        createdAt: entry.createdAt ?? new Date().toISOString(),
-      }
-      const { createdAt, ...mapPayload } = map
-      return {
-        judge: entry.judge,
-        packetPath: entry.packetPath,
-        mapPath: entry.mapPath,
-        packetHash: entry.packetHash,
-        mapHash: core.sha256Text(core.stableStringify(mapPayload)),
-        packetRef: entry.packetRef,
-        mapRef: entry.mapRef,
-      }
-    }),
+    contextDigest: built.contextDigest,
+    judges: built.judges.map((entry) => ({
+      judge: entry.judge,
+      packetPath: entry.packetPath,
+      mapPath: entry.mapPath,
+      packetHash: entry.packetHash,
+      mapHash: entry.mapHash,
+      // Flat typed dispatch primitives for judge spawning (plan §6.5).
+      dispatch: entry.dispatch,
+    })),
     candidateIdentityScrubbed: true,
+    provenanceStripped: built.provenanceStripped,
     scannedPatterns: built.scannedPatterns,
     findings: built.findings,
-    instruction: 'Use each judge_N_candidates.md as the anonymized report block; pass the typed packetRef to judge spawning. Candidate/report A/B/AB self-identifiers are scrubbed; do not include judge_N_map.json in judge prompts.',
+    instruction: 'Use each judge_NN_candidates.md as the anonymized report block; pass the flat dispatch primitives (judgePacketPath, judgePacketHash, pass, judge, judgeCount, runDigest, contextDigest) to judge spawning. Candidate/report A/B/AB self-identifiers are scrubbed; do not include judge_NN_map.json in judge prompts.',
   }
 }
 
@@ -4969,7 +5571,7 @@ async function latestScoredPass(fops, runDirAbs) {
   for (const entry of entries) {
     if (!entry.dir || !/^pass_\d{2,}$/.test(entry.name)) continue
     const pass = Number(entry.name.slice('pass_'.length))
-    if (!Number.isInteger(pass) || pass <= 0) continue
+    if (!Number.isInteger(pass) || pass < 0) continue
     try {
       if (!await fops.exists(pathutil.join(runDirAbs, entry.name, 'result.json'))) continue
     } catch {
@@ -4980,7 +5582,7 @@ async function latestScoredPass(fops, runDirAbs) {
   return best
 }
 
-// ── init_run override: v2 contract binding (plan §4.3) ─────────────────────
+// ── init_run override: canonical contract binding ───────────────────────────
 
 const _initRun = lifecycle.initRun
 lifecycle.initRun = async function (fops, params, presetConfigPath) {
@@ -4989,7 +5591,7 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
   const runDir = pathutil.resolve(baseDir, result.runDir)
   const bound = typeof params.projectId === 'string' && params.projectId.trim() && typeof params.nodeId === 'string' && params.nodeId.trim()
   if (!bound) {
-    return { ...result, contract: null, unbound: true, instruction: 'Legacy unbound run: readable and resumable, but it cannot claim v2 mechanical acceptance (plan §4.3).' }
+    return { ...result, contract: null, unbound: true, instruction: 'Unbound run (local brief): readable and resumable, but it cannot claim contract-bound mechanical acceptance.' }
   }
   const projectId = params.projectId.trim()
   const nodeId = params.nodeId.trim()
@@ -4999,13 +5601,9 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
   if (!validation.ok) {
     throw new Error('Cannot bind run to node: approved plan is invalid for new execution: ' + validation.errors.slice(0, 5).join('; ') + '. Run autoresearch_migration_diagnostic and approve a new plan revision before executing.')
   }
-  if (validation.schemaVersion !== core.PLAN_SCHEMA_VERSION_V2) {
-    throw new Error('Cannot bind a new run to a v1 plan: execution is blocked until an approved v2 plan revision exists (plan §4.3 compatibility). Run autoresearch_migration_diagnostic.')
-  }
   const contract = validation.contracts[nodeId]
   if (!contract) throw new Error('Unknown node id for contract binding: ' + nodeId)
   const contractFile = {
-    schemaVersion: 2,
     kind: 'node-contract',
     projectId,
     projectName: plan.plan.projectName ?? '',
@@ -5014,10 +5612,6 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
     planRevision: validation.revision,
     contractDigest: contract.digest,
     artifactFormat: contract.artifactFormat,
-    // Plan WS4 (v8): copy the exposure marker from the approved plan so the
-    // bound run can distinguish new-policy from frozen-adapter publishing
-    // even if the plan file later revises. Marker absent (null) = legacy.
-    exposurePolicyVersion: util.isPlainObject(plan.plan.projectContract) && plan.plan.projectContract.exposurePolicyVersion === 1 ? 1 : null,
     writtenAt: new Date().toISOString(),
     contract,
   }
@@ -5031,7 +5625,6 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
       nodeId,
       planRevision: validation.revision,
       contractDigest: contract.digest,
-      schemaVersion: 2,
       artifactFormat: contract.artifactFormat,
     }
     // The immutable contract budget is authoritative: overwrite the four
@@ -5081,7 +5674,7 @@ lifecycle.initRun = async function (fops, params, presetConfigPath) {
   })()
   return {
     ...result,
-    contract: run.contract ?? { bound: true, projectId, nodeId, planRevision: validation.revision, contractDigest: contract.digest, schemaVersion: 2, artifactFormat: contract.artifactFormat },
+    contract: run.contract ?? { bound: true, projectId, nodeId, planRevision: validation.revision, contractDigest: contract.digest, artifactFormat: contract.artifactFormat },
     unbound: false,
     tempCleanup: cleanupReport,
     instruction: 'Contract-bound run: node-contract.json written with digest ' + contract.digest + '. Every role task, acceptance, and finalization is bound to this contract.',
@@ -5130,40 +5723,34 @@ async function publishFinalDeliverables(fops, baseDir, runDir, run, contractFile
   return published
 }
 
-// ── output policy v8 (plan WS4; exposure-driven, format-agnostic) ──────────
+// ── output policy (canonical; exposure-driven, format-agnostic) ────────────
 // finalize is one self-consistent finish step:
 //   1. Journal sync — after the acceptance gate passes, MERGE into the
 //      state.json node entry (status done, runDir, runStatus complete,
 //      receipts triple, updatedAt). Every other field is preserved; the write
 //      is idempotent (only on change).
-//   2. Project-level publish to outputs/<projectId>/ — EXPOSURE-DRIVEN. Only
-//      what the approved contract explicitly exposes is published:
-//        - new-policy plans (projectContract.exposurePolicyVersion: 1): the
-//          explicit deliverables list (safe relative paths, optional
-//          "label: path (note)" specs), the bounded source-support closure of
-//          every exposed TeX source, the rebuild closure + bibliography union
-//          ONLY when rebuildable: true, and exactly the requested
-//          diagnosticMappings under audit/. No automatic primaries, no
-//          automatic closure for non-exposed sources, no automatic audit set.
-//          deliverables: [] without mappings is a legitimate no-exposure.
-//        - approved legacy plans (marker absent): the FROZEN adapter
-//          publishes ['final.tex','final.pdf'] (TeX) or ['final.md']
-//          (markdown) with sourceRule 'legacy-adapter'; no companions,
-//          closure, bib union, or audit set. An explicit empty list skips.
+//   2. Project-level publish to outputs/<projectId>/ — EXPOSURE-DRIVEN. The
+//      explicit projectContract.deliverables list is the sole exposure
+//      request (safe relative paths, optional "label: path (note)" specs),
+//      plus the bounded source-support closure of every exposed TeX source,
+//      the rebuild closure + bibliography union ONLY when rebuildable: true,
+//      and exactly the requested diagnosticMappings under audit/. No
+//      automatic primaries, no automatic closure for non-exposed sources, no
+//      automatic audit set. deliverables: [] without mappings is a
+//      legitimate no-exposure.
 //      The publish is TRANSACTIONAL: a hidden owner-marked staging sibling
 //      under the outputs parent, a rollback journal with backups of prior
-//      managed files, the MANIFEST v8 written last, unmanaged destination
+//      managed files, the MANIFEST written last, unmanaged destination
 //      files never pruned or clobbered, and a same-hash re-finalize that
 //      changes no bytes and no timestamps.
-//   3. Per-issue outputs/<issueId>/ publishing applies to unbound/legacy
-//      runs only. A bound v2 non-integration run creates no visible folder;
-//      its artifact, receipt, and ledger stay in the hidden run directory
-//      until integration consumes them.
+//   3. Per-issue outputs/<issueId>/ publishing applies to unbound runs only.
+//      A bound canonical non-integration run creates no visible folder; its
+//      artifact, receipt, and ledger stay in the hidden run directory until
+//      integration consumes them.
 // A failed REQUESTED publish THROWS from finalize: the run stays in-progress
 // and repairable (journal already merged), never a false success.
 
 const PUBLISH_DENYLIST_EXT = ['.aux', '.log', '.fls', '.out', '.toc', '.bbl', '.blg', '.fdb_latexmk', '.synctex.gz']
-const BINARY_PUBLISH_EXT = /\.(pdf|png|jpe?g|gz)$/i
 
 // Build byproducts, previews, and candidate trees never enter the product set.
 function isDenylistedRelPath(rel) {
@@ -5284,7 +5871,8 @@ async function resolveGraphicsTargets(fops, masterDirAbs, texts) {
 
 // ── temp-file lifecycle (plan WS4 item 5) ──────────────────────────────────
 // Owner-marked scratch and staging directories carry a marker.json:
-//   { schema: 1, ownerId, runId, operation, state, createdAt, expiresAt, runDir? }
+//   { kind: 'publish-staging-marker', ownerId, runId, operation, state,
+//     createdAt, expiresAt, runDir? }
 // States: 'owned' (held by a live operation), 'committed' (publish installed
 // successfully; staging pending deletion), 'retained' (bounded failure
 // retention until expiresAt), 'consumed' (contents consumed; delete at the
@@ -5308,7 +5896,7 @@ export function tempStagingName(ownerId) {
 async function readTempMarker(fops, stagingDirAbs) {
   try {
     const marker = await fops.readJson(pathutil.join(stagingDirAbs, 'marker.json'))
-    if (util.isPlainObject(marker) && Number(marker.schema) === 1 && typeof marker.ownerId === 'string' && marker.ownerId) return marker
+    if (util.isPlainObject(marker) && marker.kind === 'publish-staging-marker' && typeof marker.ownerId === 'string' && marker.ownerId) return marker
     return null
   } catch {
     return null
@@ -5450,7 +6038,8 @@ async function removeTempTree(fops, baseDir, dirAbs) {
 // EXPOSURE-DRIVEN, format-agnostic. Reads only; the transactional copier is
 // a separate step so a failed preflight never touches the destination.
 //
-// mode 'new' (exposurePolicyVersion: 1):
+// Canonical exposure: the explicit projectContract.deliverables list is the
+// sole exposure request.
 //   declared  — the explicit deliverables list (parsed specs), resolved in
 //               the integration run dir, then node run dirs, then the
 //               workspace root. Reserved internal names error and point at
@@ -5464,10 +6053,8 @@ async function removeTempTree(fops, baseDir, dirAbs) {
 //               and the .bib union across the master + closure.
 //   audit     — exactly the requested diagnosticMappings (exact sourcePath,
 //               no filename-pattern or extension substitution).
-// mode 'legacy-adapter' (marker absent, frozen): ['final.tex','final.pdf']
-//   (TeX) or ['final.md'] (markdown), rule 'legacy-adapter', nothing else.
 //
-// Returns { ok, errors, warnings, mode, closureSource, entries: [{
+// Returns { ok, errors, warnings, closureSource, entries: [{
 //   destinationPath, sourcePath (base-relative), sourceAbs, rule, hash,
 //   requiredBy, label, note }] }.
 
@@ -5475,7 +6062,6 @@ const RESERVED_INTERNAL_NAMES = new Set(['output.tex', 'output.pdf', 'acceptance
 
 async function computePublishSet(params) {
   const { fops, baseDir, runDirAbs, nodeRunDirs = [] } = params
-  const mode = params.mode === 'legacy-adapter' ? 'legacy-adapter' : 'new'
   const isTex = params.isTex !== false
   const errors = []
   const warnings = []
@@ -5545,21 +6131,7 @@ async function computePublishSet(params) {
       note: entry.note ?? null,
     }))
 
-  // ── legacy adapter (frozen) ──────────────────────────────────────────────
-  if (mode === 'legacy-adapter') {
-    const names = isTex ? ['final.tex', 'final.pdf'] : ['final.md']
-    for (const name of names) {
-      const abs = pathutil.join(runDirAbs, name)
-      if (!await regularFile(abs)) {
-        errors.push('legacy-adapter primary missing: ' + name + ' (expected at ' + pathutil.relativePath(baseDir, abs) + ')')
-        continue
-      }
-      await addEntry(name, abs, 'legacy-adapter', { requiredBy: 'legacy-adapter' })
-    }
-    return { ok: errors.length === 0, errors, warnings, mode, closureSource: 'none', entries: shape() }
-  }
-
-  // ── new policy: declared deliverables ────────────────────────────────────
+  // ── canonical: declared deliverables (the sole exposure request) ────────
   const specs = Array.isArray(params.deliverableSpecs) ? params.deliverableSpecs : []
   const mappings = Array.isArray(params.diagnosticMappings) ? params.diagnosticMappings : []
   const rebuildable = params.rebuildable === true
@@ -5761,7 +6333,7 @@ async function computePublishSet(params) {
     })
   }
 
-  return { ok: errors.length === 0, errors, warnings, mode, closureSource, entries: shape() }
+  return { ok: errors.length === 0, errors, warnings, closureSource, entries: shape() }
 }
 
 // ── transactional publish (plan WS4 v8 item 4) ─────────────────────────────
@@ -5886,7 +6458,7 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
   // Staging: hidden owner-marked sibling under the outputs parent (same fs).
   await fops.ensureDir(stagingAbs)
   const marker = {
-    schema: 1,
+    kind: 'publish-staging-marker',
     ownerId: runId,
     runId,
     operation: 'publish-transaction',
@@ -5903,7 +6475,7 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
   try { priorManifestHash = await hashFile(fops, manifestDestAbs) } catch { priorManifestHash = '' }
   snapshot.push({ path: 'MANIFEST.json', hash: priorManifestHash })
   const journal = {
-    schema: 1,
+    kind: 'publish-staging-marker',
     ownerId: runId,
     runId,
     projectId,
@@ -5912,19 +6484,23 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
     backups: [],
     installedNew: [],
   }
-  await fops.writeJson(pathutil.join(stagingAbs, 'journal.json'), journal)
+  const journalPath = pathutil.join(stagingAbs, 'journal.json')
+  // Write-ahead journaling: every backups/installedNew mutation is persisted
+  // BEFORE the corresponding destination mutation, so a crash mid-install
+  // leaves a journal the recovery path can actually restore from (plan §8.4:
+  // last-known-good survives until the replacement publication commits).
+  const persistJournal = async () => { await fops.writeJson(journalPath, journal) }
+  await persistJournal()
 
-  // Stage every entry and hash-verify the staged copy.
+  // Stage every entry and hash-verify the staged copy. Byte-exact copying
+  // for EVERY file (plan §9): files are hashed as bytes and must publish
+  // byte-identically; a readText→writeText roundtrip would corrupt non-UTF8
+  // closures. Text inspection is never required for publication.
   for (const entry of computed.entries) {
     const stagedAbs = pathutil.join(filesAbs, entry.destinationPath)
     await fops.ensureDir(pathutil.dirname(stagedAbs))
-    if (BINARY_PUBLISH_EXT.test(entry.destinationPath) || BINARY_PUBLISH_EXT.test(pathutil.basename(entry.sourceAbs))) {
-      if (typeof fops.copy !== 'function') return await abortStaged(fops, stagingAbs, marker, 'binary deliverable copy is unavailable: ' + entry.destinationPath)
-      await fops.copy(entry.sourceAbs, stagedAbs)
-    } else {
-      const text = await fops.readText(entry.sourceAbs)
-      await fops.writeText(stagedAbs, text)
-    }
+    if (typeof fops.copy !== 'function') return await abortStaged(fops, stagingAbs, marker, 'deliverable copy is unavailable: ' + entry.destinationPath)
+    await fops.copy(entry.sourceAbs, stagedAbs)
     const stagedHash = await hashFile(fops, stagedAbs)
     if (stagedHash !== entry.hash) return await abortStaged(fops, stagingAbs, marker, 'staged copy hash mismatch: ' + entry.destinationPath)
   }
@@ -5956,17 +6532,17 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
         if (snapshotHash !== undefined && snapshotHash !== '' && backupHash !== snapshotHash && existingHash !== '') {
           throw new Error('backup verification failed for ' + entry.destinationPath + ' (hash drift during install)')
         }
-        if (!journal.backups.includes(entry.destinationPath)) journal.backups.push(entry.destinationPath)
+        if (!journal.backups.includes(entry.destinationPath)) {
+          journal.backups.push(entry.destinationPath)
+          await persistJournal()
+        }
       } else {
         journal.installedNew.push(entry.destinationPath)
+        await persistJournal()
       }
       await fops.ensureDir(pathutil.dirname(destAbs))
-      if (BINARY_PUBLISH_EXT.test(entry.destinationPath) || BINARY_PUBLISH_EXT.test(pathutil.basename(entry.sourceAbs))) {
-        await fops.copy(pathutil.join(filesAbs, entry.destinationPath), destAbs)
-      } else {
-        const text = await fops.readText(pathutil.join(filesAbs, entry.destinationPath))
-        await fops.writeText(destAbs, text)
-      }
+      if (typeof fops.copy !== 'function') throw new Error('deliverable copy is unavailable: ' + entry.destinationPath)
+      await fops.copy(pathutil.join(filesAbs, entry.destinationPath), destAbs)
       const verified = await hashFile(fops, destAbs)
       if (verified !== entry.hash) throw new Error('published deliverable hash mismatch: ' + entry.destinationPath)
       copied.push(entry.destinationPath)
@@ -5982,7 +6558,10 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
       const backedUpAbs = pathutil.join(backupAbs, path)
       await fops.ensureDir(pathutil.dirname(backedUpAbs))
       await fops.copy(destAbs, backedUpAbs)
-      if (!journal.backups.includes(path)) journal.backups.push(path)
+      if (!journal.backups.includes(path)) {
+        journal.backups.push(path)
+        await persistJournal()
+      }
       await fops.remove(destAbs)
     }
     // MANIFEST v8 last.
@@ -5990,14 +6569,12 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
       .filter((item) => item.path !== 'MANIFEST.json' && !newSet.has(item.path) && !journal.installedNew.includes(item.path) && priorManaged.has(item.path) === false)
       .map((item) => ({ path: item.path, hash: item.hash }))
     const manifest = {
-      schemaVersion: 1,
-      kind: 'project-publish-manifest',
-      policyVersion: computed.mode === 'legacy-adapter' ? 'legacy-adapter' : 1,
+      kind: 'publish-manifest',
       projectId,
       planRevision: opts.planRevision ?? null,
       integrationRun: typeof opts.integrationRunRel === 'string' ? opts.integrationRunRel : null,
       artifactFormat: typeof opts.artifactFormat === 'string' ? opts.artifactFormat : null,
-      rebuildable: computed.mode === 'new' ? Boolean(opts.rebuildable) : false,
+      rebuildable: Boolean(opts.rebuildable),
       entries: computed.entries.map((entry) => {
         const item = {
           path: entry.destinationPath,
@@ -6031,9 +6608,15 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
         const backedUpAbs = pathutil.join(backupAbs, 'MANIFEST.json')
         await fops.ensureDir(pathutil.dirname(backedUpAbs))
         await fops.copy(manifestDestAbs, backedUpAbs)
-        if (!journal.backups.includes('MANIFEST.json')) journal.backups.push('MANIFEST.json')
+        if (!journal.backups.includes('MANIFEST.json')) {
+          journal.backups.push('MANIFEST.json')
+          await persistJournal()
+        }
       }
-      if (!journal.installedNew.includes('MANIFEST.json')) journal.installedNew.push('MANIFEST.json')
+      if (!journal.installedNew.includes('MANIFEST.json')) {
+        journal.installedNew.push('MANIFEST.json')
+        await persistJournal()
+      }
       await fops.copy(stagedManifestAbs, manifestDestAbs)
     }
     await fops.writeJson(pathutil.join(stagingAbs, 'journal.json'), journal)
@@ -6043,7 +6626,6 @@ async function publishProjectDeliverables(fops, baseDir, outputRoot, projectId, 
       ok: true,
       errors: [],
       warnings,
-      mode: computed.mode,
       closureSource: computed.closureSource,
       outputDir: pathutil.relativePath(baseDir, projectDirAbs),
       published,
@@ -6109,7 +6691,7 @@ function isoNowPlus(ms) {
 // preserving every other field. Idempotent — write only on change.
 async function recordNodeFailure(fops, baseDir, contractFile, reason) {
   try {
-    const loaded = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+    const loaded = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || '.research-agent')
     if (!loaded.ok) return { ok: false, skipped: true }
     return await projectstate.failNode(fops, baseDir, contractFile.projectId, contractFile.nodeId, String(reason).slice(0, 1000))
   } catch {
@@ -6117,8 +6699,8 @@ async function recordNodeFailure(fops, baseDir, contractFile, reason) {
   }
 }
 
-async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptance, outputHash) {
-  const artifactRoot = typeof contractFile.artifactRoot === 'string' && contractFile.artifactRoot ? contractFile.artifactRoot : 'research-agent'
+async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptance, outputHash, contextDigest = null) {
+  const artifactRoot = typeof contractFile.artifactRoot === 'string' && contractFile.artifactRoot ? contractFile.artifactRoot : '.research-agent'
   const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, artifactRoot)
   if (!loadedPlan.ok) {
     return { ok: true, action: 'skipped', reason: 'plan-unavailable: ' + loadedPlan.error }
@@ -6128,6 +6710,7 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
   const existing = util.isPlainObject(state.nodes?.[contractFile.nodeId])
     ? state.nodes[contractFile.nodeId]
     : projectstate.emptyState(loadedPlan.plan).nodes[contractFile.nodeId]
+  const now = new Date().toISOString()
   const desiredRest = {
     status: 'done',
     runDir: pathutil.relativePath(baseDir, runDirAbs),
@@ -6139,9 +6722,17 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
       pathutil.relativePath(baseDir, pathutil.join(runDirAbs, 'acceptance.json')),
     ],
   }
+  if (core.isContextDigest(contextDigest)) {
+    // Plan §7.4: completion is anchored to the Linear context digest the
+    // coordinator freshly queried — a pointer/checksum, never a copy of the
+    // block itself (plan §7.1).
+    desiredRest.contextDigest = contextDigest
+    desiredRest.contextDigestAt = now
+  }
   // Idempotent: repeat finalize with an already-final entry is a no-op
-  // (updatedAt only moves when something else changes).
-  const alreadyCurrent = Object.keys(desiredRest).every((key) => core.stableStringify(existing[key]) === core.stableStringify(desiredRest[key]))
+  // (updatedAt only moves when something else changes). contextDigestAt is a
+  // timestamp anchor and never forces a rewrite on its own.
+  const alreadyCurrent = Object.keys(desiredRest).every((key) => key === 'contextDigestAt' || core.stableStringify(existing[key]) === core.stableStringify(desiredRest[key]))
   if (alreadyCurrent) {
     return { ok: true, action: 'current', nodeId: contractFile.nodeId }
   }
@@ -6151,7 +6742,26 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
   return { ok: true, action: 'merged', nodeId: contractFile.nodeId, path: pathutil.relativePath(baseDir, loadedState.path) }
 }
 
-// ── finalize_run override: v2 acceptance gate + output policy v8 ───────────
+// Plan §8.4: record the last-known-good integration pointer in the state
+// journal after a successful integration publish. Operational digests and
+// identifiers only — never a narrative copy of any Linear context.
+async function recordLastKnownGood(fops, baseDir, loadedPlan, { manifestDigest, inputDigest, runId }) {
+  const loaded = await projectstate.loadState(fops, baseDir, loadedPlan.plan.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+  const state = loaded.state
+  const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+  integration.lastKnownGood = {
+    manifestDigest: String(manifestDigest ?? ''),
+    inputDigest: typeof inputDigest === 'string' && inputDigest ? inputDigest : null,
+    publishedAt: new Date().toISOString(),
+    runId: String(runId ?? ''),
+  }
+  state.integration = integration
+  state.updatedAt = new Date().toISOString()
+  await fops.writeJson(loaded.path, state)
+  return integration.lastKnownGood
+}
+
+// ── finalize_run override: contract acceptance gate + output policy ────────
 
 const _finalizeRun = lifecycle.finalizeRun
 lifecycle.finalizeRun = async function (fops, params) {
@@ -6163,29 +6773,52 @@ lifecycle.finalizeRun = async function (fops, params) {
   let deliverables = []
   if (contractFile) {
     const acceptance = await loadAcceptance(fops, runDir)
-    // Plan WS1 (v8): consume the accepted artifact path from the contract;
-    // the legacy format default only applies when the contract has none.
+    // Consume the accepted artifact path from the contract; the
+    // format-based fallback is defensive for external (unvalidated)
+    // contract files only — canonical plans always carry artifactPath.
     const outputName = (typeof contractFile.contract?.outputContract?.artifactPath === 'string' && contractFile.contract.outputContract.artifactPath.trim())
       ? contractFile.contract.outputContract.artifactPath.trim()
       : (contractFile.artifactFormat === 'tex' ? 'output.tex' : 'final.md')
     const outputHash = await hashFile(fops, pathutil.resolveInside(runDir, outputName))
     if (!core.acceptanceIsCurrent(acceptance, contractFile.contractDigest, outputHash)) {
-      throw new Error('v2 run cannot finalize without a current successful acceptance receipt bound to the node-contract digest (plan §4.3). Call autoresearch_record_acceptance and retry.')
+      throw new Error('contract-bound run cannot finalize without a current successful acceptance receipt bound to the node-contract digest (plan §4.3). Call autoresearch_record_acceptance and retry.')
     }
-    // WS4 item 1: journal sync (merge/patch, never replace).
-    journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash)
+    // Reopen protection (plan §8.3): the journal entry's CURRENT run must be
+    // the run being finalized. A stale pre-reopen run (whose acceptance.json
+    // survived) cannot re-mark the node done or republish pre-repair output.
+    const finalizeState = await fops.readJson(projectstate.statePath(baseDir, contractFile.projectId, contractFile.artifactRoot || '.research-agent'))
+    const entryRunDir = util.isPlainObject(finalizeState?.nodes) && util.isPlainObject(finalizeState.nodes[contractFile.nodeId]) && typeof finalizeState.nodes[contractFile.nodeId].runDir === 'string'
+      ? finalizeState.nodes[contractFile.nodeId].runDir
+      : ''
+    const normalizedEntryRun = entryRunDir ? pathutil.normalize(absPath(baseDir, entryRunDir)) : ''
+    if (normalizedEntryRun !== pathutil.normalize(runDir)) {
+      throw new Error('stale-run finalize refused: the journal entry for node ' + contractFile.nodeId + ' points at ' + (entryRunDir || '(cleared)') + ' but finalize was called on ' + pathutil.relativePath(baseDir, runDir) + '. The node was reopened (plan §8.3); re-accept the current run first.')
+    }
+    // Plan §7.4: completion of a Linear-backed project is bound to the
+    // freshly queried Linear Current Node Context digest. The live freshness
+    // check happens at the completion projection (linear_project_node).
+    const linearBoundProject = util.isPlainObject(finalizeState?.project) && typeof finalizeState.project.linearProjectId === 'string' && finalizeState.project.linearProjectId.trim() !== ''
+    if (linearBoundProject && !core.isContextDigest(params.contextDigest)) {
+      throw new Error('linear-bound project cannot finalize without contextDigest: read the Linear issue with linear_get_node_context and pass the current Current Node Context block digest (plan §7.4).')
+    }
+    // WS4 item 1: journal sync (merge/patch, never replace). Non-integration
+    // nodes sync immediately; the INTEGRATION node syncs only AFTER a
+    // successful publish + last-known-good record — a failed publish must
+    // never leave the journal saying done.
     const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
     const outputRoot = typeof run?.outputRoot === 'string' && run.outputRoot.trim()
       ? run.outputRoot
       : typeof run?.config?.outputRoot === 'string' && run.config.outputRoot.trim()
         ? run.config.outputRoot
         : 'outputs'
-    // WS4 item 3: bound v2 runs never create per-issue output folders.
-    const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+    // WS4 item 3: contract-bound runs never create per-issue output folders.
+    const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || '.research-agent')
     if (!loadedPlan.ok) {
       throw new Error('Project publish blocked: cannot resolve the project plan for ' + contractFile.projectId + ': ' + loadedPlan.error + ' (the run stays in-progress and repairable)')
     }
-    if ((loadedPlan.plan.integrationId ?? 'integration') !== contractFile.nodeId) {
+    const isIntegrationNode = (loadedPlan.plan.integrationId ?? 'integration') === contractFile.nodeId
+    if (!isIntegrationNode) {
+      journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash, linearBoundProject ? params.contextDigest : null)
       projectPublish = { ok: true, skipped: true, reason: 'non-integration node: the project-level publish happens when the integration node finalizes' }
     } else {
       // Preflight BEFORE any filesystem operation (plan WS4 item 2).
@@ -6195,7 +6828,6 @@ lifecycle.finalizeRun = async function (fops, params) {
       const runId = typeof run?.issueId === 'string' && run.issueId ? run.issueId : pathutil.basename(runDir)
       const runRelDir = pathutil.relativePath(baseDir, runDir)
       const rawProject = util.isPlainObject(loadedPlan.plan.projectContract) ? loadedPlan.plan.projectContract : {}
-      const isNewPolicy = rawProject.exposurePolicyVersion === 1
       const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
       const nodeRunDirs = [{ nodeId: contractFile.nodeId, runDirAbs: pathutil.normalize(runDir) }]
       for (const node of loadedPlan.plan.nodes ?? []) {
@@ -6206,69 +6838,64 @@ lifecycle.finalizeRun = async function (fops, params) {
           nodeRunDirs.push({ nodeId: node.id, runDirAbs: pathutil.normalize(abs) })
         }
       }
-      if (isNewPolicy) {
-        if (!Array.isArray(rawProject.deliverables)) {
-          throw new Error('Project publish blocked: exposure-policy contract requires an explicit projectContract.deliverables array')
-        }
-        const specs = []
-        const specErrors = []
-        for (const entry of rawProject.deliverables) {
-          const parsed = core.parseDeliverableSpec(entry)
-          if (parsed.ok) specs.push(parsed)
-          else specErrors.push(parsed.error)
-        }
-        if (specErrors.length > 0) throw new Error('Project publish blocked: ' + specErrors.join('; '))
-        const mappings = Array.isArray(rawProject.diagnosticMappings) ? rawProject.diagnosticMappings : []
-        if (specs.length === 0 && mappings.length === 0) {
-          projectPublish = { ok: true, skipped: true, reason: 'explicit empty deliverables and no diagnostic mappings: nothing exposed', outputRoot: null }
-        } else {
-          const computed = await computePublishSet({
-            fops,
-            baseDir,
-            runDirAbs: pathutil.normalize(runDir),
-            nodeRunDirs,
-            mode: 'new',
-            isTex: contractFile.artifactFormat === 'tex',
-            deliverableSpecs: specs,
-            rebuildable: rawProject.rebuildable === true,
-            diagnosticMappings: mappings,
-            acceptance,
-          })
-          if (!computed.ok) throw new Error('Project publish blocked: ' + computed.errors.join('; '))
-          projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed, {
-            runId,
-            runRelDir,
-            planRevision: loadedPlan.plan?.revision ?? null,
-            artifactFormat: contractFile.artifactFormat,
-            rebuildable: rawProject.rebuildable === true,
-            integrationRunRel: runRelDir,
-          })
-          if (!projectPublish.ok) throw new Error('Project publish failed: ' + projectPublish.errors.join('; '))
-        }
+      if (!Array.isArray(rawProject.deliverables)) {
+        throw new Error('Project publish blocked: the canonical project contract requires an explicit projectContract.deliverables array')
+      }
+      const specs = []
+      const specErrors = []
+      for (const entry of rawProject.deliverables) {
+        const parsed = core.parseDeliverableSpec(entry)
+        if (parsed.ok) specs.push(parsed)
+        else specErrors.push(parsed.error)
+      }
+      if (specErrors.length > 0) throw new Error('Project publish blocked: ' + specErrors.join('; '))
+      const mappings = Array.isArray(rawProject.diagnosticMappings) ? rawProject.diagnosticMappings : []
+      if (specs.length === 0 && mappings.length === 0) {
+        projectPublish = { ok: true, skipped: true, reason: 'explicit empty deliverables and no diagnostic mappings: nothing exposed', outputRoot: null }
+        // Nothing was published; the node still finalizes its journal entry.
+        journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash, linearBoundProject ? params.contextDigest : null)
       } else {
-        // Frozen legacy adapter for approved marker-absent plans.
-        const rawDeliverables = rawProject.deliverables
-        const explicitEmpty = Array.isArray(rawDeliverables) && rawDeliverables.length === 0
-        if (explicitEmpty) {
-          projectPublish = { ok: true, skipped: true, reason: 'projectContract.deliverables is explicitly empty: no project publish', outputRoot: null }
-        } else {
-          const computed = await computePublishSet({
-            fops,
-            baseDir,
-            runDirAbs: pathutil.normalize(runDir),
-            nodeRunDirs,
-            mode: 'legacy-adapter',
-            isTex: contractFile.artifactFormat === 'tex',
-          })
-          if (!computed.ok) throw new Error('Project publish blocked: ' + computed.errors.join('; '))
-          projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed, {
+        const computed = await computePublishSet({
+          fops,
+          baseDir,
+          runDirAbs: pathutil.normalize(runDir),
+          nodeRunDirs,
+          isTex: contractFile.artifactFormat === 'tex',
+          deliverableSpecs: specs,
+          rebuildable: rawProject.rebuildable === true,
+          diagnosticMappings: mappings,
+          acceptance,
+        })
+        if (!computed.ok) throw new Error('Project publish blocked: ' + computed.errors.join('; '))
+        projectPublish = await publishProjectDeliverables(fops, baseDir, outputRoot, contractFile.projectId, computed, {
+          runId,
+          runRelDir,
+          planRevision: loadedPlan.plan?.revision ?? null,
+          artifactFormat: contractFile.artifactFormat,
+          rebuildable: rawProject.rebuildable === true,
+          integrationRunRel: runRelDir,
+        })
+        if (!projectPublish.ok) throw new Error('Project publish failed: ' + projectPublish.errors.join('; '))
+        // Plan §8.4: record the last-known-good integration for feedback
+        // authority gating (operational digests only; the published output
+        // itself stays in place — transactional publish, MANIFEST last,
+        // previous content preserved until a replacement commits).
+        const manifestText = await fops.readText(absPath(baseDir, pathutil.join(outputRoot, contractFile.projectId, 'MANIFEST.json')))
+        if (typeof manifestText === 'string' && manifestText) {
+          const rawInputDigest = typeof params.integrationInputDigest === 'string' ? params.integrationInputDigest.trim() : ''
+          if (rawInputDigest && !/^[0-9a-f]{64}$/.test(rawInputDigest)) {
+            throw new Error('integrationInputDigest must be a 64-hex integration input digest (from autoresearch_integration_preflight) or omitted.')
+          }
+          projectPublish.lastKnownGood = await recordLastKnownGood(fops, baseDir, loadedPlan, {
+            manifestDigest: core.sha256Text(manifestText),
+            inputDigest: rawInputDigest || null,
             runId,
-            runRelDir,
-            planRevision: loadedPlan.plan?.revision ?? null,
-            artifactFormat: contractFile.artifactFormat,
-            integrationRunRel: runRelDir,
           })
-          if (!projectPublish.ok) throw new Error('Project publish failed: ' + projectPublish.errors.join('; '))
+          // Journal sync AFTER a successful publish + LKG: a failed publish
+          // must never leave the integration node marked done (plan §8.4).
+          journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash, linearBoundProject ? params.contextDigest : null)
+        } else {
+          journalSync = await syncJournalNode(fops, baseDir, contractFile, runDir, acceptance, outputHash, linearBoundProject ? params.contextDigest : null)
         }
       }
     }
@@ -6281,7 +6908,7 @@ lifecycle.finalizeRun = async function (fops, params) {
   return {
     ...result,
     deliverables,
-    v2: contractFile ? { bound: true, gate: 'passed', contractDigest: contractFile.contractDigest, artifactFormat: contractFile.artifactFormat } : { bound: false, gate: 'legacy' },
+    contract: contractFile ? { bound: true, gate: 'passed', contractDigest: contractFile.contractDigest, artifactFormat: contractFile.artifactFormat } : { bound: false, gate: 'unbound' },
     journalSync,
     projectPublish,
   }
@@ -6314,7 +6941,7 @@ async function enrichReconciliationRow(fops, baseDir, plan, state, stateEntry, i
     ? await fops.readJson(pathutil.resolve(baseDir, pathutil.resolveInside(baseDir, stateEntry.runDir), 'run.json'))
     : undefined
   if (util.isPlainObject(run) && run.linear && run.linear.state === '') {
-    const fallback = core.legacyLinearStateFallback(run, {
+    const fallback = core.linearStateFallback(run, {
       nodeStateReceipt: (typeof stateEntry?.linearState === 'string' && stateEntry.linearState) ? stateEntry.linearState : '',
     })
     row.linearStateFallback = fallback
@@ -6433,13 +7060,18 @@ async function runBuildProbe(subprocessService, baseDir) {
 
 // ── node contract + receipt prepend for role tasks (plan §4.3) ─────────────
 
-async function buildRoleTaskBase(fops, baseDir, runDirInput) {
+async function buildRoleTaskBase(fops, baseDir, runDirInput, opts = {}) {
   const parts = []
   if (typeof runDirInput === 'string' && runDirInput.trim()) {
     const runDir = absPath(baseDir, runDirInput)
-    parts.push('Workspace root: ' + baseDir)
-    parts.push('AutoResearch run artifact root: ' + runDir)
-    parts.push('Resolve paths beginning with evidence/, pass_*, packets/, issue.md, comments.md, run.json, history.json, resume.md, or autoreason_loop_checklist.md relative to the run artifact root, not the workspace root.')
+    // Blind judging is declared packet-only (plan §6.5): the task base must
+    // not reveal the workspace/run roots or path-resolution hints that would
+    // make locating the reversible maps or the original candidates trivial.
+    if (!opts.omitRootHints) {
+      parts.push('Workspace root: ' + baseDir)
+      parts.push('AutoResearch run artifact root: ' + runDir)
+      parts.push('Resolve paths beginning with evidence/, pass_*, packets/, issue.md, comments.md, run.json, history.json, resume.md, or autoreason_loop_checklist.md relative to the run artifact root, not the workspace root.')
+    }
     const contractFile = await loadRunContract(fops, runDir)
     if (contractFile) {
       const contract = util.isPlainObject(contractFile.contract) ? contractFile.contract : null
@@ -6471,6 +7103,26 @@ async function buildRoleTaskBase(fops, baseDir, runDirInput) {
   return parts.join('\n')
 }
 
+function localCurrentTaskContextDigest({ runDigest, projectId, nodeId, contractDigest, planDigest, role, pass, inputs = [] }) {
+  return core.digestOf({
+    kind: 'local-current-task-context',
+    runDigest: String(runDigest ?? ''),
+    projectId: String(projectId ?? ''),
+    nodeId: String(nodeId ?? ''),
+    contractDigest: String(contractDigest ?? ''),
+    planDigest: String(planDigest ?? ''),
+    role: String(role ?? ''),
+    pass: Number.isInteger(pass) ? pass : 0,
+    inputs: inputs.map((input) => ({
+      name: String(input?.name ?? ''),
+      path: String(input?.path ?? ''),
+      hash: String(input?.hash ?? ''),
+      format: String(input?.format ?? ''),
+      producer: String(input?.producer ?? ''),
+    })),
+  })
+}
+
 function currentBoundContract(plan, contractFile, nodeId) {
   if (!util.isPlainObject(contractFile) || contractFile.projectId !== plan?.projectId || contractFile.nodeId !== nodeId) return false
   try {
@@ -6483,7 +7135,7 @@ function currentBoundContract(plan, contractFile, nodeId) {
 async function buildUpstreamContext(fops, baseDir, runDir, contractFile) {
   if (!contractFile?.projectId || !contractFile?.nodeId) return null
   const plan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot)
-  if (!plan.ok || plan.plan?.schemaVersion !== core.PLAN_SCHEMA_VERSION_V2 || !currentBoundContract(plan.plan, contractFile, contractFile.nodeId)) return null
+  if (!plan.ok || !core.isCanonicalPlanShape(plan.plan) || !currentBoundContract(plan.plan, contractFile, contractFile.nodeId)) return null
   const stateLoaded = await projectstate.loadState(fops, baseDir, contractFile.projectId, plan.plan, plan.artifactRoot)
   const run = await fops.readJson(pathutil.resolveInside(runDir, 'run.json'))
   const records = {}
@@ -6517,7 +7169,7 @@ async function buildUpstreamContext(fops, baseDir, runDir, contractFile) {
   })
 }
 
-async function readBacktrackingRequests(fops, baseDir, projectId, artifactRoot = 'research-agent') {
+async function readBacktrackingRequests(fops, baseDir, projectId, artifactRoot = '.research-agent') {
   const dirs = [projectstate.projectDir(baseDir, projectId, artifactRoot), projectstate.projectDir(baseDir, projectId, '.research-agent')]
   const requests = []
   const corruptFiles = []
@@ -6545,7 +7197,7 @@ function recordBacktrackingObservation(state, observation, configValue) {
   const next = observations.filter((entry) => entry?.dedupeKey !== key)
   next.push({ ...observation, dedupeKey: key, recordedAt: new Date().toISOString() })
   state.backtracking = {
-    schemaVersion: 1,
+    kind: 'backtracking-state',
     reopens: Array.isArray(previous.reopens) ? previous.reopens : [],
     counts: util.isPlainObject(previous.counts) ? previous.counts : { byUpstream: {}, byPair: {} },
     observations: next.slice(-config.maxObservations),
@@ -6625,15 +7277,15 @@ async function evaluateUpstreamBacktracking(fops, baseDir, args, configValue) {
   const plan = await projectstate.loadPlan(fops, baseDir, projectId, root.relativeRoot)
   if (!plan.ok) throw new Error(plan.error)
   const validation = core.validatePlan(plan.plan)
-  if (!validation.ok || plan.plan.schemaVersion !== core.PLAN_SCHEMA_VERSION_V2) {
-    return { decision: 'abstain', reason: 'causal attribution is available only for a valid v2 project plan.' }
+  if (!validation.ok || !core.isCanonicalPlanShape(plan.plan)) {
+    return { decision: 'abstain', reason: 'causal attribution is available only for a valid canonical project plan.' }
   }
   const stateLoaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
   const state = stateLoaded.state
   const backtrackingConfig = core.normalizeBacktrackingConfig(configValue)
   const candidates = Array.isArray(args.attributions) ? args.attributions : []
   if (candidates.length === 0) return null
-  if (!Number.isInteger(Number(args.pass)) || Number(args.pass) < 1) throw new Error('pass must be a positive integer when attributions are supplied.')
+  if (!Number.isInteger(Number(args.pass)) || Number(args.pass) < 0) throw new Error('pass must be a zero-based non-negative integer when attributions are supplied.')
   const pass = Number(args.pass)
   const consumerEntry = state.nodes?.[consumerNodeId]
   if (consumerEntry?.status !== 'done') return { decision: 'abstain', reason: 'consumer node is not currently accepted in the state journal.' }
@@ -6718,7 +7370,7 @@ async function evaluateUpstreamBacktracking(fops, baseDir, args, configValue) {
         const recorded = previousReopens.some((entry) => entry?.dedupeKey === reopenKey)
         const reopens = previousReopens.filter((entry) => entry?.dedupeKey !== reopenKey)
         reopens.push({ ...upstreamAttribution, dedupeKey: reopenKey })
-        nextState.backtracking = { schemaVersion: 1, reopens, counts: { byUpstream: summary.byUpstream, byPair: summary.byPair }, observations: Array.isArray(previous.observations) ? previous.observations : [] }
+        nextState.backtracking = { kind: 'backtracking-state', reopens, counts: { byUpstream: summary.byUpstream, byPair: summary.byPair }, observations: Array.isArray(previous.observations) ? previous.observations : [] }
         const currentEpoch = Number(nextState.integration?.epoch) || epoch
         const epochAfter = metadata.created || !recorded ? Math.max(currentEpoch, epoch + 1) : currentEpoch
         nextState.integration = { ...(util.isPlainObject(nextState.integration) ? nextState.integration : {}), epoch: epochAfter }
@@ -6922,7 +7574,7 @@ const ORCHESTRATOR_PLUGIN = {
     }
 
     async function resolveRolePrompt(roleProfile, roleArg, baseDir, fops) {
-      return await rolePrompt.resolveRolePrompt(fops, {
+      const resolved = await rolePrompt.resolveRolePrompt(fops, {
         roleName: roleProfile.role,
         roleArg,
         promptFile: roleProfile?.promptFile ?? null,
@@ -6931,6 +7583,14 @@ const ORCHESTRATOR_PLUGIN = {
         presetRolesDir: PRESET_ROLES_DIR,
         embedded: embeddedRolePrompts,
       })
+      // Approval-class stop instruction (canonical plan §5): one deterministic
+      // line derived from the manifest, so prompts can never drift from the
+      // declared classes. The path/operation guard stays authoritative.
+      const entry = core.roleEntry(roleProfile.role)
+      if (entry && Array.isArray(entry.approvalClasses) && entry.approvalClasses.length > 0) {
+        resolved.text = resolved.text + '\n\nApproval authority: before any change in these classes — ' + entry.approvalClasses.join(', ') + ' — STOP and return a structured approval request (paths, diff summary, reason, affected criteria, rollback plan). The path/operation guard is authoritative; this instruction grants nothing.'
+      }
+      return resolved
     }
 
     async function loadConfigFor(fops, baseDir, runDirInput) {
@@ -6953,11 +7613,25 @@ const ORCHESTRATOR_PLUGIN = {
       tools.register(definition)
     }
 
+    // The ONE tool-schema boundary: every tool's parameter schema is the
+    // schema generated from autoresearch-core (plan §4.2 / §6.5). The third
+    // argument is a fallback only for tools absent from the generated set;
+    // no transport-specific hand copy may diverge from the generated schema
+    // (enforced by scripts/assert-canonical-schema.mjs).
+    const GENERATED_TOOL_SCHEMAS = core.generateToolSchemas()
     function tool(name, description, paramsSchema, executor) {
+      const generated = GENERATED_TOOL_SCHEMAS[name]
+      if (paramsSchema != null && generated !== undefined) {
+        const generatedJson = JSON.stringify(generated)
+        const inlineJson = JSON.stringify(paramsSchema)
+        if (generatedJson !== inlineJson) {
+          throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core. Update the generated definition in the core, not the transport copy.')
+        }
+      }
       registerTool({
         name,
         description,
-        parameters: paramsSchema,
+        parameters: generated ?? paramsSchema ?? { type: 'object', additionalProperties: true },
         output: {
           schema: { type: 'object', additionalProperties: true },
           render(_args, value) {
@@ -6982,37 +7656,22 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 1. init_run (contract-bound for new Project Mode runs) ─────────────
 
-    tool('autoresearch_init_run', 'Create a resumable AutoResearch artifact directory for a Linear issue or local markdown brief. For new Project Mode runs, pass projectId+nodeId: the approved plan is loaded and node-contract.json is written with its digest, binding every role task, acceptance, and finalization to the immutable contract. issueId is required for every project run (one run per node); it names the run folder and the issue lock, so choose the node issue id deliberately.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        issueId: str('Required: the Linear issue id or local run id this run is bound to (e.g. ISS-123 or my-brief). For project runs this is REQUIRED — it names the run folder and the issue lock, so every node run must pass its own issue id.'),
-        issueTitle: str('Issue/brief title for the run metadata'),
-        issueMarkdown: str('Markdown snapshot of the issue/brief body'),
-        commentsMarkdown: str('Markdown snapshot of relevant comments'),
-        sourceType: str('linear or local. Defaults to local in DSH.'),
-        sourcePath: str('Optional local markdown brief path relative to the workspace root'),
-        sourceUrl: str('Optional original source URL for provenance'),
-        runId: str('Optional run id. Defaults to a UTC timestamp plus issue id.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        forceRecovery: { type: 'boolean', description: 'Override an existing lock after explicit human recovery approval.' },
-        config: { type: 'object', additionalProperties: true, description: 'Run config overrides merged over project/default config.' },
-        projectId: str('Approved plan project id (v2 Project Mode binding).'),
-        nodeId: str('Plan node id (v2 Project Mode binding).'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_init_run', 'Create a resumable AutoResearch artifact directory for a Linear issue or local markdown brief. For new Project Mode runs, pass projectId+nodeId: the approved plan is loaded and node-contract.json is written with its digest, binding every role task, acceptance, and finalization to the immutable contract. issueId is required for every project run (one run per node); it names the run folder and the issue lock, so choose the node issue id deliberately.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const result = await lifecycle.initRun(fops, { ...args, baseDir }, PRESET_CONFIG_PATH)
       if (args.projectId && args.nodeId) {
-        await projectstate.transitionNode(fops, baseDir, args.projectId, args.nodeId, 'claim', {
+        const claimPatch = {
           leaseId: String(args.issueId) + ':' + String(result.runId ?? ''),
           runDir: result.runDir ?? '',
-        })
+        }
+        if (args.contextDigest !== undefined) claimPatch.contextDigest = args.contextDigest
+        await projectstate.transitionNode(fops, baseDir, args.projectId, args.nodeId, 'claim', claimPatch)
       }
       for (const role of config.ALL_RESEARCH_ROLES) {
         if (role === 'implementation_worker' || role === 'review_worker') continue
-        const target = abs(baseDir, (result.artifactRoot || 'research-agent') + '/roles/' + role + '.md')
+        const target = abs(baseDir, (result.artifactRoot || '.research-agent') + '/roles/' + role + '.md')
         if (await fops.exists(target)) continue
         const profile = profiles.resolveEffectiveProfile(role, result.config)
         const resolved = await resolveRolePrompt(profile, role, baseDir, fops)
@@ -7023,18 +7682,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 2. anonymize_candidates (fail-closed blinding) ─────────────────────
 
-    tool('autoresearch_anonymize_candidates', 'Create judge-specific anonymized candidate packets and reversible maps for A/B/AB reports. Every packet is built in memory, identity-scrubbed, and scanned before any file is written; a leak fails closed with zero dispatchable artifacts. Returns typed packetRef/mapRef values bound to the run/pass/candidate digests.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory, e.g. .research-agent/runs/ISS-1/<run-id> (legacy research-agent/ is readable).' },
-        pass: { type: 'number', description: 'AutoReason pass number' },
-        judgeCount: { type: 'number', description: 'Number of blind judges (1-25)' },
-        candidateIds: { type: 'array', items: { type: 'string' }, description: 'Original candidate ids. Defaults to A, B, AB.' },
-        candidatePaths: { type: 'object', additionalProperties: true, description: 'Optional candidate file path overrides keyed by candidate id.' },
-        anonymizedLabels: { type: 'array', items: { type: 'string' } },
-        seed: str('Deterministic shuffle seed.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_anonymize_candidates', 'Create judge-specific anonymized candidate packets and reversible maps for A/B/AB reports. Every packet is built in memory, identity-scrubbed, and scanned before any file is written; a leak fails closed with zero dispatchable artifacts. Candidate-invariant shared material must be supplied as judgeContext and is bound into every packet digest (omitting it fails with SHARED_CANDIDATE_MATERIAL). Returns per-judge flat dispatch primitives (zero-based judge, zero-based pass, judgePacketPath, judgePacketHash, judgeCount, runDigest, contextDigest).', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7044,57 +7692,44 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 3. parse_ranking ───────────────────────────────────────────────────
 
-    tool('autoresearch_parse_ranking', "Parse a judge response into an ordered ranking and optionally map anonymized labels back to original candidate ids.", {
-      type: 'object', additionalProperties: true,
-      properties: {
-        text: { type: 'string', description: 'Judge response text containing a RANKING: line.' },
-        allowedLabels: { type: 'array', items: { type: 'string' }, description: 'Expected labels (anonymized or original).' },
-        anonymizedToOriginal: { type: 'object', additionalProperties: true, description: 'Optional anonymized -> original label map.' },
-      },
-    }, async (args) => {
-      return scoring.parseRanking(args.text ?? '', args.allowedLabels ?? [], args.anonymizedToOriginal)
+    tool('autoresearch_parse_ranking', "Parse a judge response into an ordered ranking. Pass the full blind-packet map record (blindPacket, from judge_NN_map.json): its digest is validated before its label maps are trusted, so a tampered or swapped map cannot misattribute rankings. Optional zero-based pass/judge and contextDigest binding are recorded on the result so cross-pass or cross-judge reuse is detectable.", null, async (args) => {
+      let anonymizedToOriginal = null
+      if (args.blindPacket !== undefined && args.blindPacket !== null) {
+        const map = args.blindPacket
+        if (!util.isPlainObject(map) || map.kind !== 'blind-packet') throw new Error('blindPacket must be a blind-packet map record (judge_NN_map.json).')
+        const { digest: mapDigest, ...mapFields } = map
+        if (typeof mapDigest !== 'string' || mapDigest !== core.sha256Text(core.stableStringify(mapFields))) {
+          throw new Error('blindPacket digest mismatch: the map record is not the one this dispatch was built from; ranking labels cannot be trusted.')
+        }
+        anonymizedToOriginal = map.anonymizedToOriginal
+      }
+      const result = scoring.parseRanking(args.text ?? '', args.allowedLabels ?? [], anonymizedToOriginal)
+      const bindingErrors = []
+      if (args.pass !== undefined && !Number.isInteger(args.pass)) bindingErrors.push('pass must be a zero-based integer')
+      if (args.judge !== undefined && !Number.isInteger(args.judge)) bindingErrors.push('judge must be a zero-based integer')
+      if (args.contextDigest !== undefined && (typeof args.contextDigest !== 'string' || !args.contextDigest.trim())) bindingErrors.push('contextDigest must be a non-empty string')
+      if (bindingErrors.length > 0) {
+        result.bindingErrors = bindingErrors
+        result.valid = false
+      } else {
+        result.binding = { pass: args.pass ?? null, judge: args.judge ?? null, contextDigest: typeof args.contextDigest === 'string' ? args.contextDigest : null }
+      }
+      return result
     })
 
     // ── 4. parse_attribution (strict optional causal hypothesis) ──────────
 
-    tool('autoresearch_parse_attribution', 'Parse the optional fenced attribution JSON block from a judge or critic response. This parser never reads natural-language reasoning as machine input.', {
-      type: 'object', additionalProperties: true,
-      properties: { text: { type: 'string', description: 'Role response containing zero or one fenced attribution block.' } },
-    }, async (args) => scoring.parseAttribution(args.text ?? ''))
+    tool('autoresearch_parse_attribution', 'Parse the optional fenced attribution JSON block from a judge or critic response. This parser never reads natural-language reasoning as machine input.', null, async (args) => scoring.parseAttribution(args.text ?? ''))
 
     // ── 5. score_borda (with tie-break provenance) ─────────────────────────
 
-    tool('autoresearch_score_borda', 'Compute Borda scores and conservative tie-breaks for AutoReason judge rankings. Records the tied set, configured priority, selected priority entry/index, and fallback status (plan §4.3). Also records the mechanical degradation verdict (SOD #11): degraded / degradedReasons / routing, driven by unparseable or mis-mapped rankings, missing or duplicate labels, fewer than 2 candidates, all-tie scoring, or fewer usable rankings than the quorum. A degraded result routes the checkpoint to the critic gate — no further judge spawns.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        judgeRankings: {
-          type: 'array',
-          items: {
-            type: 'object', additionalProperties: true,
-            properties: {
-              judge: { type: 'string' },
-              ranking: { type: 'array', items: { type: 'string' } },
-            },
-          },
-          description: 'Parsed judge rankings.',
-        },
-        candidateIds: { type: 'array', items: { type: 'string' } },
-        bordaScores: { type: 'array', items: { type: 'number' } },
-        tieBreakPriority: { type: 'array', items: { type: 'string' } },
-        pass: { type: 'number', description: 'Pass number.' },
-        quorumJudges: { type: 'number', description: 'Minimum usable judge rankings before the panel is degraded (default 2; pass the run config backtracking.quorumJudges value when it is set).' },
-        notes: str('Optional notes recorded on the result.'),
-      },
-    }, async (args) => {
+    tool('autoresearch_score_borda', 'Compute Borda scores and conservative tie-breaks for AutoReason judge rankings. Records the tied set, configured priority, selected priority entry/index, and fallback status (plan §4.3). Also records the mechanical degradation verdict (SOD #11): degraded / degradedReasons / routing, driven by unparseable or mis-mapped rankings, missing or duplicate labels, fewer than 2 candidates, all-tie scoring, or fewer usable rankings than the quorum. A degraded result routes the checkpoint to the critic gate — no further judge spawns.', null, async (args) => {
       return scoring.scoreBorda(args)
     })
 
     // ── 5. validate_resume ─────────────────────────────────────────────────
 
-    tool('autoresearch_validate_resume', 'Validate run.json/history.json/resume.md and infer the next missing AutoResearch step (artifact-format aware: TeX runs use .tex candidates).', {
-      type: 'object', additionalProperties: true,
-      properties: { runDir: { type: 'string', description: 'Run directory path.' } },
-    }, async (args, exec) => {
+    tool('autoresearch_validate_resume', 'Validate run.json/history.json/resume.md and infer the next missing AutoResearch step (artifact-format aware: TeX runs use .tex candidates).', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7104,7 +7739,7 @@ const ORCHESTRATOR_PLUGIN = {
       let linearProjection = null
       if (contractFile) {
         try {
-          const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || 'research-agent')
+          const loadedPlan = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, contractFile.artifactRoot || '.research-agent')
           if (loadedPlan.ok) {
             const loadedState = await projectstate.loadState(fops, baseDir, contractFile.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
             const entry = loadedState.state.nodes?.[contractFile.nodeId]
@@ -7124,10 +7759,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 6. regenerate_checklist ────────────────────────────────────────────
 
-    tool('autoresearch_regenerate_checklist', 'Recreate autoreason_loop_checklist.md for an existing run using the run stored config.', {
-      type: 'object', additionalProperties: true,
-      properties: { runDir: { type: 'string', description: 'Run directory path.' } },
-    }, async (args, exec) => {
+    tool('autoresearch_regenerate_checklist', 'Recreate autoreason_loop_checklist.md for an existing run using the run stored config.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7136,23 +7768,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 7. checkpoint ──────────────────────────────────────────────────────
 
-    tool('autoresearch_checkpoint', 'Atomically update run.json and resume.md after a completed substep, optionally appending history.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        currentStep: str('Current step name.'),
-        currentPass: { type: 'number', description: 'Current pass number.' },
-        consecutiveAWins: { type: 'number', description: 'Consecutive A wins counter.' },
-        incumbentPath: str('Path of the current incumbent artifact.'),
-        status: str('Run status string.'),
-        nextAction: str('Short instruction for the next substep.'),
-        historyEntry: { type: 'object', additionalProperties: true, description: 'History entry for one pass (upserted by pass).' },
-        history: { type: 'array', description: 'Full replacement history array.' },
-        linearPatch: { type: 'object', additionalProperties: true, description: 'Fields merged into run.linear.' },
-        patch: { type: 'object', additionalProperties: true, description: 'Fields merged into the run state.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_checkpoint', 'Atomically update run.json and resume.md after a completed substep, optionally appending history.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7161,7 +7777,7 @@ const ORCHESTRATOR_PLUGIN = {
       // becomes the critic-gate directive — no further judge-spawn steps.
       let checkpointArgs = args
       const runDirAbs = abs(baseDir, args.runDir)
-      const passNo = Number.isInteger(args.currentPass) && args.currentPass > 0
+      const passNo = Number.isInteger(args.currentPass) && args.currentPass >= 0
         ? args.currentPass
         : await latestScoredPass(fops, runDirAbs)
       if (passNo !== null) {
@@ -7186,19 +7802,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 8. presearch ───────────────────────────────────────────────────────
 
-    tool('autoresearch_presearch', 'Normalize search/fetch results into auditable evidence/sources packets; optionally performs the search/fetch itself when queries/fetchUrls are given.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        slice: { type: 'string', description: 'Short slice name for the packet.' },
-        queries: { type: 'array', items: { type: 'string' }, description: 'Search queries (direct mode).' },
-        results: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Coordinator-collected search results (normalizer mode).' },
-        fetchUrls: { type: 'array', items: { type: 'string' }, description: 'URLs to fetch (direct mode).' },
-        fetches: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Coordinator-collected fetch records (normalizer mode).' },
-        collectedBy: str('Label recorded in the packet.'),
-        externalResearch: { type: 'boolean', description: 'Override the externalResearch flag.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_presearch', 'Normalize search/fetch results into auditable evidence/sources packets; optionally performs the search/fetch itself when queries/fetchUrls are given.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7277,28 +7881,19 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 9. spawn_role (planner/audit only, contract-aware) ────────────────
 
-    tool('autoresearch_spawn_role', 'Build a profile-aware role spawn plan/audit. Returns the recommended autoresearch_run_role call. Does not spawn. When runDir is supplied the exact node contract, workspace root, run root, artifact format, and relevant prior receipts are prepended automatically; caller task text cannot replace the contract.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        role: { type: 'string', description: 'Role name, e.g. research_scout or scout.' },
-        task: { type: 'string', description: 'The role task text.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: str('Run directory path (for config + audit packet).'),
-        judgeIndex: { type: 'number', description: 'Judge index for judgePanel model resolution.' },
-        packetRef: { type: 'object', additionalProperties: true, description: 'Typed blind-packet reference from autoresearch_anonymize_candidates (judge spawning only).' },
-        candidateIds: { type: 'array', items: { type: 'string' }, description: 'Candidate ids matching the packetRef.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_spawn_role', 'Build a profile-aware role spawn plan/audit. Returns the recommended autoresearch_run_role call. Does not spawn. When runDir is supplied the exact node contract, workspace root, run root, artifact format, and relevant prior receipts are prepended automatically; caller task text cannot replace the contract.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
-      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judgeIndex })
+      const hasDispatch = typeof args.judgePacketPath === 'string' && args.judgePacketPath.trim() !== ''
+      const capability = await loadCapabilityContext(fops, baseDir, args.runDir)
+      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
       const runRoot = args.runDir ? abs(baseDir, args.runDir) : null
       let task = ''
       if (runRoot) {
-        task = await buildRoleTaskBase(fops, baseDir, args.runDir)
-        if (util.isPlainObject(args.packetRef)) {
+        task = await buildRoleTaskBase(fops, baseDir, args.runDir, { omitRootHints: hasDispatch })
+        if (hasDispatch) {
           task += await buildJudgePacketTask(fops, baseDir, runRoot, args)
         } else if (args.task) {
           task += '\n\n' + args.task
@@ -7306,39 +7901,22 @@ const ORCHESTRATOR_PLUGIN = {
       } else {
         task = args.task
       }
-      const plan = spawn.buildSpawnPlan({ role: args.role, task, profile: role, judgeIndex: args.judgeIndex }, { webToolsAvailable: web !== undefined })
+      const plan = spawn.buildSpawnPlan({ role: args.role, task, profile: role, judgeIndex: args.judge, nodeContextDigest: args.nodeContextDigest }, { webToolsAvailable: web !== undefined })
       const auditPath = runRoot ? await spawn.writeSpawnAudit(fops, runRoot, plan) : null
-      return { ok: true, plan, auditPath, instruction: 'Execute the role with autoresearch_run_role using the same role/task/judgeIndex.' }
+      return { ok: true, plan, auditPath, instruction: 'Execute the role with autoresearch_run_role using the same role/task/judge (and the same flat dispatch primitives when judging).' }
     })
 
     // ── 10. run_role (executes via the subagents service) ──────────────────
 
-    tool('autoresearch_run_role', 'Execute one AutoResearch role through the internal reliability runner. The coordinator makes one call; the runner confines every fresh spawn with the role persona/toolFilter/model, records complete attempt output, retries classified provider failures, and steps through the role\'s modelFallbacks chain (with a per-workspace breaker that skips rate-limited models for the cooldown) when a model route fails, returning a durable bounded envelope. Contract-bound calls require a stable logicalGroupKey or derive one from run/step/packet metadata.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        role: { type: 'string', description: 'Role name, e.g. research_scout or scout.' },
-        task: { type: 'string', description: 'The role task text.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: str('Run directory path (for config and durable attempt output).'),
-        step: str('Stable logical pipeline step name, e.g. pass_01_critic.'),
-        logicalGroupKey: { type: 'object', additionalProperties: true, description: 'Canonical stable identity for exactly-once re-entry. Do not include rephrased task prose.' },
-        outputMode: { type: 'string', enum: ['text', 'schema'], description: 'Text by default; schema is only for compact machine control output.' },
-        outputSchema: { type: 'object', additionalProperties: true, description: 'Object-rooted supported schema required when outputMode is schema.' },
-        maxAttempts: { type: 'number', description: 'Total child attempts, bounded by the profile ceiling.' },
-        timeoutMs: { type: 'number', description: 'Optional logical role timeout in milliseconds.' },
-        retryDelayMs: { type: 'number', description: 'Optional cancellation-aware delay between attempts.' },
-        leaseMs: { type: 'number', description: 'Lease duration for exactly-once group ownership.' },
-        judgeIndex: { type: 'number', description: 'Judge index for judgePanel model resolution.' },
-        packetRef: { type: 'object', additionalProperties: true, description: 'Typed blind-packet reference from autoresearch_anonymize_candidates (judge spawning only).' },
-        candidateIds: { type: 'array', items: { type: 'string' }, description: 'Candidate ids matching the packetRef.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_run_role', 'Execute one AutoResearch role through the internal reliability runner. The coordinator makes one call; the runner applies the role persona, narrow tool-name allowlist, and model to every fresh spawn, records complete attempt output, retries classified provider failures, and steps through the role\'s modelFallbacks chain (with a per-workspace breaker that skips rate-limited models for the cooldown) when a model route fails, returning a durable bounded envelope. Contract-bound calls require a stable logicalGroupKey or derive one from run/step/packet metadata.', null, async (args, exec) => {
       assertCallingAgent(exec)
       if (subagents === undefined) throw new Error('subagents service unavailable')
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
-      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judgeIndex })
+      const hasDispatch = typeof args.judgePacketPath === 'string' && args.judgePacketPath.trim() !== ''
+      const capability = await loadCapabilityContext(fops, baseDir, args.runDir)
+      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
       const outputMode = args.outputMode === 'schema' ? 'schema' : 'text'
       if (outputMode === 'schema' && !util.isPlainObject(args.outputSchema)) throw new Error('outputSchema is required when outputMode is schema.')
       const prompt = await resolveRolePrompt(role, args.role, baseDir, fops)
@@ -7359,7 +7937,7 @@ const ORCHESTRATOR_PLUGIN = {
       let logicalGroupKey = util.isPlainObject(args.logicalGroupKey) ? args.logicalGroupKey : null
       if (runRoot) {
         task = await buildRoleTaskBase(fops, baseDir, args.runDir)
-        if (util.isPlainObject(args.packetRef)) {
+        if (hasDispatch) {
           task += await buildJudgePacketTask(fops, baseDir, runRoot, args)
         } else if (args.task) {
           task += '\n\n' + args.task
@@ -7373,22 +7951,180 @@ const ORCHESTRATOR_PLUGIN = {
             nodeId: contractFile?.nodeId ?? '',
             contractDigest: contractFile?.contractDigest ?? '',
             step: args.step ?? run?.currentStep ?? '',
-            pass: args.packetRef?.pass ?? run?.currentPass ?? 0,
+            pass: args.pass ?? run?.currentPass ?? 0,
             role: role.role,
-            judgeIndex: args.judgeIndex ?? null,
-            packetHash: args.packetRef?.packetHash ?? null,
+            judge: args.judge ?? null,
+            judgePacketHash: args.judgePacketHash ?? null,
             route: { provider: agentOptions.provider ?? null, model: agentOptions.model ?? null, reasoningEffort: agentOptions.reasoningEffort ?? null },
           }
         }
       } else {
         task = args.task ?? ''
       }
+      // Phase 3 typed handoff (plan §6): explicit degradation route +
+      // coordinator approval tokens, validated before dispatch.
+      let degradedModel = null
+      let degradedReason = ''
+      if (args.degradedRoute !== undefined) {
+        if (!util.isPlainObject(args.degradedRoute) || typeof args.degradedRoute.model !== 'string' || !args.degradedRoute.model.trim()) {
+          throw new Error('degradedRoute.model is required (a provider/model string) when degradedRoute is given.')
+        }
+        const slash = args.degradedRoute.model.indexOf('/')
+        if (slash <= 0 || slash === args.degradedRoute.model.length - 1) {
+          throw new Error('degradedRoute.model must be a provider/model reference: ' + JSON.stringify(args.degradedRoute.model))
+        }
+        degradedModel = args.degradedRoute.model.trim()
+        degradedReason = typeof args.degradedRoute.reason === 'string' ? args.degradedRoute.reason : ''
+      }
+      let approvalTokens = []
+      if (args.approvalTokens !== undefined) {
+        if (!Array.isArray(args.approvalTokens)) throw new Error('approvalTokens must be an array of coordinator-approval objects.')
+        for (const token of args.approvalTokens) {
+          if (!util.isPlainObject(token) || token.kind !== 'coordinator-approval' || !core.APPROVAL_CLASSES.includes(token.approvalClass)) {
+            throw new Error('approvalTokens entries must be kind coordinator-approval with a closed approvalClass: ' + core.APPROVAL_CLASSES.join(', '))
+          }
+        }
+        approvalTokens = args.approvalTokens
+      }
+      // Canonical role-task packet (plan §6.1): digests, typed inputs,
+      // declared roots, capability record, route, and output contract.
+      let roleTask = null
+      let guardScan = null
+      if (runRoot && util.isPlainObject(logicalGroupKey) && typeof logicalGroupKey.contractDigest === 'string' && logicalGroupKey.contractDigest) {
+        const { run: boundRun, contractFile } = await readRunAndDigest(fops, runRoot)
+        if (!util.isPlainObject(contractFile)) {
+          throw new Error('contract-bound role dispatch requires the run contract: ' + runRoot + '/node-contract.json is missing, so the typed handoff cannot be bound.')
+        }
+        // Guard-scan coordinates are baseDir-relative (the fops resolve
+        // against baseDir); derive the run root that way even if the caller
+        // passed an absolute runDir.
+        const runDirRel = pathutil.relativePath(baseDir, runRoot)
+        const projectDirRel = pathutil.join(cfg.artifactRoot ?? '.research-agent', 'projects', contractFile.projectId)
+        let state = null
+        try { state = await fops.readJson(projectstate.statePath(baseDir, contractFile.projectId, cfg.artifactRoot ?? '.research-agent')) } catch { state = null }
+        const otherRunRoots = []
+        if (util.isPlainObject(state?.nodes)) {
+          for (const [otherNodeId, entry] of Object.entries(state.nodes)) {
+            if (otherNodeId === contractFile.nodeId) continue
+            if (util.isPlainObject(entry) && typeof entry.runDir === 'string' && entry.runDir) otherRunRoots.push(entry.runDir)
+          }
+        }
+        // The plan is loaded for its digest; the bound node contract (immutable
+        // since init_run) is the authority for the node's dependencies.
+        const planLoaded = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, cfg.artifactRoot ?? '.research-agent')
+        if (!planLoaded.ok) {
+          throw new Error('contract-bound role dispatch requires the project plan: the plan for project ' + contractFile.projectId + ' (node ' + contractFile.nodeId + ') is unavailable (' + planLoaded.error + '), so the typed handoff cannot be bound.')
+        }
+        const planDigest = core.planContractDigest(planLoaded.plan)
+        const linearBoundProject = boundRun?.sourceType === 'linear'
+          || (typeof state?.project?.linearProjectId === 'string' && state.project.linearProjectId.trim() !== '')
+        if (linearBoundProject && !core.isContextDigest(args.nodeContextDigest)) {
+          throw new Error('Linear-bound role dispatch requires nodeContextDigest: read the Linear issue with linear_get_node_context and pass the fresh Current Node Context block digest (the judge contextDigest remains separate).')
+        }
+        if (args.nodeContextDigest !== undefined && !core.isContextDigest(args.nodeContextDigest)) {
+          throw new Error('nodeContextDigest must be a 64-hex SHA-256 digest of the current task context.')
+        }
+        const inputs = []
+        const boundContract = util.isPlainObject(contractFile.contract) ? contractFile.contract : null
+        for (const dep of boundContract && Array.isArray(boundContract.dependsOn) ? boundContract.dependsOn : []) {
+          const depEntry = util.isPlainObject(state?.nodes) && util.isPlainObject(state.nodes[dep]) ? state.nodes[dep] : null
+          const depRunDir = depEntry && typeof depEntry.runDir === 'string' ? depEntry.runDir : ''
+          if (!depRunDir) continue
+          let nodeOutput = null
+          try {
+            nodeOutput = await fops.readJson(pathutil.resolveInside(baseDir, depRunDir, 'node-output.json'))
+          } catch {}
+          if (!util.isPlainObject(nodeOutput)) continue
+          // One canonical contribution-ledger shape: artifact.path +
+          // artifact.sha256 (plus top-level outputHash).
+          const artifactPath = util.isPlainObject(nodeOutput.artifact) && typeof nodeOutput.artifact.path === 'string' && nodeOutput.artifact.path
+            ? nodeOutput.artifact.path
+            : ''
+          if (!artifactPath) continue
+          const artifactSha = util.isPlainObject(nodeOutput.artifact) && typeof nodeOutput.artifact.sha256 === 'string' && nodeOutput.artifact.sha256
+            ? nodeOutput.artifact.sha256
+            : ''
+          const ledgerOutputHash = typeof nodeOutput.outputHash === 'string' && nodeOutput.outputHash ? nodeOutput.outputHash : ''
+          if (artifactSha && ledgerOutputHash && artifactSha !== ledgerOutputHash) {
+            throw new Error('upstream ledger inconsistency: node ' + dep + ' artifact.sha256 differs from outputHash.')
+          }
+          const recordedHash = artifactSha || ledgerOutputHash
+          if (!recordedHash) {
+            throw new Error('upstream input unverifiable: node ' + dep + ' ledger records no artifact hash for ' + artifactPath + '; a role cannot be handed an unbound input (plan §6.1).')
+          }
+          const artifactAbs = pathutil.resolveInside(baseDir, depRunDir, artifactPath)
+          const bytes = await readBytesForHash(fops, artifactAbs)
+          const computedHash = bytes !== null ? hashBytes(bytes) : core.sha256Text(await fops.readText(artifactAbs))
+          if (recordedHash !== computedHash) {
+            throw new Error('upstream input integrity failure: node ' + dep + ' artifact ' + artifactPath + ' no longer matches its recorded hash (recorded ' + recordedHash.slice(0, 12) + '..., actual ' + computedHash.slice(0, 12) + '...).')
+          }
+          inputs.push({ name: dep + '-output', path: pathutil.normalize(pathutil.join(depRunDir, artifactPath)), hash: computedHash, format: typeof nodeOutput.artifactFormat === 'string' ? nodeOutput.artifactFormat : 'markdown', producer: dep })
+        }
+        const manifestEntry = core.ROLE_MANIFEST[role.role]
+        const attested = capability.attestation !== null && core.attestationOk(capability.attestation, baseDir, Date.now(), runDirRel)
+        const isJudge = role.role === 'research_judge'
+        // Closed role-task fields (plan §6.1). logicalGroupId and the digest
+        // are bound by the runner at the moment the logical group is derived.
+        const roleTaskFields = {
+          runDigest: logicalGroupKey.runDigest,
+          projectId: logicalGroupKey.projectId ?? '',
+          planDigest,
+          nodeId: logicalGroupKey.nodeId ?? '',
+          contractDigest: logicalGroupKey.contractDigest,
+          contextDigest: linearBoundProject
+            ? args.nodeContextDigest
+            : localCurrentTaskContextDigest({
+              runDigest: logicalGroupKey.runDigest,
+              projectId: logicalGroupKey.projectId,
+              nodeId: logicalGroupKey.nodeId,
+              contractDigest: logicalGroupKey.contractDigest,
+              planDigest,
+              role: role.role,
+              pass: logicalGroupKey.pass,
+              inputs,
+            }),
+          role: role.role,
+          pass: Number.isInteger(logicalGroupKey.pass) ? logicalGroupKey.pass : 0,
+          description: task.slice(0, 4000),
+          nextAction: isJudge
+            ? 'Rank the anonymized candidates; end with exactly one RANKING: line over the anonymized labels.'
+            : 'Execute the task within the declared roots; any cross-scope change is returned as a structured approval request, never applied.',
+          tools: [...role.tools],
+          shellMode: manifestEntry?.shellMode ?? 'none',
+          // Judges declare ONLY the exact anonymized packet (plus any explicit
+          // visual inputs) as their read surface — the reversible maps and the
+          // original candidates in the run dir stay outside it. This is a
+          // declared-scope + prompt defense: the harness does not enforce read
+          // roots today.
+          readRoots: isJudge && typeof args.judgePacketPath === 'string' && args.judgePacketPath.trim()
+            ? [pathutil.normalize(pathutil.join(runDirRel, args.judgePacketPath)), ...inputs.map((input) => input.path)]
+            : [runDirRel, ...inputs.map((input) => input.path)],
+          writeRoot: runDirRel,
+          egress: manifestEntry?.egress ?? 'none',
+          attestationDigest: attested ? core.digestOf(capability.attestation) : null,
+          outputMode,
+          outputContract: boundContract && util.isPlainObject(boundContract.outputContract) ? boundContract.outputContract : null,
+          route: role.model
+            ? { model: role.model, fallbacks: role.modelFallbacks ?? [], ...(degradedModel ? { degraded: { model: degradedModel, reason: degradedReason } } : {}) }
+            : null,
+        }
+        if (Number.isInteger(args.judge)) roleTaskFields.judge = args.judge
+        if (Number.isInteger(args.judgeCount)) roleTaskFields.judgeCount = args.judgeCount
+        if (typeof args.judgePacketHash === 'string' && args.judgePacketHash) roleTaskFields.judgePacketHash = args.judgePacketHash
+        if (inputs.length > 0) roleTaskFields.inputs = inputs
+        roleTask = roleTaskFields
+        // The guard scan covers every path the approval classes protect:
+        // this run, the project state dir, the published outputs root, and
+        // every sibling node run root (cross-node/published-output escapes
+        // must be visible, not merely classified in theory).
+        const outputsRel = typeof cfg.outputRoot === 'string' && cfg.outputRoot.trim() ? cfg.outputRoot.trim() : 'outputs'
+        guardScan = { roots: [runDirRel, projectDirRel, outputsRel, ...otherRunRoots], otherRunRoots }
+      }
       const execution = util.isPlainObject(cfg.roleExecution) ? cfg.roleExecution : {}
-      const modelChain = [...new Set(
-        [role.model, ...(Array.isArray(role.modelFallbacks) ? role.modelFallbacks : [])]
-          .filter((value) => typeof value === 'string' && value.trim())
-          .map((value) => value.trim()),
-      )]
+      const modelChain = [
+        { model: role.model, reasoningEffort: role.reasoningEffort },
+        ...(Array.isArray(role.modelFallbacks) ? role.modelFallbacks : []),
+      ].filter((entry) => entry && typeof entry.model === 'string' && entry.model.trim())
       const breakerPath = typeof cfg.artifactRoot === 'string' && cfg.artifactRoot.trim()
         ? abs(baseDir, pathutil.join(cfg.artifactRoot, 'model-breaker.json'))
         : null
@@ -7428,6 +8164,10 @@ const ORCHESTRATOR_PLUGIN = {
         sleep: sleepForRole,
         createAbortController: roleAbortController,
         owner: 'coordinator',
+        roleTask,
+        degradedModel,
+        approvalTokens,
+        guardScan,
       })
       return {
         ...result,
@@ -7437,51 +8177,65 @@ const ORCHESTRATOR_PLUGIN = {
         modelFallbacks: role.modelFallbacks ?? [],
         routeWarnings,
         tools: role.tools,
+        toolGrant: role.toolGrant ?? null,
+        roleTask: result.roleTask ?? null,
+        roleTaskDigest: util.isPlainObject(result.roleTask) && typeof result.roleTask.digest === 'string' ? result.roleTask.digest : null,
+        degradedRoute: degradedModel ? { model: degradedModel, reason: degradedReason, recorded: true } : null,
         profile: { maxTokens: role.maxTokens, timeoutMs: role.timeoutMs, maxAttempts: role.maxAttempts, retryDelayMs: role.retryDelayMs, leaseMs: role.leaseMs, modelFallbackCooldownMs: execution.modelFallbackCooldownMs ?? null },
       }
     })
 
-    // Judge packet task builder: validates the typed packetRef against the
-    // current run digest and the on-disk packet hash, then embeds the packet
-    // text into the judge task. A mismatched pass/candidate set/run digest
-    // fails before spawn (plan §4.3).
+    // Judge packet task builder: validates the flat typed dispatch against
+    // the on-disk blind-packet map record, re-hashes the packet, and embeds
+    // the packet text into the judge task. A mismatched pass/judge/candidate
+    // set/run digest/context fails before spawn (plan §6.5).
     async function buildJudgePacketTask(fops, baseDir, runRoot, args) {
-      const packetRef = args.packetRef
       const { run, contractFile } = await readRunAndDigest(fops, runRoot)
       if (!util.isPlainObject(run)) throw new Error('run.json must exist before judge spawning.')
-      const candidateIds = Array.isArray(args.candidateIds) && args.candidateIds.length > 0 ? args.candidateIds : ['A', 'B', 'AB']
-      const validation = core.validatePacketRef(packetRef, {
-        runDigest: computeRunDigest(run, contractFile),
-        pass: packetRef.pass,
-        judgeCount: Number(run.config?.numJudges ?? 1) || 1,
-        candidateIds,
-        candidatePaths: {},
-      })
-      if (!validation.ok) {
-        throw new Error('Judge packet reference rejected before spawn: ' + validation.errors.join('; '))
+      const runDigest = computeRunDigest(run, contractFile)
+      const dispatch = {
+        judgePacketPath: args.judgePacketPath,
+        judgePacketHash: args.judgePacketHash,
+        pass: args.pass,
+        judge: args.judge,
+        judgeCount: args.judgeCount,
+        runDigest,
+        contextDigest: args.contextDigest,
       }
-      const packetText = await fops.readText(pathutil.resolveInside(runRoot, packetRef.packetPath))
-      if (core.sha256Text(packetText) !== packetRef.packetHash) {
-        throw new Error('Judge packet hash mismatch: the on-disk packet does not match the packetRef (pass ' + packetRef.pass + ', judge ' + packetRef.judge + ').')
+      const validation = core.validateJudgeDispatch(dispatch, { runDigest })
+      if (!validation.ok) throw new Error('Judge dispatch rejected before spawn: ' + validation.errors.join('; '))
+      const mapRel = pathutil.dirname(dispatch.judgePacketPath) + '/' + pathutil.basename(dispatch.judgePacketPath).replace(/_candidates\.md$/, '_map.json')
+      const map = await fops.readJson(pathutil.resolveInside(runRoot, mapRel))
+      if (!util.isPlainObject(map) || map.kind !== 'blind-packet') {
+        throw new Error('Judge packet map is missing or not a blind-packet record: ' + mapRel)
+      }
+      // Bind the map's OWN digest so tampered label maps (anonymizedToOriginal,
+      // labels) cannot misattribute rankings. The digest is defined over the
+      // map fields, excluding the digest key itself.
+      const { digest: mapDigest, ...mapFields } = map
+      if (typeof mapDigest !== 'string' || mapDigest !== core.sha256Text(core.stableStringify(mapFields))) {
+        throw new Error('Judge packet map digest mismatch: the on-disk map record is not the one this dispatch was built from (pass ' + dispatch.pass + ', judge ' + dispatch.judge + ').')
+      }
+      const bindingErrors = []
+      if (map.pass !== dispatch.pass) bindingErrors.push('map.pass=' + map.pass + ' does not match dispatch pass ' + dispatch.pass + '.')
+      if (map.judge !== dispatch.judge) bindingErrors.push('map.judge=' + map.judge + ' does not match dispatch judge ' + dispatch.judge + '.')
+      if (map.judgeCount !== dispatch.judgeCount) bindingErrors.push('map.judgeCount=' + map.judgeCount + ' does not match dispatch judgeCount ' + dispatch.judgeCount + '.')
+      if (map.runDigest !== dispatch.runDigest) bindingErrors.push('run digest mismatch: the map is not bound to this run.')
+      if (map.contextDigest !== dispatch.contextDigest) bindingErrors.push('context digest mismatch: the dispatch is not bound to this judge context.')
+      if (bindingErrors.length > 0) throw new Error('Judge dispatch rejected before spawn: ' + bindingErrors.join('; '))
+      const packetText = await fops.readText(pathutil.resolveInside(runRoot, dispatch.judgePacketPath))
+      if (core.sha256Text(packetText) !== dispatch.judgePacketHash) {
+        throw new Error('Judge packet hash mismatch: the on-disk packet does not match the dispatch (pass ' + dispatch.pass + ', judge ' + dispatch.judge + ').')
       }
       return '\n\n## Blind judging task (anonymized candidates)\n' +
         'Rank the anonymized candidates below by correctness, source-grounding, decision usefulness, clarity, and restraint. ' +
-        'Do not attempt to identify original candidate identities; never mention Candidate A/B/AB or Report A/B/AB labels. ' +
-        'End with exactly one RANKING: line listing the labels in order (best first).\n\n' + packetText
+        'Do not attempt to identify original candidate identities; never reveal or guess them from content. ' +
+        'End with exactly one RANKING: line listing the anonymized labels in order (best first).\n\n' + packetText
     }
 
     // ── 11. redact_check ───────────────────────────────────────────────────
 
-    tool('autoresearch_redact_check', 'Scan final research output for likely secrets, signed URLs, private keys, and raw transcript leakage before posting.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        text: str('Text to scan (takes precedence over path).'),
-        path: str('Workspace-relative path to scan.'),
-        runDir: str('Run directory root for path resolution.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        maxFindings: { type: 'number', description: 'Cap on reported findings (default 50).' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_redact_check', 'Scan final research output for likely secrets, signed URLs, private keys, and raw transcript leakage before posting.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7489,18 +8243,9 @@ const ORCHESTRATOR_PLUGIN = {
       return await redact.redactCheck(fops, { ...args, runDir: root, baseDir })
     })
 
-    // ── 12. finalize_run (v2 acceptance gate) ──────────────────────────────
+    // ── 12. finalize_run (contract acceptance gate) ────────────────────────
 
-    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent, exposure-driven output policy (plan WS4 v8). Unbound/legacy runs publish their final deliverables under outputs/<issueId>/ as before. Bound v2 runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes at most one folder, outputs/<projectId>/. With exposurePolicyVersion: 1 the explicit projectContract.deliverables list is the sole exposure request (exact safe relative paths, companions included; [] with no diagnostic mappings finalizes as skipped with no folder); an exposed TeX master additionally publishes its minimal local source-support closure (missing inputs or unresolved labels fail), and rebuildable: true (TeX only) adds the accepted finalBuild recorder closure plus the parsed bibliography union, with every recorded hash re-verified. Internal evidence reaches the user only through exact projectContract.diagnosticMappings entries under audit/. Marker-absent plans use the frozen legacy adapter (final.tex/final.pdf for TeX, final.md for Markdown, rule legacy-adapter, nothing else). Publication is transactional: owner-marked staging, hash verification, rollback journal, MANIFEST.json last, unmanaged destination files preserved and inventoried. A failed requested publish propagates as a finalize error, never a soft failure. Returns the published paths, journalSync, and projectPublish results. Contract-bound (v2) runs are rejected without a current successful acceptance receipt bound to the node-contract digest.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        releaseLock: { type: 'boolean', description: 'Release the issue lock (default true).' },
-        finalCommentPosted: { type: 'boolean', description: 'Mark the final comment as posted.' },
-        notes: str('Optional closing notes recorded in resume.md.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent, exposure-driven output policy. Unbound runs publish their final deliverables under outputs/<issueId>/ as before. Contract-bound (canonical) runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes at most one folder, outputs/<projectId>/. The explicit projectContract.deliverables list is the sole exposure request (exact safe relative paths, companions included; [] with no diagnostic mappings finalizes as skipped with no folder); an exposed TeX master additionally publishes its minimal local source-support closure (missing inputs or unresolved labels fail), and rebuildable: true (TeX only) adds the accepted finalBuild recorder closure plus the parsed bibliography union, with every recorded hash re-verified. Internal evidence reaches the user only through exact projectContract.diagnosticMappings entries under audit/. Publication is transactional: owner-marked staging, hash verification, rollback journal, MANIFEST.json last, unmanaged destination files preserved and inventoried. A failed requested publish propagates as a finalize error, never a soft failure. Returns the published paths, journalSync, and projectPublish results. Contract-bound runs are rejected without a current successful acceptance receipt bound to the node-contract digest. Linear-backed projects additionally require the contextDigest from a fresh linear_get_node_context (plan §7.4).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7509,13 +8254,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 13. status ─────────────────────────────────────────────────────────
 
-    tool('autoresearch_status', 'Summarize local AutoResearch locks and the newest run state for one issue or recent issues.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        issueId: str('Optional issue id to scope the status.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_status', 'Summarize local AutoResearch locks and the newest run state for one issue or recent issues.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7524,15 +8263,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 14. dependency_check ───────────────────────────────────────────────
 
-    tool('autoresearch_dependency_check', 'Check DSH services, artifact root, config, role templates, Linear credential readiness, the mounted build generation, and TeX toolchain availability offline.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: str('Run directory path (for run config).'),
-        sourceType: str('linear or local.'),
-        externalResearch: { type: 'boolean', description: 'Override the externalResearch expectation.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_dependency_check', 'Check DSH services, artifact root, config, role templates, Linear credential readiness, the mounted build generation, and TeX toolchain availability offline.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7592,7 +8323,7 @@ const ORCHESTRATOR_PLUGIN = {
       if (externalResearch && searchProviderIds.length !== 1) recommendations.push('Register or configure exactly one usable web search provider.')
       if (externalResearch && fetchProviderIds.length !== 1) recommendations.push('Register or configure exactly one usable web fetch provider (for example @deepseek-ai/dsh-web-fetch-http).')
 
-      const artifactRoot = cfg.artifactRoot ?? 'research-agent'
+      const artifactRoot = cfg.artifactRoot ?? '.research-agent'
       const artifactRootPath = abs(baseDir, artifactRoot)
       const probePath = pathutil.resolveInside(artifactRootPath, '.probe.json')
       let writable = true
@@ -7637,11 +8368,12 @@ const ORCHESTRATOR_PLUGIN = {
         }
         const badFallbacks = []
         for (const fallback of Array.isArray(profile.modelFallbacks) ? profile.modelFallbacks : []) {
-          if (!modelparse.parseModelString(fallback)) {
-            badFallbacks.push(fallback + ' (unparseable)')
+          const fallbackModel = typeof fallback === 'string' ? fallback : fallback?.model
+          if (!modelparse.parseModelString(fallbackModel)) {
+            badFallbacks.push(fallbackModel + ' (unparseable)')
           } else if (catalog !== null) {
-            const verdict = modelRegistry.validateModelString(fallback, catalog.registry)
-            if (!verdict.ok) badFallbacks.push(fallback + ' (' + verdict.reason + ')')
+            const verdict = modelRegistry.validateModelString(fallbackModel, catalog.registry)
+            if (!verdict.ok) badFallbacks.push(fallbackModel + ' (' + verdict.reason + ')')
           }
         }
         if (badFallbacks.length > 0) {
@@ -7722,13 +8454,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 15/16. role profile introspection ──────────────────────────────────
 
-    tool('autoresearch_list_role_profiles', 'List effective role profiles (model/tools/prompt source) from project or run config. Built-in tool ceilings are enforced at resolution.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: str('Run directory path (for run config).'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_list_role_profiles', 'List effective role profiles (model/tools/prompt source) from project or run config. Built-in tool ceilings are enforced at resolution.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7751,7 +8477,7 @@ const ORCHESTRATOR_PLUGIN = {
             : true,
           modelFallbacks: profile.modelFallbacks ?? [],
           modelFallbacksRecognized: (profile.modelFallbacks ?? []).length > 0 && catalog !== null
-            ? (profile.modelFallbacks ?? []).map((fallback) => modelRegistry.validateModelString(fallback, catalog.registry).ok)
+            ? (profile.modelFallbacks ?? []).map((fallback) => modelRegistry.validateModelString(typeof fallback === 'string' ? fallback : fallback?.model, catalog.registry).ok)
             : null,
           tools: profile.tools,
           promptSource,
@@ -7761,20 +8487,12 @@ const ORCHESTRATOR_PLUGIN = {
       return { ok: true, profiles: rows, config: { externalResearch: cfg.externalResearch, roleModels: cfg.roleModels, sessionControl: cfg.sessionControl } }
     })
 
-    tool('autoresearch_get_role_profile', 'Resolve one effective role profile including prompt source and model.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        role: { type: 'string', description: 'Role name, e.g. research_judge or judge.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: str('Run directory path (for run config).'),
-        judgeIndex: { type: 'number', description: 'Judge index for judgePanel resolution.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_get_role_profile', 'Resolve one effective role profile including prompt source and model.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
-      const profile = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judgeIndex })
+      const profile = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge })
       let promptSource = 'none'
       try {
         promptSource = (await resolveRolePrompt(profile, args.role, baseDir, fops)).source
@@ -7796,33 +8514,20 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 17. list_models ────────────────────────────────────────────────────
 
-    tool('autoresearch_list_models', 'List the model providers and models DSH currently recognizes, so config model strings can be chosen from the live registry.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_list_models', 'List the model providers and models DSH currently recognizes, so config model strings can be chosen from the live registry.', null, async (args, exec) => {
       const catalog = await liveModelCatalog()
       if (catalog === null) return { ok: false, error: 'llm service unavailable in this deployment' }
       return {
         ok: true,
         providers: catalog.providers,
         models: modelRegistry.listEntries(catalog.models),
-        usage: 'Set roleProfiles.<role>.model, judgePanel[i].model, or roleModels buckets in .research-agent/config.json (legacy research-agent/config.json is also read, or use the preset config.default.json) to any "provider/model" shown here; a bare model name rides the session provider; null/omitted = harness default.',
+        usage: 'Set roleProfiles.<role>.model, judgePanel[i].model, or roleModels buckets in .research-agent/config.json (the single runtime config root; bare research-agent/config.json is migration-only input) to any "provider/model" shown here; a bare model name rides the session provider; null/omitted = harness default.',
       }
     })
 
-    // ── 18. plan_validate (v1/v2, non-mutating) ────────────────────────────
+    // ── 18. plan_validate (canonical, non-mutating) ───────────────────────
 
-    tool('autoresearch_plan_validate', 'Validate an approved AutoResearch project plan (v1 legacy or v2 contract): schema, markers, unique node ids, manifest roles with phase/ceiling rules, strict effective budgets, dependsOn, acyclicity, integration coverage, and the v2 project contract. Never mutates the caller plan. Returns normalized contracts and the stable plan digest.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        plan: { type: 'object', additionalProperties: true, description: 'The plan object (takes precedence over path).' },
-        path: str('Optional plan.json path relative to the workspace root (default .research-agent/projects/<projectId>/plan.json; legacy research-agent is readable).'),
-        projectId: str('Optional project id used to derive the default path when path is omitted.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_plan_validate', 'Validate an approved AutoResearch project plan (canonical shape only): the kind marker, closed top-level and per-node fields, unique node ids, per-kind roles with phase-fit, explicit strict budgets, object acceptance criteria with closed check types, dependsOn, acyclicity, integration coverage, and the closed project contract. Never mutates the caller plan. A non-canonical shape fails with exactly one error (not canonical; run scripts/migrate-workspace.mjs) plus the detected legacyFingerprint. Returns normalized contracts, the project contract, and the stable plan digest.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7862,56 +8567,46 @@ const ORCHESTRATOR_PLUGIN = {
       }
       return {
         ok: result.ok,
-        strictValid: result.strictValid,
+        canonical: result.canonical,
+        legacyFingerprint: result.legacyFingerprint ?? null,
         planPath: planPath || null,
         errors: result.errors,
         warnings: result.warnings,
-        schemaVersion: result.schemaVersion,
         projectId: result.projectId,
         marker: result.marker,
-        teamId: result.teamId,
         revision: result.revision,
         nodeCount: result.nodeCount,
+        nodeIds: result.nodeIds,
         integrationId: result.integrationId,
         digest: result.digest,
         contracts,
-        projectContract: result.projectContract ? { goal: result.projectContract.goal, deliverables: result.projectContract.deliverables, acceptance: result.projectContract.acceptance, finalWordBudget: result.projectContract.finalWordBudget } : null,
+        projectContract: result.projectContract
+          ? { goal: result.projectContract.goal, deliverables: result.projectContract.deliverables, acceptance: result.projectContract.acceptance, test: result.projectContract.test, wordBudget: result.projectContract.wordBudget, rebuildable: result.projectContract.rebuildable, diagnosticMappings: result.projectContract.diagnosticMappings }
+          : null,
         instruction: result.ok
-          ? (result.strictValid
-            ? 'Plan valid as a v2 contract. Write plan.json + empty state.json under .research-agent/projects/<id>/ BEFORE any Linear side effect, then create the project and one issue per node. Legacy research-agent projects remain readable.'
-            : 'Plan valid under legacy v1 semantics. New execution is blocked until an approved v2 revision exists — run autoresearch_migration_diagnostic for the exact proposed diff (plan §4.2).')
-          : 'Plan invalid. Fix the reported errors and re-validate before presenting or creating Linear artifacts.',
+          ? 'Plan valid as the canonical shape. Write plan.json + empty state.json under .research-agent/projects/<id>/ BEFORE any Linear side effect, then create the project and one issue per node.'
+          : (result.legacyFingerprint
+            ? 'Not canonical: ' + (result.errors[0] ?? '') + ' (legacy shape: ' + result.legacyFingerprint + '). Run autoresearch_migration_diagnostic for the closed catalog entry.'
+            : 'Plan invalid. Fix the reported errors and re-validate before presenting or creating Linear artifacts.'),
       }
     })
 
-    tool('autoresearch_node_transition', 'Coordinator-only: persist one focused node lifecycle transition in state.json. Linear projection is a separate explicit step through linear_project_node.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'nodeId', 'transition'],
-      properties: { projectId: str('AutoResearch project id.'), nodeId: str('Focused node id.'), transition: str('claim, complete, hold, or retry.'), causalHolds: { type: 'array', items: { type: 'object', additionalProperties: true } }, leaseId: str('Claim lease identifier.'), runDir: str('Focused run directory.'), receipt: { type: 'object', additionalProperties: true }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('autoresearch_node_transition', 'Coordinator-only: persist one focused node lifecycle transition in state.json. Linear projection is a separate explicit step through linear_project_node. For Linear-bound projects, claim/complete/retry require contextDigest — the SHA-256 digest of the Linear issue\'s Current Node Context block from a fresh linear_get_node_context (plan §7.4); the digest is recorded on the node entry as a pointer only.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const patch = {}
-      for (const key of ['causalHolds', 'leaseId', 'runDir', 'receipt']) if (args[key] !== undefined) patch[key] = args[key]
+      for (const key of ['causalHolds', 'leaseId', 'runDir', 'receipt', 'contextDigest']) if (args[key] !== undefined) patch[key] = args[key]
       const projectId = util.requiredString(args.projectId, 'projectId')
       const nodeId = util.requiredString(args.nodeId, 'nodeId')
       const transition = await projectstate.transitionNode(fops, baseDir, projectId, nodeId, args.transition, patch)
       const projectionStatus = transition.state.nodes[nodeId]?.status ?? 'todo'
-      return { ok: true, ...transition, linearProjection: { projectId, nodeId, status: projectionStatus, blockedBy: (transition.state.nodes[nodeId]?.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []), reason: (transition.state.nodes[nodeId]?.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; ') } }
+      return { ok: true, ...transition, contextDigest: transition.state.nodes[nodeId]?.contextDigest ?? null, contextDigestAt: transition.state.nodes[nodeId]?.contextDigestAt ?? null, linearProjection: { projectId, nodeId, status: projectionStatus, blockedBy: (transition.state.nodes[nodeId]?.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []), reason: (transition.state.nodes[nodeId]?.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; ') } }
     })
 
     // ── 19. project_status (with spec-block drift + Linear fallback) ───────
 
-    tool('autoresearch_project_status', "Reconcile the approved plan.json, the state.json journal, Linear issues (optional) and local runs for one AutoResearch project. Read-only for the plan; the only mutation is the explicit per-node comment-id cursor advance (idempotent). Reports drift — including generated-spec-block drift and the deterministic legacy Linear-state fallback source — and never rewrites the plan.", {
-      type: 'object', additionalProperties: true,
-      properties: {
-        projectId: str('AutoResearch project id.'),
-        linearIssues: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Optional issues array from linear_list_issues(projectId) for Linear reconciliation.' },
-        cursor: { type: 'object', additionalProperties: true, description: 'Optional { "<nodeId>": ["<linear comment id>", ...] } cursor advance; appends only new ids to the journal.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_project_status', "Reconcile the approved canonical plan.json, the state.json journal, Linear issues (optional) and local runs for one AutoResearch project. Read-only for the plan; the only mutation is the explicit per-node comment-id cursor advance (idempotent). Reports drift — including generated-spec-block drift and the deterministic Linear-state fallback source — and never rewrites the plan.", null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -7959,9 +8654,24 @@ const ORCHESTRATOR_PLUGIN = {
           phase: integrationState?.phase ?? null,
           epoch: integrationState?.epoch ?? null,
           inputDigest: integrationState?.inputDigest ?? null,
+          // Plan §8.4: last-known-good pointer (operational digests only) +
+          // feedback pointers (digest + status, never narrative).
+          lastKnownGood: util.isPlainObject(integrationState?.lastKnownGood)
+            ? {
+                manifestDigest: integrationState.lastKnownGood.manifestDigest ?? null,
+                inputDigest: integrationState.lastKnownGood.inputDigest ?? null,
+                publishedAt: integrationState.lastKnownGood.publishedAt ?? null,
+                runId: integrationState.lastKnownGood.runId ?? null,
+              }
+            : null,
+          feedback: Array.isArray(integrationState?.feedback)
+            ? integrationState.feedback
+              .filter((entry) => util.isPlainObject(entry) && typeof entry.feedbackId === 'string' && entry.feedbackId)
+              .map((entry) => ({ feedbackId: entry.feedbackId, status: typeof entry.status === 'string' ? entry.status : 'open' }))
+            : [],
         },
         backtracking: {
-          schemaVersion: backtrackingCache.schemaVersion ?? null,
+          kind: backtrackingCache.kind ?? 'backtracking-state',
           counts: backtrackingSummary,
           observations: Array.isArray(backtrackingCache.observations) ? backtrackingCache.observations : [],
           openReopens: openReopens.map((request) => ({ requestPath: request._path, consumerNodeId: request.upstreamAttribution.consumerNodeId, upstreamNodeId: request.upstreamAttribution.upstreamNodeId, key: request.upstreamAttribution.key, contextDigest: request.upstreamAttribution.contextDigest })),
@@ -7974,45 +8684,20 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 20. record_acceptance (plan §4.3) ──────────────────────────────────
 
-    tool('autoresearch_record_acceptance', 'Record a mechanical acceptance receipt for a contract-bound run. Every plan criterion must be accounted for (PASS/FAIL/WAIVED/NOT_APPLICABLE); waivers require a recorded user decision, rationale, scope, and plan revision. Extractor-backed expected categories must record count, bytes, and SHA-256 (zero required counts fail); command checks record command, cwd, exit code, and log hashes. Validation is dispatched from the node artifactFormat: TeX nodes run strict TeX validation (comment-aware static rules + latexmk build, never -f; a nonzero compiler exit cannot pass) — the scanner-derived declared needs are the source of truth, so a mismatch against the hand-filled contract declared list is a recorded warning, not a failure — and record the accepted artifact { path, format, sha256 } plus the verified finalBuild record (sourcePath/sourceHash/flsPath/flsHash, PDF pair when present). When the project exposes a TeX source, the exposed master\'s local inputs and labels must resolve before acceptance. Markdown/non-TeX nodes pass on the accepted artifact\'s existence, path safety, and hash (plus explicit deliverable checks) with no TeX requirement. Writes acceptance.json and mechanically derives node-output.json (the contribution ledger, idempotent on same-hash replay).', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        criteria: {
-          type: 'array',
-          items: {
-            type: 'object', additionalProperties: true,
-            properties: {
-              id: { type: 'string', description: 'Criterion id from the node contract.' },
-              result: { type: 'string', description: 'PASS, FAIL, WAIVED, or NOT_APPLICABLE.' },
-              evidence: { type: 'array', items: { type: 'string' }, description: 'Evidence paths.' },
-              waiver: { type: 'object', additionalProperties: true, description: 'Required for WAIVED: userDecision, rationale, scope, planRevision.' },
-            },
-          },
-          description: 'One result per plan criterion id.',
-        },
-        expectedCategories: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Extractor-backed categories: category, count, bytes, sha256, extractor, expectedNonEmpty.' },
-        commandChecks: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Command checks: command, cwd, exitCode, stdoutHash/stderrHash/logHash, envFacts.' },
-        artifactClassification: { type: 'object', additionalProperties: true, description: 'From the determinism rules: kind (pdf/source/...), reproducibleProfile, doubleBuildHash.' },
-        texMode: { type: 'string', description: 'fragment (default) or standalone.' },
-        declared: { type: 'object', additionalProperties: true, description: 'Declared package/macro/input/graphics/bibliography needs for TeX validation.' },
-        templatePath: str('Frozen project template path (workspace-relative) for fragment mode.'),
-        nodeRevision: { type: 'number', description: 'Output revision number (default 1).' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_record_acceptance', 'Record a mechanical acceptance receipt for a contract-bound run. Every plan criterion must be accounted for (PASS/FAIL/WAIVED/NOT_APPLICABLE); waivers require a recorded user decision, rationale, scope, and plan revision. Extractor-backed expected categories must record count, bytes, and SHA-256 (zero required counts fail); command checks record command, cwd, exit code, and log hashes. Validation is dispatched from the node artifactFormat: TeX nodes run strict TeX validation (comment-aware static rules + latexmk build, never -f; a nonzero compiler exit cannot pass) — the scanner-derived declared needs are the source of truth, so a mismatch against the hand-filled contract declared list is a recorded warning, not a failure — and record the accepted artifact { path, format, sha256 } plus the verified finalBuild record (sourcePath/sourceHash/flsPath/flsHash, PDF pair when present). When the project exposes a TeX source, the exposed master\'s local inputs and labels must resolve before acceptance. Markdown/non-TeX nodes pass on the accepted artifact\'s existence, path safety, and hash (plus explicit deliverable checks) with no TeX requirement. Writes acceptance.json and mechanically derives node-output.json (the contribution ledger, idempotent on same-hash replay).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const runDir = abs(baseDir, args.runDir)
       const contractFile = await loadRunContract(fops, runDir)
       if (!contractFile) {
-        throw new Error('v2 mechanical acceptance requires a bound run: node-contract.json is missing. Use autoresearch_init_run with projectId+nodeId.')
+        throw new Error('mechanical acceptance requires a bound run: node-contract.json is missing. Use autoresearch_init_run with projectId+nodeId.')
       }
       const contract = contractFile.contract
-      // Plan WS1 (v8): the accepted artifact path comes from the node
-      // contract (outputContract.artifactPath); only the legacy adapter may
-      // fall back to the old format-based default.
+      // The accepted artifact path comes from the node contract
+      // (outputContract.artifactPath — required by canonical plan
+      // validation); the format-based fallback is defensive for external
+      // (unvalidated) contract files only.
       const outputName = (typeof contract.outputContract?.artifactPath === 'string' && contract.outputContract.artifactPath.trim())
         ? contract.outputContract.artifactPath.trim()
         : (contract.artifactFormat === 'tex' ? 'output.tex' : 'final.md')
@@ -8049,7 +8734,7 @@ const ORCHESTRATOR_PLUGIN = {
       // acceptance — even without a reproducible source package.
       let planForUsability = null
       try {
-        const loadedPlan = await projectstate.loadPlan(fops, baseDir, contract.projectId, contractFile.artifactRoot || 'research-agent')
+        const loadedPlan = await projectstate.loadPlan(fops, baseDir, contract.projectId, contractFile.artifactRoot || '.research-agent')
         if (loadedPlan.ok) planForUsability = loadedPlan.plan
       } catch {}
       const usability = await exposedSourceUsability(fops, baseDir, runDir, contract, contractFile, {
@@ -8058,6 +8743,22 @@ const ORCHESTRATOR_PLUGIN = {
       if (!usability.ok) {
         throw new Error('Exposed-TeX source usability check failed before acceptance: ' + usability.errors.join(' ') + ' The published source must be usable from its own folder: stage the missing fragments into the integration run directory and retry.')
       }
+      // Cross-check the caller-supplied nodeRevision against the journal
+      // entry: a post-reopen receipt must not record the pre-reopen
+      // revision (plan §8.3 bumps revisions on reopen targets). Contract-
+      // bound acceptance FAILS CLOSED when the journal cannot be loaded or
+      // the node entry is missing — a receipt whose revision provenance is
+      // unknown cannot be accepted.
+      const revisionPlan = planForUsability ?? (await projectstate.loadPlan(fops, baseDir, contract.projectId, contractFile.artifactRoot || '.research-agent')).plan
+      const revisionState = await projectstate.loadState(fops, baseDir, contract.projectId, revisionPlan, contractFile.artifactRoot || '.research-agent')
+      const entry = util.isPlainObject(revisionState?.state?.nodes) ? revisionState.state.nodes[contract.nodeId] : null
+      if (!entry) throw new Error('contract-bound acceptance requires the journal entry for node ' + contract.nodeId + ': the project state is missing or the node was never initialized (plan §8.3).')
+      const journalRevision = Number.isInteger(Number(entry.nodeRevision)) && Number(entry.nodeRevision) > 0 ? Number(entry.nodeRevision) : null
+      const suppliedRevision = typeof args.nodeRevision === 'number' ? args.nodeRevision : null
+      if (suppliedRevision !== null && journalRevision !== null && suppliedRevision !== journalRevision) {
+        throw new Error('nodeRevision mismatch: the journal entry for node ' + contract.nodeId + ' is at revision ' + journalRevision + ' but the caller supplied ' + suppliedRevision + ' (plan §8.3).')
+      }
+      const nodeRevisionValue = suppliedRevision ?? journalRevision ?? 1
       // Plan WS4 (v8): record the verified final build (TeX only) so the
       // publish-time rebuildable: true branch can re-verify it.
       const finalBuild = contract.artifactFormat === 'tex' ? await captureFinalBuild(fops, runDir, planForUsability) : null
@@ -8075,7 +8776,7 @@ const ORCHESTRATOR_PLUGIN = {
         outputHash,
         artifactPath: outputName,
         finalBuild,
-        nodeRevision: typeof args.nodeRevision === 'number' ? args.nodeRevision : 1,
+        nodeRevision: nodeRevisionValue,
         derivedDeclared,
         warnings: texWarnings,
       })
@@ -8085,7 +8786,6 @@ const ORCHESTRATOR_PLUGIN = {
       // existing ledger with the same outputHash + nodeRevision is kept as
       // is (hand-annotated ledgers are not clobbered by re-acceptance).
       const ledgerPath = pathutil.resolveInside(runDir, 'node-output.json')
-      const nodeRevisionValue = typeof args.nodeRevision === 'number' ? args.nodeRevision : 1
       const existingLedger = await fops.readJson(ledgerPath)
       let nodeOutput = null
       let ledgerAction = 'written'
@@ -8116,16 +8816,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 21. tex_check (node-level strict TeX validation, no receipt) ───────
 
-    tool('autoresearch_tex_check', 'Run the strict TeX validation for a node output (static rules + latexmk build of preview.tex or output.tex, never -f). Returns the validation record without writing an acceptance receipt.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        texMode: { type: 'string', description: 'fragment (default) or standalone.' },
-        declared: { type: 'object', additionalProperties: true, description: 'Declared needs.' },
-        templatePath: str('Frozen project template path (workspace-relative) for fragment mode.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_tex_check', 'Run the strict TeX validation for a node output (static rules + latexmk build of preview.tex or output.tex, never -f). Returns the validation record without writing an acceptance receipt.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8141,28 +8832,16 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 22. candidate_eligibility (plan §4.3) ──────────────────────────────
 
-    tool('autoresearch_candidate_eligibility', 'Validate B/AB candidate eligibility before judging: every non-targeted incumbent contribution (required locked units) must survive; only critic-targeted units may change, and only through a recorded revision-ledger replacement or justified removal. A candidate that loses required or untouched material is ineligible, not merely ranked lower. Judged candidates are never modified here.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        pass: { type: 'number', description: 'Current pass number.' },
-        incumbentPath: str('Incumbent artifact path (default pass_00/A.<ext>).'),
-        candidatePaths: { type: 'object', additionalProperties: true, description: 'Candidate paths keyed by id (default pass_N/B.<ext>, pass_N/AB.<ext>).' },
-        requiredUnits: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Required locked units: {id, anchor} (anchor text that must survive).' },
-        criticTargets: { type: 'array', items: { type: 'string' }, description: 'Contribution ids the critic explicitly targeted.' },
-        revisionLedger: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Recorded ledger entries: {unitId, action: replaced|removed, reason, approved: true}.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_candidate_eligibility', 'Validate B/AB candidate eligibility before judging: every non-targeted incumbent contribution (required locked units) must survive; only critic-targeted units may change, and only through a recorded revision-ledger replacement or justified removal. A candidate that loses required or untouched material is ineligible, not merely ranked lower. Judged candidates are never modified here.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
       const runDir = abs(baseDir, args.runDir)
       const { run, contractFile } = await readRunAndDigest(fops, runDir)
       if (!util.isPlainObject(run)) throw new Error('run.json must exist.')
-      const pass = util.requiredPositiveInteger(args.pass, 'pass')
+      const pass = util.requiredNonNegativeInteger(args.pass, 'pass')
       const ext = contractFile?.artifactFormat === 'tex' ? 'tex' : 'md'
-      const incumbentRel = args.incumbentPath ?? (pass > 1 ? 'pass_' + String(pass - 1).padStart(2, '0') + '/A.' + ext : 'pass_00/A.' + ext)
+      const incumbentRel = args.incumbentPath ?? (pass > 0 ? 'pass_' + String(pass - 1).padStart(2, '0') + '/A.' + ext : 'pass_00/A.' + ext)
       const incumbent = await fops.readText(pathutil.resolveInside(runDir, incumbentRel))
       const candidates = {}
       for (const id of ['B', 'AB']) {
@@ -8208,66 +8887,17 @@ const ORCHESTRATOR_PLUGIN = {
     })
 
     // ── 23. promote_artifact / publish_accepted ──────────────────────────────
-    // All accepted artifact publication goes through this helper. The old
-    // publish_accepted tool remains as a compatibility wrapper below.
-    async function promoteArtifact(params) {
-      const runDir = abs(params.baseDir, params.runDir)
-      const sourceRel = String(params.sourcePath ?? '').trim()
-      const destinationRel = String(params.destinationPath ?? '').trim()
-      if (!sourceRel || !destinationRel) throw new Error('sourcePath and destinationPath are required.')
-      const sourceAbs = pathutil.resolveInside(runDir, sourceRel)
-      const destinationAbs = pathutil.resolveInside(runDir, destinationRel)
-      const sourceInfo = typeof params.fops.lstat === 'function' ? await params.fops.lstat(sourceAbs) : null
-      if (sourceInfo?.type === 'symlink') throw new Error('sourcePath must not be a symbolic link.')
-      const destinationInfo = typeof params.fops.lstat === 'function' ? await params.fops.lstat(destinationAbs) : null
-      if (destinationInfo?.type === 'symlink') throw new Error('destinationPath must not be a symbolic link.')
-      const sourceText = await params.fops.readText(sourceAbs)
-      const sourceHash = core.sha256Text(sourceText)
-      if (params.sourceHash && params.sourceHash !== sourceHash) throw new Error('source hash mismatch: expected ' + params.sourceHash + ', got ' + sourceHash)
-      if (params.sourceComplete !== true) throw new Error('source artifact is not marked complete; partial role output cannot be promoted.')
-      const extension = pathutil.basename(destinationRel).toLowerCase().split('.').pop()
-      if (params.expectedFormat === 'tex' && extension !== 'tex') throw new Error('destination format mismatch: expected .tex')
-      if (params.expectedFormat === 'json' && extension !== 'json') throw new Error('destination format mismatch: expected .json')
-      const existing = await params.fops.readText(destinationAbs).catch(() => null)
-      if (existing !== null) {
-        const existingHash = core.sha256Text(existing)
-        if (existingHash === sourceHash) return { ok: true, idempotent: true, sourcePath: sourceRel, destinationPath: destinationRel, hash: sourceHash }
-        throw new Error('destination conflict: destination exists with a different hash.')
-      }
-      await params.fops.writeText(destinationAbs, sourceText, { kind: 'createIfAbsent' })
-      const published = await params.fops.readText(destinationAbs)
-      const publishedHash = core.sha256Text(published)
-      if (publishedHash !== sourceHash) throw new Error('published destination hash mismatch: expected ' + sourceHash + ', got ' + publishedHash)
-      return { ok: true, idempotent: false, sourcePath: sourceRel, destinationPath: destinationRel, hash: sourceHash, length: sourceText.length }
-    }
+    // The single hash-checked publication authority lives at module scope
+    // (promoteArtifact); the publish_accepted tool below stays as a
+    // compatibility wrapper.
 
-    tool('autoresearch_promote_artifact', 'Promote one complete role artifact through the single hash-checked publication authority. Source and destination remain inside runDir; partial outputs, symlinks, format mismatches, hash mismatches, and destination conflicts fail closed. Same-hash replays are idempotent.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        sourcePath: str('Run-relative complete source artifact.'),
-        destinationPath: str('Run-relative canonical destination artifact.'),
-        sourceHash: str('Expected SHA-256 of exact source UTF-8 bytes.'),
-        sourceComplete: { type: 'boolean', description: 'Must be true; partial role attempts cannot be promoted.' },
-        expectedFormat: { type: 'string', enum: ['tex', 'json', 'markdown', 'text'], description: 'Optional destination format check.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_promote_artifact', 'Promote one complete role artifact through the single hash-checked publication authority. Source and destination remain inside runDir; partial outputs, symlinks, format mismatches, hash mismatches, and destination conflicts fail closed. Same-hash replays are idempotent.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       return await promoteArtifact({ ...args, baseDir, fops: makeFops(baseDir) })
     })
 
-    tool('autoresearch_publish_accepted', 'Publish a coordinator-corrected artifact under a separately named accepted path with a provenance receipt. The judged candidate file is never overwritten; corrections are visible as corrections, with source and patch hashes.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        runDir: { type: 'string', description: 'Run directory path.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        sourcePath: { type: 'string', description: 'Run-relative corrected artifact (e.g. packets/coordinator-corrected.md).' },
-        judgedPath: { type: 'string', description: 'Run-relative judged candidate that was the base (e.g. pass_01/A.md).' },
-        patchNote: str('Optional human-readable correction note.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_publish_accepted', 'Publish a coordinator-corrected artifact under a separately named accepted path with a provenance receipt. The judged candidate file is never overwritten; corrections are visible as corrections, with source and patch hashes.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8315,16 +8945,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 24. integration_preflight (plan §4.4) ──────────────────────────────
 
-    tool('autoresearch_integration_preflight', 'Compute the integration input digest from the project contract and every current node contract/output/acceptance hash, classify preflight findings (editorial stays local; substantive/conflict reopen the owning node; scope blocks for user review), and advance the integration state machine.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        projectId: str('Approved plan project id.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        currentState: { type: 'string', description: 'Current integration phase (default waiting_for_nodes).' },
-        nodeStates: { type: 'array', items: { type: 'object', additionalProperties: true }, description: '[{nodeId, contractDigest, outputHash, acceptanceHash}] for every non-integration node.' },
-        findings: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Preflight findings: {nodeId?, kind?, severity?, description}.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_integration_preflight', 'Compute the integration input digest from the project contract and every current node contract/output/acceptance hash, classify preflight findings (editorial stays local; substantive/conflict reopen the owning node; scope blocks for user review), and advance the integration state machine.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8374,18 +8995,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 25. revision_request (plan §4.4, idempotent) ───────────────────────
 
-    tool('autoresearch_revision_request', 'Create a canonical, idempotent revision request for a node (substantive/conflict findings). Writes the request file under .research-agent/projects/<id>/revision-requests/ (legacy research-agent is also supported; create-if-absent) and returns the Linear marker, comment body, and the node/integration state targets. Post the body with linear_create_comment(idempotencyMarker=marker).', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        projectId: str('Approved plan project id.'),
-        nodeId: str('Owning node id.'),
-        epoch: { type: 'number', description: 'Integration epoch (default 1).' },
-        pass: { type: 'number', description: 'The decisive consumer AutoReason pass. Required when attributions are supplied.' },
-        attributions: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Optional judge/critic attribution records. Mode is always read from project configuration.' },
-        request: { type: 'object', additionalProperties: true, description: '{affectedContributionIds, projectCriteria, problem, requiredChange, acceptanceChecks}.' },
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_revision_request', 'Create a canonical, idempotent revision request for a node (substantive/conflict findings). Writes the request file under the single runtime root .research-agent/projects/<id>/revision-requests/ (bare research-agent/ is migration-only input) and returns the Linear marker, comment body, and the node/integration state targets. Post the body with linear_create_comment(idempotencyMarker=marker).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8409,25 +9019,314 @@ const ORCHESTRATOR_PLUGIN = {
           instruction: 'Post the returned comment body with linear_create_comment using the marker, move the retargeted upstream issue to In Progress, and let the ready set rerun the reset closure in dependency order.',
         }
       }
-      const result = await requestRevision(fops, baseDir, args)
+      const hasMulti = Array.isArray(args.nodeIds) && args.nodeIds.length > 0
+      const result = await requestRevision(fops, baseDir, {
+        ...args,
+        ...(hasMulti ? { feedbackDigest: typeof args.feedbackId === 'string' ? args.feedbackId : null } : {}),
+      })
       return {
         ...result,
-        instruction: 'Post the comment body with linear_create_comment(id, body, idempotencyMarker="' + result.marker + '"), move the issue to In Progress, and rerun the node in targeted revision mode. The owning node and its downstream dependents were reset to todo in state.json.',
+        instruction: hasMulti
+          ? 'Multi-target feedback reopen (plan §8.3): post each returned request comment with linear_create_comment(idempotencyMarker=<marker>), move each reopened issue to In Progress, and rerun the closure in dependency order (upstream targets first, then dependents, then integration). The integration epoch advanced to ' + result.epochAfter + '.'
+          : 'Post the comment body with linear_create_comment(id, body, idempotencyMarker="' + result.marker + '"), move the issue to In Progress, and rerun the node in targeted revision mode. The owning node and its downstream dependents were reset to todo in state.json.',
+      }
+    })
+
+    // ── 25b. submit_feedback (plan §8.1) ───────────────────────────────────
+
+    tool('autoresearch_submit_feedback', 'Coordinator-only user feedback intake (plan §8.1). Persists a hash-addressed, idempotent user-feedback record — source/authority are closed record literals, never arguments — and gates user authority against the current last-known-good by base digest match (stale digests can never bypass the judge quorum). Returns the intake evidence event to project to the Linear integration issue immediately. Exact retries converge to the existing record.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const projectId = util.requiredString(args.projectId, 'projectId')
+      const feedback = util.requiredString(args.feedback, 'feedback')
+      const baseInputDigest = util.requiredString(args.baseInputDigest, 'baseInputDigest')
+      const baseManifestDigest = util.requiredString(args.baseManifestDigest, 'baseManifestDigest')
+      const receivedAt = typeof args.receivedAt === 'string' && args.receivedAt.trim() ? args.receivedAt.trim() : new Date().toISOString()
+      const root = await config.resolveArtifactRoot(fops, baseDir, { artifactRoot: args.artifactRoot })
+      const plan = await projectstate.loadPlan(fops, baseDir, projectId, root.relativeRoot)
+      if (!plan.ok) return { ok: false, projectId, error: plan.error }
+      const validation = core.validatePlan(plan.plan)
+      if (!validation.ok) return { ok: false, projectId, error: 'approved plan is invalid: ' + validation.errors.join('; ') }
+      const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot ?? root.relativeRoot)
+      const state = loaded.state
+      const lkg = util.isPlainObject(state.integration) && util.isPlainObject(state.integration.lastKnownGood) ? state.integration.lastKnownGood : null
+      const fields = core.feedbackRecordFields({
+        projectId,
+        feedback,
+        receivedAt,
+        baseInputDigest,
+        baseManifestDigest,
+        lkg,
+        nodeId: typeof args.nodeId === 'string' && args.nodeId.trim() ? args.nodeId.trim() : null,
+        targetContributionIds: args.contributionIds,
+        targetCriterionIds: args.criterionIds,
+      })
+      const dir = feedbackDir(baseDir, projectId, plan.artifactRoot)
+      const integrationId = plan.plan.integrationId ?? 'integration'
+      const integrationNode = util.isPlainObject(state.nodes?.[integrationId]) ? state.nodes[integrationId] : {}
+      const issueId = typeof integrationNode.issueId === 'string' ? integrationNode.issueId : ''
+      const existing = await findFeedbackByIdempotencyKey(fops, dir, fields.idempotencyKey)
+      if (existing) {
+        return {
+          ok: true,
+          created: false,
+          record: existing,
+          idempotencyKey: fields.idempotencyKey,
+          userAuthority: existing.userAuthority,
+          integrationNodeId: integrationId,
+          integrationIssueId: issueId,
+          event: core.feedbackIntakeEvidenceEvent({ projectId, integrationNodeId: integrationId, feedback: existing }),
+          instruction: 'Feedback already recorded (idempotent replay). Project the intake to the integration issue only if it was not posted yet: linear_post_evidence_event(projectId, issueId=' + (issueId || '<integration issue id>') + ', nodeId="' + integrationId + '", type/summary/evidence/at from the returned event).',
+        }
+      }
+      const record = core.makeRecord('user-feedback', fields)
+      const written = await writeFeedbackRecord(fops, dir, record, record.digest + '.json')
+      if (!written.created) {
+        return {
+          ok: true,
+          created: false,
+          record: written.record,
+          idempotencyKey: written.record.idempotencyKey,
+          userAuthority: written.record.userAuthority,
+          integrationNodeId: integrationId,
+          integrationIssueId: issueId,
+          event: core.feedbackIntakeEvidenceEvent({ projectId, integrationNodeId: integrationId, feedback: written.record }),
+          instruction: 'Feedback already recorded (concurrent intake). Project via linear_post_evidence_event with the returned event (idempotent by event digest).',
+        }
+      }
+      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+      const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).filter((entry) => entry?.feedbackId !== record.digest)
+      pointers.push({ feedbackId: record.digest, status: record.status })
+      integration.feedback = pointers
+      state.integration = integration
+      state.updatedAt = new Date().toISOString()
+      await fops.writeJson(loaded.path, state)
+      return {
+        ok: true,
+        created: true,
+        record,
+        recordPath: pathutil.relativePath(baseDir, written.path),
+        idempotencyKey: record.idempotencyKey,
+        userAuthority: record.userAuthority,
+        integrationNodeId: integrationId,
+        integrationIssueId: issueId,
+        event: core.feedbackIntakeEvidenceEvent({ projectId, integrationNodeId: integrationId, feedback: record }),
+        instruction: 'Project the intake to the Linear integration issue IMMEDIATELY: linear_post_evidence_event(projectId, issueId=' + (issueId || '<integration issue id>') + ', nodeId="' + integrationId + '", type/summary/evidence/at from the returned event). Then run the senior integration triage and call autoresearch_record_feedback_triage. userAuthority=' + record.userAuthority + (record.userAuthority !== 'granted' ? ' — a stale or unrecorded base digest can never bypass the judge quorum; the repair must pass the normal gates.' : ''),
+      }
+    })
+
+    // ── 25c. record_feedback_triage (plan §8.2) ────────────────────────────
+
+    tool('autoresearch_record_feedback_triage', 'Coordinator-only senior integration triage (plan §8.2). Validates the closed per-item classification against the approved plan, derives the smallest responsible closure (decision must be consistent with the items; targetNodeIds must equal the derivation), persists a hash-addressed feedback-triage record, advances the feedback to a new triaged version, and returns the Linear projection (triage comment + suggested integration context update).', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const projectId = util.requiredString(args.projectId, 'projectId')
+      const feedbackId = util.requiredString(args.feedbackId, 'feedbackId')
+      const decision = util.requiredString(args.decision, 'decision')
+      const rationale = typeof args.rationale === 'string' ? args.rationale : ''
+      const targetNodeIds = Array.isArray(args.targetNodeIds) ? args.targetNodeIds : []
+      const createdAt = typeof args.createdAt === 'string' && args.createdAt.trim() ? args.createdAt.trim() : new Date().toISOString()
+      const root = await config.resolveArtifactRoot(fops, baseDir, { artifactRoot: args.artifactRoot })
+      const plan = await projectstate.loadPlan(fops, baseDir, projectId, root.relativeRoot)
+      if (!plan.ok) return { ok: false, projectId, error: plan.error }
+      const validation = core.validatePlan(plan.plan)
+      if (!validation.ok) return { ok: false, projectId, error: 'approved plan is invalid: ' + validation.errors.join('; ') }
+      const dir = feedbackDir(baseDir, projectId, plan.artifactRoot)
+      const feedback = await readFeedbackByDigest(fops, dir, feedbackId)
+      if (!feedback) return { ok: false, projectId, error: 'feedback record not found: ' + feedbackId }
+      if (feedback.projectId !== projectId) return { ok: false, projectId, error: 'feedback record belongs to a different project' }
+      if (feedback.status !== 'open') return { ok: false, projectId, error: 'feedback is already ' + feedback.status + '; only an open feedback can be triaged' }
+      const existingTriage = await findTriageForFeedback(fops, dir, feedback.digest)
+      if (existingTriage) return { ok: false, projectId, error: 'feedback is already triaged (triage ' + existingTriage.digest + '); a different triage requires a new feedback record' }
+      let items
+      try {
+        items = core.normalizeTriageItems(args.items, plan.plan)
+      } catch (error) {
+        return { ok: false, projectId, error: error.message }
+      }
+      const errors = core.checkTriageDecision(decision, items).concat(core.checkTriageTargets(decision, targetNodeIds, items))
+      for (const target of [...new Set(targetNodeIds.map(String).filter(Boolean))]) {
+        if (!(plan.plan.nodes ?? []).some((node) => node?.id === target)) errors.push('target node ' + target + ' is not a plan node')
+      }
+      if (errors.length > 0) return { ok: false, projectId, error: errors.join('; '), items }
+      const triage = core.makeRecord('feedback-triage', {
+        kind: 'feedback-triage',
+        projectId,
+        feedbackId: feedback.digest,
+        decision: String(decision),
+        items,
+        rationale,
+        targetNodeIds: decision === 'reopen' ? [...new Set(targetNodeIds.map(String).filter(Boolean))].sort() : [],
+        createdAt,
+      })
+      const written = await writeFeedbackRecord(fops, dir, triage, 'triage-' + feedback.digest.slice(0, 12) + '-' + triage.digest + '.json')
+      if (!written.created) {
+        return {
+          ok: true,
+          created: false,
+          triage: written.record,
+          feedback,
+          decision: written.record.decision,
+          targetNodeIds: written.record.targetNodeIds,
+          instruction: 'Triage already recorded (idempotent replay). Re-run the projection steps below only where not yet done.',
+          projection: { marker: 'autoresearch-feedback-triage:' + written.record.digest, body: core.triageCommentBody(written.record, 'autoresearch-feedback-triage:' + written.record.digest), idempotencyMarker: 'autoresearch-feedback-triage:' + written.record.digest },
+        }
+      }
+      const triagedVersion = core.makeRecord('user-feedback', core.feedbackVersion(feedback, { status: 'triaged', triageDigest: triage.digest }))
+      await writeFeedbackRecord(fops, dir, triagedVersion, triagedVersion.digest + '.json')
+      const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot ?? root.relativeRoot)
+      const state = loaded.state
+      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+      const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === feedback.digest ? { feedbackId: triagedVersion.digest, status: 'triaged' } : entry))
+      if (!pointers.some((entry) => entry?.feedbackId === triagedVersion.digest)) pointers.push({ feedbackId: triagedVersion.digest, status: 'triaged' })
+      integration.feedback = pointers
+      state.integration = integration
+      state.updatedAt = new Date().toISOString()
+      await fops.writeJson(loaded.path, state)
+      const integrationId = plan.plan.integrationId ?? 'integration'
+      const integrationNode = util.isPlainObject(state.nodes?.[integrationId]) ? state.nodes[integrationId] : {}
+      const marker = 'autoresearch-feedback-triage:' + triage.digest
+      const suffix = {
+        'reopen': ' Then call autoresearch_revision_request with nodeIds=' + JSON.stringify(triage.targetNodeIds) + ', feedbackId="' + triagedVersion.digest + '" (or triageDigest="' + triage.digest + '").',
+        'editorial-only': ' The integration editor fixes the editorial items in the next integration pass.',
+        'conflict-user-choice': ' Ask the user to choose the responsible node(s); a later triage with a single owner reopens.',
+        'scope-plan-revision': ' A new approved plan revision is required before any rework.',
+        'ambiguous': ' Ask the user for clarification; nothing reopens yet.',
+      }
+      return {
+        ok: true,
+        created: true,
+        triage,
+        triagePath: pathutil.relativePath(baseDir, written.path),
+        feedback: triagedVersion,
+        feedbackPath: pathutil.relativePath(baseDir, dir) + '/' + triagedVersion.digest + '.json',
+        decision,
+        targetNodeIds: triage.targetNodeIds,
+        integrationNodeId: integrationId,
+        integrationIssueId: typeof integrationNode.issueId === 'string' ? integrationNode.issueId : '',
+        projection: { marker, body: core.triageCommentBody(triage, marker), idempotencyMarker: marker },
+        suggestedContextUpdate: suggestedIntegrationContextPatch(triage, feedback.digest),
+        instruction: 'Post the triage projection with linear_create_comment(id=' + (integrationNode.issueId || '<integration issue id>') + ', body=projection.body, idempotencyMarker="' + marker + '"), merge suggestedContextUpdate into a freshly fetched integration Current Node Context (linear_get_node_context, then linear_update_node_context with the fresh contextDigest). Decision ' + decision + ' reopens ' + (decision === 'reopen' ? 'only ' + triage.targetNodeIds.join(', ') + ' (smallest responsible closure).' : 'nothing.') + (suffix[decision] ?? ''),
+      }
+    })
+
+    // ── 25d. close_feedback (plan §8.4) ────────────────────────────────────
+
+    tool('autoresearch_close_feedback', 'Coordinator-only feedback-resolution acceptance (plan §8.4). Mechanical gate: every triage target is journal-done with a fresh, non-superseded, hash-bound acceptance receipt; every triage acceptance check is PASS in a fresh owner receipt; the integration input digest changed since intake; the supplied publish manifest digest equals the current last-known-good. On success writes a new resolved feedback record version with the closure object and returns the one concise project-republished evidence event.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const projectId = util.requiredString(args.projectId, 'projectId')
+      const feedbackId = util.requiredString(args.feedbackId, 'feedbackId')
+      const inputDigest = util.requiredString(args.integrationInputDigest, 'integrationInputDigest')
+      const manifestDigest = util.requiredString(args.publishManifestDigest, 'publishManifestDigest')
+      const resolvedAt = typeof args.resolvedAt === 'string' && args.resolvedAt.trim() ? args.resolvedAt.trim() : new Date().toISOString()
+      const root = await config.resolveArtifactRoot(fops, baseDir, { artifactRoot: args.artifactRoot })
+      const plan = await projectstate.loadPlan(fops, baseDir, projectId, root.relativeRoot)
+      if (!plan.ok) return { ok: false, projectId, error: plan.error }
+      const validation = core.validatePlan(plan.plan)
+      if (!validation.ok) return { ok: false, projectId, error: 'approved plan is invalid: ' + validation.errors.join('; ') }
+      const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot ?? root.relativeRoot)
+      const state = loaded.state
+      const dir = feedbackDir(baseDir, projectId, plan.artifactRoot)
+      const feedback = await readFeedbackByDigest(fops, dir, feedbackId)
+      if (!feedback) return { ok: false, projectId, error: 'feedback record not found: ' + feedbackId }
+      if (feedback.projectId !== projectId) return { ok: false, projectId, error: 'feedback record belongs to a different project' }
+      if (!['triaged', 'resolving'].includes(feedback.status)) return { ok: false, projectId, error: 'feedback status ' + feedback.status + ' cannot be closed (must be triaged or resolving)' }
+      if (!feedback.triageDigest) return { ok: false, projectId, error: 'feedback has no recorded triage' }
+      const triage = await findTriageByDigest(fops, dir, feedback.triageDigest)
+      if (!triage) return { ok: false, projectId, error: 'feedback triage not found: ' + feedback.triageDigest }
+      if (triage.decision !== 'reopen') return { ok: false, projectId, error: 'feedback triage decision ' + triage.decision + ' reopens nothing; there is no repair to close' }
+      // Linked revision requests (supersedes linkage) + fresh acceptance
+      // receipts from the journal run directories.
+      const requestsDir = pathutil.join(pathutil.dirname(plan.path), 'revision-requests')
+      const linkedRequests = []
+      for (const entry of await fops.listDir(requestsDir)) {
+        if (entry?.dir || !String(entry?.name ?? '').endsWith('.json')) continue
+        const value = await fops.readJson(pathutil.resolveInside(requestsDir, entry.name))
+        if (util.isPlainObject(value) && (value.triageDigest === feedback.triageDigest || value.feedbackDigest === feedback.digest)) linkedRequests.push(value)
+      }
+      const journal = util.isPlainObject(state.nodes) ? state.nodes : {}
+      const acceptances = {}
+      for (const nodeId of triage.targetNodeIds) {
+        const entry = journal[nodeId]
+        const runDir = util.isPlainObject(entry) && typeof entry.runDir === 'string' && entry.runDir ? entry.runDir : ''
+        if (!runDir) continue
+        const acceptance = await fops.readJson(absPath(baseDir, pathutil.join(runDir, 'acceptance.json')))
+        if (util.isPlainObject(acceptance)) acceptances[nodeId] = acceptance
+      }
+      const lkg = util.isPlainObject(state.integration) && util.isPlainObject(state.integration.lastKnownGood) ? state.integration.lastKnownGood : null
+      const check = core.feedbackResolutionCheck({ triage, feedback, requests: linkedRequests, journal, acceptances, inputDigest, manifestDigest, lkgManifestDigest: lkg?.manifestDigest ?? '' })
+      if (!check.ok) {
+        return {
+          ok: false,
+          projectId,
+          error: 'feedback-resolution check failed: ' + check.failures.join('; '),
+          failures: check.failures,
+          instruction: 'The normal gates must pass first: fresh node acceptance (autoresearch_record_acceptance), current contribution ledgers, integration coverage validation, strict build and visual verification, then a successful republish (autoresearch_finalize_run). The previous publication remains the last-known-good until the replacement commits.',
+        }
+      }
+      const receiptHashes = triage.targetNodeIds
+        .map((id) => (Array.isArray(journal[id]?.receipts) ? journal[id].receipts[0] : ''))
+        .filter((value) => typeof value === 'string' && value)
+      // The judge-quorum bypass decision was stamped on the revision
+      // requests at reopen time (against the then-current last-known-good);
+      // the closure records it faithfully — a stale base digest can never
+      // claim the bypass (plan §8.1). Every triage target must carry a
+      // linked request and all stored decisions must agree; anything less is
+      // recorded as not-applied (never vacuously authorized).
+      const bypassValues = [...new Set(linkedRequests.map((request) => request?.judgeQuorumBypass).filter((value) => value === 'applied' || value === 'not-applied'))]
+      const targetsCovered = triage.targetNodeIds.every((targetId) => linkedRequests.some((request) => request?.nodeId === targetId))
+      const linkedBypass = targetsCovered && bypassValues.length === 1 && bypassValues[0] === 'applied' ? 'applied' : 'not-applied'
+      const closure = core.normalizeFeedbackClosure({
+        affectedNodeIds: triage.targetNodeIds,
+        receiptHashes,
+        integrationInputDigest: inputDigest,
+        publishManifestDigest: manifestDigest,
+        resolvedAt,
+        judgeQuorumBypass: linkedBypass,
+      })
+      const resolved = core.makeRecord('user-feedback', core.feedbackVersion(feedback, { status: 'resolved', closure }))
+      await writeFeedbackRecord(fops, dir, resolved, resolved.digest + '.json')
+      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+      // Replace every pointer into this feedback CHAIN (the triaged version
+      // and any resolving version linked to the same triage) with the
+      // resolved version.
+      const pointers = []
+      for (const entry of Array.isArray(integration.feedback) ? integration.feedback : []) {
+        if (entry?.feedbackId === feedback.digest) { pointers.push({ feedbackId: resolved.digest, status: 'resolved' }); continue }
+        if (entry?.status === 'resolving' && typeof entry.feedbackId === 'string' && entry.feedbackId) {
+          const other = await readFeedbackByDigest(fops, dir, entry.feedbackId)
+          if (other?.triageDigest === feedback.triageDigest) { pointers.push({ feedbackId: resolved.digest, status: 'resolved' }); continue }
+        }
+        pointers.push(entry)
+      }
+      if (!pointers.some((entry) => entry?.feedbackId === resolved.digest)) pointers.push({ feedbackId: resolved.digest, status: 'resolved' })
+      integration.feedback = pointers
+      state.integration = integration
+      state.updatedAt = new Date().toISOString()
+      await fops.writeJson(loaded.path, state)
+      const integrationId = plan.plan.integrationId ?? 'integration'
+      const integrationNode = util.isPlainObject(state.nodes?.[integrationId]) ? state.nodes[integrationId] : {}
+      const event = core.republishedEvidenceEvent({ projectId, integrationNodeId: integrationId, feedback: resolved, closure, at: resolvedAt })
+      return {
+        ok: true,
+        feedback: resolved,
+        feedbackPath: pathutil.relativePath(baseDir, dir) + '/' + resolved.digest + '.json',
+        closure,
+        judgeQuorumBypass: closure.judgeQuorumBypass,
+        integrationNodeId: integrationId,
+        integrationIssueId: typeof integrationNode.issueId === 'string' ? integrationNode.issueId : '',
+        event,
+        instruction: 'Post the one concise project-republished event: linear_post_evidence_event(projectId, issueId=' + (integrationNode.issueId || '<integration issue id>') + ', nodeId="' + integrationId + '", type/summary/evidence/at from the returned event). Update every affected Linear context (re-claim through linear_project_node; set the integration nextAction to the done state via linear_update_node_context with a fresh contextDigest). The replacement publication is now the current output.',
       }
     })
 
     // ── 26. coverage_validate (plan §4.4) ──────────────────────────────────
 
-    tool('autoresearch_coverage_validate', 'Validate integration-coverage.json against final.tex and every current node output ledger: every substantive span needs a claim record with resolvable sources, evidence, and transform; required contributions need explicit dispositions; unsupported sentences and silent omissions fail.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        projectId: str('Approved plan project id.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        coveragePath: str('Path to integration-coverage.json (run-relative or workspace-relative).'),
-        finalTexPath: str('Path to final.tex.'),
-        nodeOutputs: { type: 'object', additionalProperties: true, description: '{nodeId: path} to each current node-output.json.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_coverage_validate', 'Validate integration-coverage.json against final.tex and every current node output ledger: every substantive span needs a claim record with resolvable sources, evidence, and transform; required contributions need explicit dispositions; unsupported sentences and silent omissions fail.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8452,20 +9351,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 27. tex_final_check (plan §4.4) ────────────────────────────────────
 
-    tool('autoresearch_tex_final_check', 'Final TeX verification for integration: citation keys resolve, labels unique and referenced, no forbidden paths, missing graphics fail, texcount enforces the project word budget, a strict latexmk build (never -f) passes, .fls inputs are workspace-local-only, and optional coverage validation runs. Records source/log/input/PDF hashes.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        projectId: str('Approved plan project id (loads the project contract for the word budget).'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: { type: 'string', description: 'Integration run directory containing final.tex.' },
-        bibliographyKeys: { type: 'array', items: { type: 'string' }, description: 'Known bibliography keys (or bibliographyPath).' },
-        bibliographyPath: str('Optional path to a .bib file to extract keys from.'),
-        wordBudget: { type: 'number', description: 'Override the project word budget.' },
-        reproducibleProfile: { type: 'boolean', description: 'Run a double-build under a fixed profile and require equal PDF hashes.' },
-        coveragePath: str('Optional integration-coverage.json path (run-relative) for coverage validation.'),
-        nodeOutputs: { type: 'object', additionalProperties: true, description: '{nodeId: path} to each current node-output.json (coverage only).' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_tex_final_check', 'Final TeX verification for integration: citation keys resolve, labels unique and referenced, no forbidden paths, missing graphics fail, texcount enforces the project word budget, a strict latexmk build (never -f) passes, .fls inputs are workspace-local-only, and optional coverage validation runs. Records source/log/input/PDF hashes.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8588,13 +9474,27 @@ const ORCHESTRATOR_PLUGIN = {
         if (wordBudget !== null && wordCount > wordBudget) {
           record.staticErrors.push((wordCountSource === 'texcount' ? 'texcount reports ' : 'assembled word count reports ') + wordCount + ' words; the project budget is ' + wordBudget + '.')
         }
-        const build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex')
+        // Reproducible profiles pin SOURCE_DATE_EPOCH to the approved plan's
+        // approval instant; both passes of the double build share the pin so
+        // PDF bytes compare deterministically.
+        const finalEpoch = plan?.ok ? planApprovalEpoch({ approvedAt: plan.plan.approvedAt }) : null
+        const finalBuildOpts = finalEpoch !== null ? { sourceDateEpoch: finalEpoch } : {}
+        const build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
         record.compiled = true
         record.clean = build.clean
         record.exitCode = build.exitCode
         record.logHash = build.logHash
         record.flsHash = build.flsHash
         record.pdfHash = build.pdfHash
+        if (build.sourceDateEpoch !== undefined) record.sourceDateEpoch = build.sourceDateEpoch
+        if (build.firstError !== null) {
+          record.firstError = build.firstError
+          record.errorLine = build.errorLine
+          record.errorContext = build.errorContext
+          record.buildCommand = build.command
+          record.scratchCleaned = build.scratchCleaned
+          record.cleanupError = build.cleanupError
+        }
         if (!build.clean) record.staticErrors.push('strict final TeX build failed with exit ' + build.exitCode + ': ' + build.logTail.slice(0, 400))
         const flsText = await readFileSafe(fops, pathutil.join(runDir, 'final.fls'))
         const inputLines = flsText.split('\n').filter((line) => line.startsWith('INPUT '))
@@ -8616,9 +9516,10 @@ const ORCHESTRATOR_PLUGIN = {
           record.staticErrors.push('Unexpected workspace-external inputs in the build: ' + record.forbiddenInputs.slice(0, 5).join(', '))
         }
         if (args.reproducibleProfile === true) {
-          const build2 = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex')
+          const build2 = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
           record.reproducible = {
             profile: true,
+            sourceDateEpoch: build.sourceDateEpoch ?? build2.sourceDateEpoch ?? null,
             firstPdfHash: record.pdfHash,
             secondPdfHash: build2.pdfHash,
             equal: record.pdfHash === build2.pdfHash && record.pdfHash !== '',
@@ -8646,16 +9547,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 27b. render_preview (visual inspection: page images + page count) ───
 
-    tool('autoresearch_render_preview', 'Render the integration PDF to per-page PNG images for visual inspection and return the page count plus an optional page-budget check. Builds the PDF first (strict latexmk) when missing, rasterizes via pdftoppm → mutool → gs, and writes images under <runDir>/preview/. The integration editor reads these images with read_image to check page-limit overflow and formatting.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-        runDir: { type: 'string', description: 'Integration run directory containing the compiled PDF (or the TeX to build).' },
-        mainFile: str('TeX main file name without extension (default final).'),
-        dpi: { type: 'number', description: 'Render DPI (default 150; clamped to 72–600).' },
-        pageBudget: { type: 'number', description: 'Optional page limit for a mechanical page-count check.' },
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_render_preview', 'Render the integration PDF to per-page PNG images for visual inspection and return the page count plus an optional page-budget check. Builds the PDF first (strict latexmk) when missing, rasterizes via pdftoppm → mutool → gs, and writes images under <runDir>/preview/. The integration editor reads these images with read_image to check page-limit overflow and formatting.', null, async (args, exec) => {
       assertCoordinator(exec)
       if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot render the PDF.')
       const baseDir = sessionBaseDir(exec, args)
@@ -8670,15 +9562,7 @@ const ORCHESTRATOR_PLUGIN = {
 
     // ── 28. migration_diagnostic (plan §4.2, non-mutating) ─────────────────
 
-    tool('autoresearch_migration_diagnostic', 'Report the exact contradictory fields of an inconsistent approved plan and a proposed v2 revision diff. Never rewrites the plan: execution stays blocked until a human approves a new plan revision. Legacy status/history remain readable while blocked.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        plan: { type: 'object', additionalProperties: true, description: 'The plan object (takes precedence over path).' },
-        path: str('Optional plan.json path relative to the workspace root.'),
-        projectId: str('Optional project id used to derive the default path.'),
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_migration_diagnostic', 'Report the closed-catalog legacy fingerprint of a non-canonical approved plan (plan-v1 / plan-v2 / plan-v2-exposure / unknown legacy shape) and the migration action. Never rewrites the plan: execution stays blocked until the offline migrator (scripts/migrate-workspace.mjs) produces a proposed canonical revision and a human approves it. Canonical plans return their validation errors (if any) with action none or repair.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
       const fops = makeFops(baseDir)
@@ -8699,25 +9583,20 @@ const ORCHESTRATOR_PLUGIN = {
         if (!util.isPlainObject(plan)) throw new Error('plan.json missing or not valid JSON: ' + planPath)
       }
       const before = JSON.stringify(plan)
-      const diagnostic = core.legacyMigrationDiagnostic(plan, { planPath: planPath || null })
+      const diagnostic = core.migrationDiagnostic(plan, { planPath: planPath || null })
       const after = JSON.stringify(plan)
       if (before !== after) throw new Error('migration diagnostic mutated the plan — aborting')
       return {
         ok: true,
         ...diagnostic,
         planByteIdentical: before === after,
-        instruction: diagnostic.instruction,
+        instruction: diagnostic.action,
       }
     })
 
     // ── 29. build_probe (plan §4.5 / WP5) ──────────────────────────────────
 
-    tool('autoresearch_build_probe', 'Report the mounted build generation, the expected aggregate build ID, the recomputed disk graph hashes, and graphMatches. Both preset entries (orchestrator and Linear) must report the same candidate aggregate ID and graphMatches:true after a remount.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: str('Workspace root. Defaults to the calling session workspace.'),
-      },
-    }, async (args, exec) => {
+    tool('autoresearch_build_probe', 'Report the mounted build generation, the expected aggregate build ID, the recomputed disk graph hashes, and graphMatches. Both preset entries (orchestrator and Linear) must report the same candidate aggregate ID and graphMatches:true after a remount.', null, async (args, exec) => {
       assertCallingAgent(exec)
       if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot hash the runtime graph')
       const baseDir = sessionBaseDir(exec, args)
@@ -8734,6 +9613,348 @@ const ORCHESTRATOR_PLUGIN = {
         mismatches: probe.mismatches,
         mountedUrl: import.meta.url,
         entry: 'research-orchestrator',
+      }
+    })
+
+    // ── capability probe (confinement attestation; canonical plan §3.7) ────
+    tool('autoresearch_capability_probe', 'Coordinator-only diagnostic probe of the coordinator filesystem and subprocess adapters: writeScope, readScope, and shell egress. DSH does not expose a per-child preventive path/egress adapter seam to this preset, so this receipt is labeled coordinator-adapters and can never unlock broad role tooling; role dispatch remains on narrow tool-name allowlists. Probe residue is cleaned up best-effort.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot run the egress check')
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const now = Date.now()
+      const ttlMs = Number.isInteger(args.ttlMs) && args.ttlMs > 0 ? args.ttlMs : 3600000
+      const workRootRel = (typeof args.workRoot === 'string' && args.workRoot.trim())
+        ? args.workRoot.trim()
+        : ((typeof args.runDir === 'string' && args.runDir.trim()) ? args.runDir.trim() : null)
+      if (!workRootRel) throw new Error('workRoot or runDir is required: the declared work root is the confinement boundary being probed.')
+      const workRootAbs = abs(baseDir, workRootRel)
+      const readRootsRel = Array.isArray(args.readRoots) && args.readRoots.length > 0 ? args.readRoots.map(String) : [workRootRel]
+      const readRootsAbs = readRootsRel.map((r) => abs(baseDir, r))
+      const runRoot = (typeof args.runDir === 'string' && args.runDir.trim()) ? abs(baseDir, args.runDir) : null
+
+      // A fresh, passed receipt short-circuits unless forced.
+      if (runRoot && !args.force) {
+        try {
+          const existing = await fops.readJson(pathutil.join(runRoot, 'capability', 'confinement-attestation.json'))
+          if (core.attestationOk(existing, baseDir, now, pathutil.relativePath(baseDir, runRoot))) return { ok: true, cached: true, receipt: existing }
+        } catch {}
+      }
+
+      const notes = []
+      const stamp = String(now).slice(-8)
+      const isOutsideReadRoots = (p) => !readRootsAbs.some((r) => p === r || p.startsWith(r + pathutil.sep))
+
+      // ── writeScope: create+write a sibling file just outside the work root ──
+      let writeScope = 'not-enforced'
+      const writeTargetAbs = pathutil.join(pathutil.dirname(workRootAbs), 'capability-probe-write-' + stamp + '.txt')
+      try {
+        if (typeof fops.ensureDir === 'function') await fops.ensureDir(pathutil.dirname(writeTargetAbs))
+        await fops.writeText(writeTargetAbs, 'capability-probe\n')
+        writeScope = 'not-enforced'
+        notes.push('writeScope: a create+write just outside the work root SUCCEEDED (' + pathutil.relativePath(baseDir, writeTargetAbs) + '); writes are not confined to the declared work root.')
+        try { await fops.remove(writeTargetAbs) } catch {}
+      } catch (error) {
+        writeScope = 'enforced'
+        notes.push('writeScope: a create+write just outside the work root was denied (' + String(error instanceof Error ? error.message : error).slice(0, 160) + ').')
+      }
+
+      // ── readScope: read a known-existing file outside every read root ────
+      let readScope = 'not-enforced'
+      const readCandidates = []
+      try { if (await fops.exists(writeTargetAbs)) readCandidates.push(writeTargetAbs) } catch {}
+      try {
+        for (const entry of (await fops.listDir(baseDir)).filter((e) => !e.dir)) {
+          const p = pathutil.join(baseDir, entry.name)
+          if (isOutsideReadRoots(p)) { readCandidates.push(p); break }
+        }
+      } catch {}
+      const bundlePath = decodeURIComponent(new URL(import.meta.url).pathname)
+      if (isOutsideReadRoots(bundlePath)) readCandidates.push(bundlePath)
+      let readTarget = null
+      for (const candidate of readCandidates) {
+        if (!isOutsideReadRoots(candidate)) continue
+        try {
+          if (await fops.exists(candidate)) { readTarget = candidate; break }
+        } catch {}
+      }
+      if (readTarget === null) {
+        notes.push('readScope: no known-existing file outside the declared read roots could be located; the check is inconclusive and fails closed.')
+      } else {
+        try {
+          await fops.readText(readTarget)
+          readScope = 'not-enforced'
+          notes.push('readScope: a read of ' + pathutil.relativePath(baseDir, readTarget) + ' (outside the declared read roots) SUCCEEDED; file reads are not confined to the declared read roots.')
+        } catch {
+          readScope = 'enforced'
+          notes.push('readScope: a read of ' + pathutil.relativePath(baseDir, readTarget) + ' (outside the declared read roots) was denied.')
+        }
+      }
+
+      // ── egress: a bounded real external request from the shell ───────────
+      let egress = 'enforced'
+      try {
+        const nodeBin = await subprocess.resolveExecutable('node')
+        const script = "const c=new AbortController();const t=setTimeout(()=>c.abort(),3000);fetch('https://one.one.one.one/dsh-egress-probe',{signal:c.signal,method:'HEAD'}).then(r=>{clearTimeout(t);console.log('HTTP '+r.status);process.exit(0)}).catch(e=>{clearTimeout(t);console.log('DENIED '+(e&&e.name||'error'));process.exit(3)});"
+        const result = await runSubprocess(subprocess, baseDir, [nodeBin, '-e', script])
+        if (result.exitCode === 0 && result.stdout.includes('HTTP')) {
+          egress = 'not-enforced'
+          notes.push('egress: a bounded external request from the shell SUCCEEDED (' + result.stdout.trim().slice(0, 60) + '); network egress is not confined.')
+        } else {
+          notes.push('egress: a bounded external request from the shell was denied or timed out; the probe cannot distinguish sandbox enforcement from an environment without external network, and either way no egress data reached the role.')
+        }
+      } catch (error) {
+        notes.push('egress: the egress probe could not run (' + String(error instanceof Error ? error.message : error).slice(0, 160) + '); recorded enforced because no egress capability was demonstrated.')
+      }
+
+      const observedEnforcement = writeScope === 'enforced' && readScope === 'enforced' && egress === 'enforced'
+      // This preset can probe only coordinator-owned adapters. DSH exposes a
+      // tool-name allowlist, but no per-child preventive path/egress adapter
+      // seam, so this receipt is diagnostic and cannot unlock broad role tools.
+      const passed = false
+      notes.push(observedEnforcement
+        ? 'boundary: coordinator adapters appeared confined, but the role-child adapter boundary was not probed; broad role tools remain disabled.'
+        : 'boundary: coordinator adapter checks did not demonstrate complete confinement; broad role tools remain disabled.')
+      const receipt = {
+        kind: 'confinement-attestation',
+        probedBoundary: 'coordinator-adapters',
+        workspace: baseDir,
+        runDir: runRoot ? pathutil.relativePath(baseDir, runRoot) : null,
+        workRoot: workRootRel,
+        readRoots: readRootsRel,
+        probedAt: new Date(now).toISOString(),
+        ttlMs,
+        checks: { writeScope, readScope, egress },
+        passed,
+        notes,
+      }
+      if (runRoot) {
+        await fops.writeJson(pathutil.join(runRoot, 'capability', 'confinement-attestation.json'), receipt)
+      }
+      return { ok: passed, receipt, persisted: runRoot !== null }
+    })
+
+    // ── dependency preflight (one concise report; canonical plan §5) ───────
+    tool('autoresearch_dependency_preflight', 'Coordinator-only, read-only dependency preflight: one concise report of what the next dispatch needs — model routes and judge panels (typed, fail-closed; a missing judge panel is a blocker, never a silent advisory downgrade), web provider selection (multiple usable providers is a named blocker — ambiguity is never resolved by degrading), TeX tooling + frozen templates + PDF rasterizer, bibliography declarations, image tooling for figure nodes, workspace scratch, confinement attestation status, and Linear delegation. Findings are closed-shape { severity, owner, blocked, missing, remediation }. This is tool output, not a persisted record.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = sessionBaseDir(exec, args)
+      const fops = makeFops(baseDir)
+      const baseCfg = await loadConfigFor(fops, baseDir, args.runDir)
+      const cfg = util.isPlainObject(args.config)
+        ? {
+          ...baseCfg,
+          ...args.config,
+          roleProfiles: {
+            ...(util.isPlainObject(baseCfg.roleProfiles) ? baseCfg.roleProfiles : {}),
+            ...(util.isPlainObject(args.config.roleProfiles) ? args.config.roleProfiles : {}),
+          },
+        }
+        : baseCfg
+      const findings = []
+      const okLine = (missing, remediation) => findings.push(core.preflightFinding('info', 'preset', false, missing, remediation))
+
+      // ── plan scope: the run's bound plan, else the project plan ──────────
+      let plan = null
+      let planSource = null
+      let contractNode = null
+      if (typeof args.runDir === 'string' && args.runDir.trim()) {
+        try {
+          const contractFile = await loadRunContract(fops, abs(baseDir, args.runDir))
+          if (contractFile && util.isPlainObject(contractFile.contract)) {
+            contractNode = contractFile.contract
+            if (typeof contractFile.projectId === 'string' && contractFile.projectId) {
+              const loaded = await projectstate.loadPlan(fops, baseDir, contractFile.projectId, cfg.artifactRoot)
+              if (loaded.ok) { plan = loaded.plan; planSource = 'runDir contract' }
+            }
+          }
+        } catch {}
+      }
+      if (!plan && typeof args.projectId === 'string' && args.projectId.trim()) {
+        const loaded = await projectstate.loadPlan(fops, baseDir, args.projectId.trim(), cfg.artifactRoot)
+        if (loaded.ok) { plan = loaded.plan; planSource = 'artifact root' }
+        else findings.push(core.preflightFinding('blocker', 'workspace', true, 'project plan ' + args.projectId.trim(), loaded.error))
+      }
+
+      // ── availability: injected, else live from the llm service ───────────
+      let availability = null
+      let availabilitySource = 'unavailable'
+      if (util.isPlainObject(args.availability) && Array.isArray(args.availability.models)) {
+        availability = args.availability
+        availabilitySource = 'injected'
+      } else if (llm && typeof llm.listProviders === 'function' && typeof llm.listModels === 'function') {
+        try {
+          const providers = (await llm.listProviders()) ?? []
+          const models = []
+          for (const provider of providers) {
+            const list = (await llm.listModels(provider.id)) ?? []
+            for (const m of list) {
+              models.push({ provider: typeof m.provider === 'string' ? m.provider : provider.id, model: m.id, imageCapable: false })
+            }
+          }
+          availability = { models }
+          availabilitySource = 'live'
+        } catch { availability = null }
+      }
+
+      // ── 1. model routes + judge panels (typed, fail-closed) ──────────────
+      if (plan) {
+        const routeResult = core.resolveRoleRoutes(plan, cfg, availability ?? {})
+        if (routeResult.ok) {
+          okLine('model routes', 'ok: all ' + routeResult.routes.length + ' node x role routes resolve (availability: ' + availabilitySource + ')')
+        } else {
+          for (const error of routeResult.errors) {
+            const owner = error.includes('no model configured, no fallbacks') ? 'workspace' : 'harness'
+            findings.push(core.preflightFinding('blocker', owner, true, 'model route', error))
+          }
+        }
+      } else if (availability === null) {
+        findings.push(core.preflightFinding('warning', 'harness', false, 'model routes', 'no plan scope and no live model availability, so run routes cannot be checked. Pass projectId or runDir, or restore the llm service.'))
+      } else {
+        okLine('model routes', 'no plan scope (pass projectId or runDir to validate routes); availability: ' + availabilitySource)
+      }
+
+      // ── 2. web provider selection (ambiguity ≠ missing) ──────────────────
+      const externalResearch = cfg.externalResearch !== false
+      if (!externalResearch) {
+        okLine('web provider selection', 'externalResearch=false; not required')
+      } else if (web === undefined) {
+        findings.push(core.preflightFinding('blocker', 'harness', true, 'web service', 'web service is not mounted but externalResearch is enabled. Load a composition that provides the web service.'))
+      } else {
+        const usable = (store) => store instanceof Map
+          ? [...store.values()].filter((provider) => { try { return typeof provider?.available === 'function' && provider.available() } catch { return false } }).map((provider) => provider.id)
+          : []
+        for (const [name, ids] of [['web-search provider', usable(web.searchProviders)], ['web-fetch provider', usable(web.fetchProviders)]]) {
+          if (ids.length === 1) okLine(name, 'ok: exactly one usable provider: ' + ids[0])
+          else if (ids.length === 0) findings.push(core.preflightFinding('blocker', 'harness', true, name, 'no usable ' + name + ' is registered. Register exactly one (for example @deepseek-ai/dsh-web-fetch-http for fetch).'))
+          else findings.push(core.preflightFinding('blocker', 'workspace', true, name, 'multiple usable ' + name + ' providers are registered (' + ids.join(', ') + '); pick one explicit default in config — ambiguity is never resolved by degrading silently.'))
+        }
+      }
+
+      // ── 3. TeX tooling + frozen templates + rasterizer ───────────────────
+      const planNodes = plan ? (plan.nodes ?? []) : (contractNode ? [contractNode] : [])
+      const texNodes = planNodes.filter((n) => n && n.artifactFormat === 'tex')
+      if (texNodes.length > 0) {
+        if (subprocess === undefined) {
+          findings.push(core.preflightFinding('blocker', 'harness', true, 'TeX tooling', 'subprocess service unavailable; pdflatex/xelatex/latexmk cannot be probed.'))
+        } else {
+          const tryExec = async (name) => { try { await subprocess.resolveExecutable(name); return true } catch { return false } }
+          const hasEngine = (await tryExec('pdflatex')) || (await tryExec('xelatex'))
+          const hasLatexmk = await tryExec('latexmk')
+          if (hasEngine && hasLatexmk) okLine('TeX tooling', 'ok: engine + latexmk resolvable')
+          else findings.push(core.preflightFinding('blocker', 'harness', true, 'TeX tooling', 'missing ' + [!hasEngine ? 'pdflatex or xelatex' : '', !hasLatexmk ? 'latexmk' : ''].filter(Boolean).join(' + ') + ' while the scope has ' + texNodes.length + ' TeX node(s) (' + texNodes.map((n) => n.id).join(', ') + '). Install a TeX distribution.'))
+          for (const n of texNodes) {
+            const templateRel = typeof n.verification?.templatePath === 'string' ? n.verification.templatePath.trim() : ''
+            if (!templateRel) continue
+            try {
+              if (!(await fops.exists(abs(baseDir, templateRel)))) findings.push(core.preflightFinding('blocker', 'workspace', true, 'frozen template for node ' + n.id, 'contract.verification.templatePath ' + templateRel + ' does not exist; fragment mode cannot compile.'))
+            } catch {}
+          }
+          const hasRaster = (await tryExec('pdftoppm')) || (await tryExec('mutool')) || (await tryExec('gs'))
+          if (hasRaster) okLine('PDF rasterizer', 'ok: pdftoppm/mutool/gs resolvable')
+          else findings.push(core.preflightFinding('warning', 'harness', false, 'PDF rasterizer', 'no pdftoppm, mutool, or gs on PATH: preview rendering will fail. Install poppler-utils, mupdf-tools, or ghostscript.'))
+        }
+        // ── 4. bibliography declarations (plan §9: reported before
+        //       acceptance; missing or ambiguous styles are named findings) ─
+        const styles = new Set()
+        if (typeof args.runDir === 'string' && args.runDir.trim()) {
+          try {
+            for (const entry of (await fops.listDir(abs(baseDir, args.runDir))).filter((e) => !e.dir && e.name.toLowerCase().endsWith('.tex'))) {
+              try {
+                const text = await fops.readText(pathutil.join(abs(baseDir, args.runDir), entry.name))
+                const match = text.match(/\\bibliographystyle\s*\{([^}]+)\}/)
+                if (match) styles.add(match[1])
+              } catch {}
+            }
+          } catch {}
+        }
+        if (styles.size > 0) {
+          // Resolve each declared style via kpsewhich when spawn is
+          // available; the build itself remains the authority, preflight
+          // reports ambiguity and missing styles before acceptance.
+          const canSpawn = typeof subprocess === 'object' && subprocess !== null && typeof subprocess.spawn === 'function'
+          let kpsePath = null
+          if (canSpawn) {
+            try { kpsePath = await subprocess.resolveExecutable('kpsewhich') } catch { kpsePath = null }
+          }
+          if (!kpsePath) {
+            okLine('bibliography styles', 'ok: declarations found (' + [...styles].join(', ') + '); kpsewhich unavailable, style files are verified by the TeX build itself')
+          } else {
+            for (const style of styles) {
+              try {
+                const resolved = await runSubprocess(subprocess, baseDir, [kpsePath, style + '.bst'], { maxBytes: 1024 * 1024 })
+                const hits = String(resolved.stdout).split('\n').map((line) => line.trim()).filter(Boolean)
+                if (resolved.exitCode !== 0 || hits.length === 0) {
+                  findings.push(core.preflightFinding('warning', 'workspace', false, 'bibliography style ' + style, 'style file ' + style + '.bst was not found by kpsewhich; the build may fail at \\bibliographystyle (install the style or switch the declaration).'))
+                } else if (hits.length > 1) {
+                  findings.push(core.preflightFinding('warning', 'harness', false, 'bibliography style ' + style, 'ambiguous style: kpsewhich resolved multiple candidates (' + hits.join(', ') + '); rename the style or use an explicit path so resolution is deterministic.'))
+                } else {
+                  okLine('bibliography style ' + style, 'ok: resolved ' + hits[0])
+                }
+              } catch {
+                findings.push(core.preflightFinding('warning', 'workspace', false, 'bibliography style ' + style, 'style resolution failed; the build itself will report the definitive error.'))
+              }
+            }
+          }
+        } else {
+          okLine('bibliography styles', 'no \\bibliographystyle declarations in the run TeX sources')
+        }
+      } else {
+        okLine('TeX tooling', 'no TeX nodes in scope')
+        okLine('bibliography styles', 'no TeX nodes in scope')
+      }
+
+      // ── 5. image tooling for figure nodes ────────────────────────────────
+      const figureNodes = planNodes.filter((n) => n && (n.artifactFormat === 'image' || n.artifactFormat === 'asset'))
+      if (figureNodes.length > 0) {
+        okLine('image tooling', 'figure node(s) ' + figureNodes.map((n) => n.id).join(', ') + ' rely on the image-capable model route (validated above) with the declared stdlib fallback')
+      }
+
+      // ── 6. workspace scratch ─────────────────────────────────────────────
+      {
+        const artifactRoot = typeof cfg.artifactRoot === 'string' && cfg.artifactRoot.trim() ? cfg.artifactRoot : '.research-agent'
+        const probePath = pathutil.join(abs(baseDir, artifactRoot), '.preflight-scratch.json')
+        let scratchError = null
+        try {
+          if (typeof fops.ensureDir === 'function') await fops.ensureDir(abs(baseDir, artifactRoot))
+          await fops.writeText(probePath, '{"probe":true}\n')
+          const readBack = await fops.readText(probePath)
+          if (!readBack.includes('probe')) throw new Error('probe read-back mismatch')
+        } catch (error) {
+          scratchError = error
+        } finally {
+          try { if (typeof fops.remove === 'function') await fops.remove(probePath) } catch {}
+        }
+        if (scratchError === null) okLine('workspace scratch', 'ok: artifact root writable')
+        else findings.push(core.preflightFinding('blocker', 'workspace', true, 'workspace scratch', 'artifact root not writable: ' + String(scratchError instanceof Error ? scratchError.message : scratchError).slice(0, 200)))
+      }
+
+      // ── 7. confinement attestation status ────────────────────────────────
+      if (typeof args.runDir === 'string' && args.runDir.trim()) {
+        try {
+          const att = await fops.readJson(pathutil.join(abs(baseDir, args.runDir), 'capability', 'confinement-attestation.json'))
+          if (core.attestationOk(att, baseDir, Date.now(), pathutil.relativePath(baseDir, abs(baseDir, args.runDir)))) okLine('confinement attestation', 'ok: fresh and fully enforced; the broad baseline is active for this run')
+          else findings.push(core.preflightFinding('warning', 'workspace', false, 'role-child confinement', 'preventive role-child adapter confinement is unavailable in this preset; role tooling stays on narrow tool-name allowlists. autoresearch_capability_probe records coordinator diagnostics only.'))
+        } catch {
+          findings.push(core.preflightFinding('warning', 'workspace', false, 'role-child confinement', 'preventive role-child adapter confinement is unavailable in this preset; role tooling stays on narrow tool-name allowlists. autoresearch_capability_probe records coordinator diagnostics only.'))
+        }
+      }
+
+      // ── 8. Linear delegation ─────────────────────────────────────────────
+      if (util.isPlainObject(cfg.linear)) {
+        okLine('Linear capabilities', 'Linear is configured; run linear_capability_preflight for the live probe (delegation)')
+      } else {
+        okLine('Linear capabilities', 'Linear not configured; projection is local-only')
+      }
+
+      const blocked = findings.some((finding) => finding.blocked)
+      return {
+        ok: !blocked,
+        blocked,
+        planScope: planSource,
+        availabilitySource,
+        findings,
+        coordinatorOnly: [...core.COORDINATOR_ONLY_AUTHORITIES],
+        footer: [...core.PREFLIGHT_FOOTER],
       }
     })
 
@@ -8774,12 +9995,14 @@ export const createLibraries = {
     loadAcceptance,
     computeRunDigest,
     readRunAndDigest,
+    promoteArtifact,
     runSubprocess,
     strictTexBuild,
     renderPreview,
     validateNodeTex,
     runBuildProbe,
     buildRoleTaskBase,
+    localCurrentTaskContextDigest,
     enrichReconciliationRow,
     resolveInput,
     hashFile,

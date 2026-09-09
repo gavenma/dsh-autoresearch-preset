@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion, projectState } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -13,8 +14,7 @@ const projectId = 'causal-baseline'
 const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
 await fs.mkdir(path.join(projectDir, 'revision-requests'), { recursive: true })
 
-const plan = {
-  schemaVersion: 2,
+const plan = canonicalPlan({
   projectId,
   projectName: 'Causal baseline',
   approvedAt: '2026-01-01T00:00:00.000Z',
@@ -22,23 +22,28 @@ const plan = {
   integrationId: 'integration',
   projectContract: {
     goal: 'Exercise revision routing.',
-    acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
   },
   nodes: [
-    { id: 'upstream', title: 'Upstream', kind: 'research', roles: ['research_author'], expectedOutcome: 'Input.', acceptance: [{ id: 'UP-01', text: 'Input exists.', required: true }], dependsOn: [] },
-    { id: 'consumer', title: 'Consumer', kind: 'research', roles: ['research_author'], expectedOutcome: 'Output.', acceptance: [{ id: 'CON-01', text: 'Output exists.', required: true }], dependsOn: ['upstream'] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final exists.', required: true }], dependsOn: ['consumer'] },
+    canonicalNode({ id: 'upstream', kind: 'research', roles: ['research_author'], title: 'Upstream', expectedOutcome: 'Input.', acceptance: [criterion('UP-01', 'Input exists.')] }),
+    canonicalNode({ id: 'consumer', kind: 'research', roles: ['research_author'], title: 'Consumer', expectedOutcome: 'Output.', acceptance: [criterion('CON-01', 'Output exists.')], dependsOn: ['upstream'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final exists.')], dependsOn: ['consumer'] }),
   ],
-}
-const state = {
-  schemaVersion: 1,
+})
+const state = projectState({
   projectId,
   nodes: Object.fromEntries(plan.nodes.map((node) => [node.id, {
     status: 'done', issueId: node.id + '-issue', identifier: node.id.toUpperCase(), url: 'https://example.invalid/' + node.id,
     linearState: 'Done', runDir: 'runs/' + node.id, runStatus: 'complete', currentStep: 'complete',
-    currentPass: 1, hasFinal: true, finalCommentId: node.id + '-comment', receipts: [], updatedAt: '',
+    currentPass: 0, hasFinal: true, finalCommentId: node.id + '-comment', receipts: [],
+    causalHolds: [], nodeRevision: 1, linearProjection: null, projectionStatus: 'none', updatedAt: '',
   }])),
-}
+})
 await fs.writeFile(path.join(projectDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n')
 await fs.writeFile(path.join(projectDir, 'state.json'), JSON.stringify(state, null, 2) + '\n')
 

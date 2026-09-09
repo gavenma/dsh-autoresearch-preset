@@ -1,27 +1,28 @@
-// WS4 — Output policy v8 (exposure-driven, format-agnostic; plan WS4 v8).
+// WS4 — Output policy (exposure-driven, format-agnostic; plan WS4 v8,
+// canonical cut: one policy, no legacy adapter, no policy-version markers).
 //
 // Layer 2 golden test. Fixture families:
-//   A. TeX integration, marker plan, rebuildable: true — the full GRF set
-//      (declared deliverables, source-support closure, rebuild closure +
-//      bib union, requested diagnostic mappings only, no automatic audit
-//      set), MANIFEST v8, idempotence, finalBuild staleness.
-//   B. Markdown/report integration, marker plan, no LaTeX files anywhere,
+//   A. TeX integration, rebuildable: true — the full GRF set (declared
+//      deliverables, source-support closure, rebuild closure + bib union,
+//      requested diagnostic mappings only, no automatic audit set),
+//      publish-manifest, idempotence, finalBuild staleness.
+//   B. Markdown/report integration, no LaTeX files anywhere,
 //      outputContract.artifactPath honored.
 //   C. TeX integration exposing ONLY the accepted PDF — no synthetic
 //      source closure (PDF-only exposure).
-//   D. Frozen legacy adapter (marker absent): ['final.tex','final.pdf'] /
-//      ['final.md'], rule 'legacy-adapter', no companions/closure/audit.
-//   E. New-policy contract validation (marker ⇒ explicit list, grammar,
-//      rebuildable checker, projectId, reserved names, audit-only, empty).
-//   F. Fail-before-write (unsafe, missing, unmanaged occupancy, symlink,
+//   D. Contract validation (explicit list, grammar, rebuildable checker,
+//      projectId, reserved names, audit-only, empty; non-canonical shape
+//      rejected with the single canonical error).
+//   E. Fail-before-write (unsafe, missing, unmanaged occupancy, symlink,
 //      conflict) — nothing written.
-//   G. Rollback / interrupted-transaction recovery + temp-lifecycle states
+//   F. Rollback / interrupted-transaction recovery + temp-lifecycle states
 //      (owner-only, lease, retention, live lock, confinement).
-//   H. scripts/republish-outputs.mjs (dry-run default, --write, override,
+//   G. scripts/republish-outputs.mjs (dry-run default, --write, override,
 //      project-id mismatch, finalBuild verification, never deletes GAV-*).
 //
-// Layer 0 rule honored: this file fails against the pre-v8 bundle
-// (no marker policy, no exposure-driven publish, no transactional core).
+// Layer 0 rule honored: this file fails against the pre-canonical bundle
+// (no canonical plan shape, no exposure-driven publish, no transactional
+// core).
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
@@ -30,6 +31,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -178,7 +180,6 @@ const NOW = '2026-01-01T00:00:00.000Z'
 
 function makeReceipt({ projectId, nodeId, digest, outputHash, format = 'tex', outputPath = 'output.tex', finalBuild = null }) {
   return {
-    schemaVersion: 2,
     kind: 'acceptance-receipt',
     projectId,
     planRevision: 1,
@@ -213,9 +214,9 @@ async function setupProject({ projectId, plan, runs, stateNodes, skipValidation 
     assert.equal(validation.ok, true, 'fixture plan must validate: ' + validation.errors.join('; '))
   }
   const state = {
-    schemaVersion: 1,
+    kind: 'project-state',
     projectId,
-    marker: projectId,
+    marker: 'autoresearch-project:' + projectId,
     createdAt: NOW,
     updatedAt: NOW,
     project: { linearProjectId: '', url: '', createdAt: '' },
@@ -233,7 +234,6 @@ async function setupProject({ projectId, plan, runs, stateNodes, skipValidation 
     const contract = core.nodeContract(plan, nodeId)
     await write(runDirAbs, 'run.json', JSON.stringify(makeRunJson({ runId: run.issueId.toLowerCase(), issueId: run.issueId }), null, 2) + '\n')
     await write(runDirAbs, 'node-contract.json', JSON.stringify({
-      schemaVersion: 2,
       kind: 'node-contract',
       projectId,
       projectName: plan.projectName ?? '',
@@ -242,7 +242,6 @@ async function setupProject({ projectId, plan, runs, stateNodes, skipValidation 
       planRevision: 1,
       contractDigest: digest,
       artifactFormat: contract.artifactFormat,
-      exposurePolicyVersion: plan.projectContract?.exposurePolicyVersion === 1 ? 1 : null,
       writtenAt: NOW,
       contract,
     }, null, 2) + '\n')
@@ -272,11 +271,11 @@ async function setupProject({ projectId, plan, runs, stateNodes, skipValidation 
   return { projectDir, digests }
 }
 
-async function expectFinalizeError(mount, runRel, pattern) {
+async function expectFinalizeError(mount, runRel, pattern, extraArgs = {}) {
   const finalize = mount.registered.get('autoresearch_finalize_run')
   let error = null
   try {
-    await finalize.execute({ runDir: runRel, baseDir }, mount.exec)
+    await finalize.execute({ runDir: runRel, baseDir, ...extraArgs }, mount.exec)
   } catch (err) { error = err }
   assert.ok(error, 'finalize must throw')
   assert.match(String(error.message), pattern, 'unexpected error: ' + String(error.message))
@@ -310,34 +309,49 @@ async function expectFinalizeError(mount, runRel, pattern) {
   assert.equal(core.projectIdError('a'.repeat(64)), null, '64 chars ok')
   assert.ok(core.projectIdError('-lead') !== null, 'leading dot/dash rejected')
 
-  // Marker vs legacy projectContract normalization (digest shape frozen).
-  const legacyPlan = {
-    schemaVersion: 2, projectId: 'pc-x', projectName: 'PC', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'g', acceptance: [{ id: 'P-01', text: 't', required: true }] },
-    nodes: [{ id: 'integration', title: 'I', kind: 'integration', roles: ['research_integration_editor'], expectedOutcome: 'x', acceptance: [{ id: 'I-01', text: 'x', required: true }], dependsOn: [] }],
-  }
-  const legacyContract = core.projectContract(legacyPlan)
-  assert.deepEqual(legacyContract.deliverables, ['final.tex', 'final.pdf'], 'legacy default deliverables')
-  assert.equal(legacyContract.exposurePolicyVersion, undefined, 'legacy has no marker')
-  assert.equal(legacyContract.rebuildable, undefined, 'legacy has no rebuildable')
-  assert.equal(legacyContract.diagnosticMappings, undefined, 'legacy has no mappings')
-  const markerPlan = JSON.parse(JSON.stringify(legacyPlan))
-  markerPlan.projectId = 'pc-y'
-  markerPlan.projectContract.exposurePolicyVersion = 1
-  markerPlan.projectContract.deliverables = ['final.pdf']
-  markerPlan.projectContract.rebuildable = true
-  markerPlan.projectContract.diagnosticMappings = [{ sourcePath: 'output.tex', destinationPath: 'audit/cert.tex' }]
-  const markerContract = core.projectContract(markerPlan)
-  assert.equal(markerContract.exposurePolicyVersion, 1)
-  assert.equal(markerContract.rebuildable, true)
-  assert.deepEqual(markerContract.deliverables, ['final.pdf'])
-  assert.deepEqual(markerContract.diagnosticMappings, [{ sourcePath: 'output.tex', destinationPath: 'audit/cert.tex', label: '', note: '' }])
-  assert.notEqual(markerContract.digest, core.projectContract(legacyPlan).digest, 'marker must change the digest')
-  const omittedPlan = JSON.parse(JSON.stringify(markerPlan))
-  omittedPlan.projectContract.deliverables = undefined
+  // Canonical projectContract normalization (digest shape frozen): explicit
+  // deliverables, no legacy defaults, no version markers of any kind.
+  const explicitPlan = canonicalPlan({
+    projectId: 'pc-x',
+    projectContract: {
+      goal: 'g',
+      deliverables: ['final.pdf'],
+      acceptance: [criterion('P-01', 't')],
+      test: '',
+      wordBudget: null,
+      rebuildable: true,
+      diagnosticMappings: [{ sourcePath: 'output.tex', destinationPath: 'audit/cert.tex' }],
+    },
+    nodes: [canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], expectedOutcome: 'x', acceptance: [criterion('I-01', 'x.')] })],
+  })
+  const explicitContract = core.projectContract(explicitPlan)
+  assert.equal(explicitContract.kind, 'project-contract')
+  assert.deepEqual(explicitContract.deliverables, ['final.pdf'])
+  assert.equal(explicitContract.rebuildable, true)
+  assert.deepEqual(explicitContract.diagnosticMappings, [{ sourcePath: 'output.tex', destinationPath: 'audit/cert.tex', label: '', note: '' }])
+  assert.equal(explicitContract.exposurePolicyVersion, undefined, 'no policy marker in the canonical contract')
+  assert.equal(explicitContract.schemaVersion, undefined, 'no schema version in the canonical contract')
+  const otherPlan = canonicalPlan({
+    projectId: 'pc-y',
+    projectContract: {
+      goal: 'g',
+      deliverables: ['final.tex', 'final.pdf'],
+      acceptance: [criterion('P-01', 't')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+    },
+    nodes: [canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], expectedOutcome: 'x', acceptance: [criterion('I-01', 'x.')] })],
+  })
+  assert.notEqual(core.projectContract(otherPlan).digest, explicitContract.digest, 'different deliverables must change the digest')
+  const omittedPlan = JSON.parse(JSON.stringify(explicitPlan))
+  delete omittedPlan.projectContract.deliverables
+  delete omittedPlan.projectContract.rebuildable
   const omittedContract = core.projectContract(omittedPlan)
-  assert.deepEqual(omittedContract.deliverables, [], 'marker + omitted list = explicit no-exposure ([])')
-  assert.equal(omittedContract.deliverablesOmitted, true)
+  assert.deepEqual(omittedContract.deliverables, [], 'absent list normalizes to explicit no-exposure ([])')
+  assert.equal(omittedContract.rebuildable, false, 'absent rebuildable normalizes to false')
+  assert.ok(!core.validatePlan(omittedPlan).ok, 'an omitted deliverables list is a validation error (must be explicit)')
 
   // Temp staging names are safe + unique per owner.
   assert.equal(lib.helpers.tempStagingName('RR-INT'), '.publish-tmp-RR-INT')
@@ -381,12 +395,12 @@ const fls = [
 ].join('\n') + '\n'
 const DECOYS = { 'final.aux': 'aux decoy\n', 'final.log': 'log decoy\n', 'final.bbl': 'bbl decoy\n', 'final.out': 'out decoy\n', 'final.toc': 'toc decoy\n', 'final.fdb_latexmk': 'fdb decoy\n', 'final.synctex.gz': Buffer.from('gz decoy\n'), 'preview.tex': 'preview decoy\n', 'preview.pdf': Buffer.from('%PDF preview decoy\n'), 'pass_01/A.tex': 'candidate decoy\n' }
 
-// ── S2. Fixture A: TeX marker plan, rebuildable true (full GRF set) ─────────
-const grfPlan = {
-  schemaVersion: 2, projectId: 'grf-proj', projectName: 'GRF', approvedAt: NOW, revision: 1, integrationId: 'integration',
+// ── S2. Fixture A: TeX plan, rebuildable true (full GRF set) ────────────────
+const grfPlan = canonicalPlan({
+  projectId: 'grf-proj',
+  projectName: 'GRF',
   projectContract: {
     goal: 'GRF fixture.',
-    exposurePolicyVersion: 1,
     deliverables: [
       'final.tex (submission source)',
       'submission: final.pdf (submitted rendering)',
@@ -395,18 +409,20 @@ const grfPlan = {
       'figure-dossier.tex',
       'bib-verification-ledger.bib',
     ],
+    test: '',
+    wordBudget: null,
     rebuildable: true,
     diagnosticMappings: [
       { sourcePath: 'output.tex', destinationPath: 'audit/audit-certificate.tex', label: 'certificate', note: 'accepted build certificate' },
       { sourcePath: 'output.pdf', destinationPath: 'audit/audit-certificate.pdf' },
     ],
-    acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
   },
   nodes: [
-    { id: 'author', title: 'Author', kind: 'research', roles: ['research_author'], expectedOutcome: 'Fragment.', acceptance: [{ id: 'AUT-01', text: 'Fragment exists.', required: true }], outputContract: { texMode: 'fragment' }, dependsOn: [] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: ['author'] },
+    canonicalNode({ id: 'author', kind: 'research', roles: ['research_author'], expectedOutcome: 'Fragment.', acceptance: [criterion('AUT-01', 'Fragment exists.')], outputContract: { artifactPath: 'output.tex', texMode: 'fragment' } }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' }, dependsOn: ['author'] }),
   ],
-}
+})
 const grfFinalBuild = {
   sourcePath: 'final.tex',
   sourceHash: sha256(finalTex),
@@ -454,7 +470,7 @@ const grfFinalBuild = {
   const mount = makeMount(baseDir)
   const finalize = mount.registered.get('autoresearch_finalize_run')
   const result = await finalize.execute({ runDir: intRunRel, baseDir }, mount.exec)
-  assert.equal(result.v2.bound, true)
+  assert.equal(result.contract.bound, true)
   const runAfter = JSON.parse(await fs.readFile(path.join(baseDir, intRunRel, 'run.json'), 'utf8'))
   assert.equal(runAfter.status, 'complete', 'successful finalize must complete the run')
 
@@ -472,9 +488,21 @@ const grfFinalBuild = {
 
   // Project publish: EXACT exposure-driven tree.
   assert.equal(result.projectPublish.ok, true, JSON.stringify(result.projectPublish.errors))
-  assert.equal(result.projectPublish.mode, 'new')
+  assert.equal(result.projectPublish.mode, undefined, 'no publish-mode marker in the canonical publish result')
   assert.equal(result.projectPublish.closureSource, 'source-support')
-  assert.deepEqual(result.deliverables, [], 'bound v2 runs must not publish per-issue folders')
+  // Last-known-good integration (plan §8.4): a successful integration
+  // publish records the operational pointer that feedback authority gating
+  // is measured against.
+  assert.ok(result.projectPublish.lastKnownGood, 'a successful integration publish records the LKG pointer')
+  assert.match(result.projectPublish.lastKnownGood.manifestDigest, /^[0-9a-f]{64}$/)
+  assert.equal(result.projectPublish.lastKnownGood.inputDigest, null, 'no integrationInputDigest was supplied')
+  assert.ok(result.projectPublish.lastKnownGood.publishedAt)
+  assert.deepEqual(stateAfter.integration?.lastKnownGood, result.projectPublish.lastKnownGood, 'the LKG pointer is persisted in the state journal')
+  const lkgBeforeInvalid = stateAfter.integration.lastKnownGood
+  await expectFinalizeError(mount, intRunRel, /64-hex integration input digest/, { integrationInputDigest: 'not-hex' })
+  const stateAfterInvalid = JSON.parse(await fs.readFile(path.join(projectDir, 'state.json'), 'utf8'))
+  assert.deepEqual(stateAfterInvalid.integration?.lastKnownGood, lkgBeforeInvalid, 'a rejected integrationInputDigest must not touch the LKG pointer')
+  assert.deepEqual(result.deliverables, [], 'contract-bound runs must not publish per-issue folders')
   const outputsDir = path.join(baseDir, 'outputs')
   const tree = await walk(outputsDir)
   assert.deepEqual(tree, [
@@ -501,10 +529,10 @@ const grfFinalBuild = {
   assert.ok(Buffer.from(await fs.readFile(path.join(outputsDir, 'grf-proj', 'final.pdf'))).equals(finalPdf))
   assert.equal(await fs.readFile(path.join(outputsDir, 'grf-proj', 'sec-author.tex'), 'utf8'), secAuthor)
 
-  // MANIFEST v8.
+  // publish-manifest (canonical: no policy-version marker).
   const man = JSON.parse(await fs.readFile(path.join(outputsDir, 'grf-proj', 'MANIFEST.json'), 'utf8'))
-  assert.equal(man.kind, 'project-publish-manifest')
-  assert.equal(man.policyVersion, 1)
+  assert.equal(man.kind, 'publish-manifest')
+  assert.equal(man.policyVersion, undefined, 'no policy version marker on the canonical manifest')
   assert.equal(man.projectId, 'grf-proj')
   assert.equal(man.planRevision, 1)
   assert.equal(man.artifactFormat, 'tex')
@@ -590,18 +618,22 @@ const grfFinalBuild = {
 
 // ── S3. Fixture B: markdown/report, no LaTeX files, artifactPath honored ────
 {
-  const mdPlan = {
-    schemaVersion: 2, projectId: 'md-proj', projectName: 'MD', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const mdPlan = canonicalPlan({
+    projectId: 'md-proj',
+    projectName: 'MD',
     projectContract: {
       goal: 'Report fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['report.md', 'appendix/notes.md'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], artifactFormat: 'markdown', expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { artifactPath: 'report.md' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], artifactFormat: 'markdown', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'report.md' } }),
     ],
-  }
+  })
   const reportMd = '# Report\n\nBody text for the report.\n'
   const notesMd = '# Notes\n\nAppendix notes.\n'
   const intRunRel = path.join('.research-agent', 'runs', 'MD-INT', '2026-01-01T00-00-00-integration')
@@ -624,7 +656,8 @@ const grfFinalBuild = {
   const tree = await walk(path.join(baseDir, 'outputs', 'md-proj'))
   assert.deepEqual(tree.sort(), ['MANIFEST.json', 'appendix/notes.md', 'report.md'].sort(), 'markdown exposure: ' + JSON.stringify(tree))
   const man = JSON.parse(await fs.readFile(path.join(baseDir, 'outputs', 'md-proj', 'MANIFEST.json'), 'utf8'))
-  assert.equal(man.policyVersion, 1)
+  assert.equal(man.kind, 'publish-manifest')
+  assert.equal(man.policyVersion, undefined, 'no policy version marker')
   assert.equal(man.artifactFormat, 'markdown')
   assert.equal(man.rebuildable, false)
   assert.equal(man.entries.find((entry) => entry.path === 'report.md').sourceRule, 'declared')
@@ -633,18 +666,22 @@ const grfFinalBuild = {
 
 // ── S4. Fixture C: TeX, PDF-only exposure — no synthetic source closure ─────
 {
-  const pdfPlan = {
-    schemaVersion: 2, projectId: 'pdf-proj', projectName: 'PDF', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const pdfPlan = canonicalPlan({
+    projectId: 'pdf-proj',
+    projectName: 'PDF',
     projectContract: {
       goal: 'PDF-only fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['final.pdf'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const intRunRel = path.join('.research-agent', 'runs', 'PDF-INT', '2026-01-01T00-00-00-integration')
   await setupProject({
     projectId: 'pdf-proj',
@@ -675,125 +712,54 @@ const grfFinalBuild = {
   assert.ok(Buffer.from(await fs.readFile(path.join(baseDir, 'outputs', 'pdf-proj', 'final.pdf'))).equals(finalPdf))
 }
 
-// ── S5. Fixture D: frozen legacy adapter (marker absent) ────────────────────
+// ── S5. (legacy-adapter family removed by the canonical cut) ────────────────
+// The frozen legacy adapter no longer exists: there is exactly one
+// exposure-driven policy, no `mode: 'legacy-adapter'` publish path, and no
+// `policyVersion` marker. The canonical behaviors that family used to pin
+// down are covered by the surrounding families — declared-rule publishing
+// (S2), PDF-only exposure (S4), and the explicit empty-list skip (S9).
+// A non-canonical (old-shape) plan is rejected at the boundary with the
+// single canonical error, exercised by the S6 continuation block.
+
+// ── S6. Contract validation (canonical: every plan carries the contract) ────
 {
-  // TeX legacy: default primaries, rule legacy-adapter, nothing else.
-  const legacyPlan = {
-    schemaVersion: 2, projectId: 'leg-proj', projectName: 'LEG', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Legacy.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
-    nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
-    ],
-  }
-  const legRunRel = path.join('.research-agent', 'runs', 'LEG-INT', '2026-01-01T00-00-00-integration')
-  await setupProject({
-    projectId: 'leg-proj',
-    plan: legacyPlan,
-    runs: {
-      integration: {
-        issueId: 'LEG-INT', runRel: legRunRel, outputHash: sha256(outputTex),
-        files: {
-          'output.tex': outputTex,
-          'final.tex': '\\documentclass{article}\n\\begin{document}\nLegacy final.\n\\end{document}\n',
-          'final.pdf': finalPdf,
-          'sec-author.tex': secAuthor,
-          'references.bib': referencesBib,
-        },
-        ledger: {},
-      },
+  const base = canonicalPlan({
+    projectId: 'val-proj',
+    projectName: 'VAL',
+    projectContract: {
+      goal: 'Validation.',
+      deliverables: [],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
-    stateNodes: { integration: { status: 'running', runStatus: 'in-progress', hasFinal: false, receipts: [] } },
-  })
-  const mount = makeMount(baseDir)
-  const finalize = mount.registered.get('autoresearch_finalize_run')
-  const result = await finalize.execute({ runDir: legRunRel, baseDir }, mount.exec)
-  assert.equal(result.projectPublish.ok, true, JSON.stringify(result.projectPublish.errors))
-  assert.equal(result.projectPublish.mode, 'legacy-adapter')
-  const tree = await walk(path.join(baseDir, 'outputs', 'leg-proj'))
-  assert.deepEqual(tree.sort(), ['MANIFEST.json', 'final.pdf', 'final.tex'].sort(), 'legacy adapter publishes the frozen primaries only: ' + JSON.stringify(tree))
-  const man = JSON.parse(await fs.readFile(path.join(baseDir, 'outputs', 'leg-proj', 'MANIFEST.json'), 'utf8'))
-  assert.equal(man.policyVersion, 'legacy-adapter')
-  assert.equal(man.rebuildable, false)
-  for (const entry of man.entries) assert.equal(entry.sourceRule, 'legacy-adapter')
-  assert.ok(!tree.some((rel) => rel.includes('sec-author') || rel.includes('references.bib') || rel.includes('audit/')), 'no companions/closure/audit for legacy: ' + JSON.stringify(tree))
-
-  // Markdown legacy: final.md only.
-  const legmdPlan = {
-    schemaVersion: 2, projectId: 'legmd-proj', projectName: 'LEGMD', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Legacy MD.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], artifactFormat: 'markdown', expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
-  const legmdRunRel = path.join('.research-agent', 'runs', 'LEGMD-INT', '2026-01-01T00-00-00-integration')
-  await setupProject({
-    projectId: 'legmd-proj',
-    plan: legmdPlan,
-    runs: {
-      integration: {
-        issueId: 'LEGMD-INT', runRel: legmdRunRel, outputHash: sha256('# Legacy MD\n'),
-        files: { 'final.md': '# Legacy MD\n' },
-        ledger: {},
-      },
-    },
-    stateNodes: { integration: { status: 'running', runStatus: 'in-progress', hasFinal: false, receipts: [] } },
   })
-  const legmdResult = await finalize.execute({ runDir: legmdRunRel, baseDir }, mount.exec)
-  assert.equal(legmdResult.projectPublish.ok, true, JSON.stringify(legmdResult.projectPublish.errors))
-  const legmdTree = await walk(path.join(baseDir, 'outputs', 'legmd-proj'))
-  assert.deepEqual(legmdTree.sort(), ['MANIFEST.json', 'final.md'].sort(), 'legacy markdown adapter: ' + JSON.stringify(legmdTree))
-
-  // Legacy explicit empty list: skip, no folder.
-  const legEpPlan = JSON.parse(JSON.stringify(legacyPlan))
-  legEpPlan.projectId = 'legep-proj'
-  legEpPlan.projectContract.deliverables = []
-  const legEpRunRel = path.join('.research-agent', 'runs', 'LEGEp-INT', '2026-01-01T00-00-00-integration')
-  await setupProject({
-    projectId: 'legep-proj',
-    plan: legEpPlan,
-    runs: {
-      integration: {
-        issueId: 'LEGEp-INT', runRel: legEpRunRel, outputHash: sha256(outputTex),
-        files: { 'output.tex': outputTex, 'final.tex': '\\documentclass{article}\n\\begin{document}\nEmpty.\n\\end{document}\n', 'final.pdf': finalPdf },
-        ledger: {},
-      },
-    },
-    stateNodes: { integration: { status: 'running', runStatus: 'in-progress', hasFinal: false, receipts: [] } },
-  })
-  const legEpResult = await finalize.execute({ runDir: legEpRunRel, baseDir }, mount.exec)
-  assert.equal(legEpResult.projectPublish.skipped, true)
-  assert.ok(!await dirExists(path.join(baseDir, 'outputs', 'legep-proj')), 'legacy explicit empty list must not create a folder')
-}
-
-// ── S6. New-policy validation + marker-omitted reject ───────────────────────
-{
-  const base = {
-    schemaVersion: 2, projectId: 'val-proj', projectName: 'VAL', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Validation.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
-    nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
-    ],
-  }
-  // Marker without deliverables list → rejected.
+  assert.equal(core.validatePlan(base).ok, true, 'the canonical base fixture must validate: ' + JSON.stringify(core.validatePlan(base).errors))
+  // Absent deliverables list → rejected (the list must be explicit).
   const noList = JSON.parse(JSON.stringify(base))
-  noList.projectContract.exposurePolicyVersion = 1
+  delete noList.projectContract.deliverables
   const noListValidation = core.validatePlan(noList)
   assert.equal(noListValidation.ok, false)
-  assert.ok(noListValidation.errors.some((e) => e.includes('explicit projectContract.deliverables array')), JSON.stringify(noListValidation.errors))
-  // Marker with a malformed spec → rejected with the grammar error.
+  assert.ok(noListValidation.errors.some((e) => e.includes('must be an explicit array')), JSON.stringify(noListValidation.errors))
+  // A malformed spec → rejected with the grammar error.
   const badSpec = JSON.parse(JSON.stringify(noList))
   badSpec.projectContract.deliverables = ['bad path.tex']
   const badSpecValidation = core.validatePlan(badSpec)
   assert.equal(badSpecValidation.ok, false)
   assert.ok(badSpecValidation.errors.some((e) => e.includes('safe relative file path')), JSON.stringify(badSpecValidation.errors))
-  // Marker with rebuildable but no exposed TeX source → rejected.
+  // rebuildable but no exposed TeX source → rejected.
   const noTex = JSON.parse(JSON.stringify(noList))
   noTex.projectContract.deliverables = ['final.pdf']
   noTex.projectContract.rebuildable = true
   const noTexValidation = core.validatePlan(noTex)
   assert.equal(noTexValidation.ok, false)
   assert.ok(noTexValidation.errors.some((e) => e.includes('exposed TeX source deliverable')), JSON.stringify(noTexValidation.errors))
-  // Marker with a bad projectId → rejected.
+  // A bad projectId → rejected.
   const badId = JSON.parse(JSON.stringify(noList))
   badId.projectId = 'bad id'
   badId.projectContract.deliverables = ['final.tex']
@@ -807,53 +773,67 @@ const grfFinalBuild = {
   const badMapValidation = core.validatePlan(badMap)
   assert.equal(badMapValidation.ok, false)
   assert.ok(badMapValidation.errors.some((e) => e.includes('under audit/')), JSON.stringify(badMapValidation.errors))
-  // Valid marker plan passes.
+  // A valid plan with an explicit list passes.
   const good = JSON.parse(JSON.stringify(noList))
   good.projectContract.deliverables = ['final.tex']
   assert.equal(core.validatePlan(good).ok, true, JSON.stringify(core.validatePlan(good).errors))
 
-  // (the marker-omitted finalize rejection is exercised in the next block,
+  // (the invalid-contract finalize rejection is exercised in the next block,
   // which hand-writes the deliberately invalid plan)
 }
 
-// (S6 continuation — hand-written invalid-plan fixture)
+// (S6 continuation — hand-written invalid-plan fixture: canonical shape with
+// the explicitly-required deliverables list removed)
 {
-  const badPlan = {
-    schemaVersion: 2, projectId: 'valbad-proj', projectName: 'VALBAD', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Validation.', exposurePolicyVersion: 1, acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+  const badPlan = canonicalPlan({
+    projectId: 'valbad-proj',
+    projectName: 'VALBAD',
+    projectContract: {
+      goal: 'Validation.',
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
+  delete badPlan.projectContract.deliverables
   const projectDir = path.join(baseDir, '.research-agent', 'projects', 'valbad-proj')
   await write(projectDir, 'plan.json', JSON.stringify(badPlan, null, 2) + '\n')
   const runRel = path.join('.research-agent', 'runs', 'VALBAD-INT', '2026-01-01T00-00-00-integration')
   const digest = core.nodeContract(badPlan, 'integration').digest
   const contract = core.nodeContract(badPlan, 'integration')
   await write(baseDir, path.join(runRel, 'run.json'), JSON.stringify(makeRunJson({ runId: 'valbad-int', issueId: 'VALBAD-INT' }), null, 2) + '\n')
-  await write(baseDir, path.join(runRel, 'node-contract.json'), JSON.stringify({ schemaVersion: 2, kind: 'node-contract', projectId: 'valbad-proj', projectName: 'VALBAD', nodeId: 'integration', artifactRoot: '.research-agent', planRevision: 1, contractDigest: digest, artifactFormat: 'tex', exposurePolicyVersion: 1, writtenAt: NOW, contract }, null, 2) + '\n')
+  await write(baseDir, path.join(runRel, 'node-contract.json'), JSON.stringify({ kind: 'node-contract', projectId: 'valbad-proj', projectName: 'VALBAD', nodeId: 'integration', artifactRoot: '.research-agent', planRevision: 1, contractDigest: digest, artifactFormat: 'tex', writtenAt: NOW, contract }, null, 2) + '\n')
   await write(baseDir, path.join(runRel, 'acceptance.json'), JSON.stringify(makeReceipt({ projectId: 'valbad-proj', nodeId: 'integration', digest, outputHash: sha256(outputTex) }), null, 2) + '\n')
   await write(baseDir, path.join(runRel, 'output.tex'), outputTex)
-  await write(projectDir, 'state.json', JSON.stringify({ schemaVersion: 1, projectId: 'valbad-proj', marker: 'valbad-proj', createdAt: NOW, updatedAt: NOW, project: {}, integrationRevision: 1, nodes: { integration: { status: 'running', issueId: 'VALBAD-INT', identifier: 'VALBAD-INT', url: '', linearState: '', runDir: runRel, runStatus: 'in-progress', currentStep: '', currentPass: 1, hasFinal: false, finalCommentId: '', receipts: [], updatedAt: NOW } }, commentCursors: {}, lastError: '' }, null, 2) + '\n')
+  await write(projectDir, 'state.json', JSON.stringify({ kind: 'project-state', projectId: 'valbad-proj', marker: 'autoresearch-project:valbad-proj', createdAt: NOW, updatedAt: NOW, project: {}, integrationRevision: 1, nodes: { integration: { status: 'running', issueId: 'VALBAD-INT', identifier: 'VALBAD-INT', url: '', linearState: '', runDir: runRel, runStatus: 'in-progress', currentStep: '', currentPass: 1, hasFinal: false, finalCommentId: '', receipts: [], updatedAt: NOW } }, commentCursors: {}, lastError: '' }, null, 2) + '\n')
   const mount = makeMount(baseDir)
-  await expectFinalizeError(mount, runRel, /exposure-policy contract requires an explicit projectContract\.deliverables array/)
+  await expectFinalizeError(mount, runRel, /the canonical project contract requires an explicit projectContract\.deliverables array/)
   assert.ok(!await dirExists(path.join(baseDir, 'outputs', 'valbad-proj')), 'rejected contract must not create a folder')
 }
 
 // ── S7. Reserved internal names point at diagnosticMappings ─────────────────
 {
-  const reservedPlan = {
-    schemaVersion: 2, projectId: 'resv-proj', projectName: 'RESV', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const reservedPlan = canonicalPlan({
+    projectId: 'resv-proj',
+    projectName: 'RESV',
     projectContract: {
       goal: 'Reserved.',
-      exposurePolicyVersion: 1,
       deliverables: ['output.tex'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const runRel = path.join('.research-agent', 'runs', 'RESV-INT', '2026-01-01T00-00-00-integration')
   await setupProject({
     projectId: 'resv-proj',
@@ -874,19 +854,22 @@ const grfFinalBuild = {
 
 // ── S8. Audit-only mapping (deliverables [] + mappings) ─────────────────────
 {
-  const auditPlan = {
-    schemaVersion: 2, projectId: 'aud-proj', projectName: 'AUD', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const auditPlan = canonicalPlan({
+    projectId: 'aud-proj',
+    projectName: 'AUD',
     projectContract: {
       goal: 'Audit-only.',
-      exposurePolicyVersion: 1,
       deliverables: [],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
       diagnosticMappings: [{ sourcePath: 'output.tex', destinationPath: 'audit/certificate.tex', note: 'build certificate' }],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const runRel = path.join('.research-agent', 'runs', 'AUD-INT', '2026-01-01T00-00-00-integration')
   await setupProject({
     projectId: 'aud-proj',
@@ -914,20 +897,24 @@ const grfFinalBuild = {
   assert.ok(!tree.some((rel) => rel === 'final.pdf' || rel === 'final.tex'), 'nothing else is exposed: ' + JSON.stringify(tree))
 }
 
-// ── S9. Marker plan, empty deliverables, no mappings → skip ─────────────────
+// ── S9. Canonical plan, empty deliverables, no mappings → skip ──────────────
 {
-  const emptyPlan = {
-    schemaVersion: 2, projectId: 'empty-proj', projectName: 'EMPTY', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const emptyPlan = canonicalPlan({
+    projectId: 'empty-proj',
+    projectName: 'EMPTY',
     projectContract: {
       goal: 'Nothing exposed.',
-      exposurePolicyVersion: 1,
       deliverables: [],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const runRel = path.join('.research-agent', 'runs', 'EMPTY-INT', '2026-01-01T00-00-00-integration')
   await setupProject({
     projectId: 'empty-proj',
@@ -950,14 +937,23 @@ const grfFinalBuild = {
   assert.ok(!await dirExists(path.join(baseDir, 'outputs', 'empty-proj')), 'empty exposure must not create a folder')
 
   // Bound non-integration run: no visible output at all.
-  const nonIntPlan = {
-    schemaVersion: 2, projectId: 'ni-proj', projectName: 'NI', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'NI.', exposurePolicyVersion: 1, deliverables: ['final.tex'], acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+  const nonIntPlan = canonicalPlan({
+    projectId: 'ni-proj',
+    projectName: 'NI',
+    projectContract: {
+      goal: 'NI.',
+      deliverables: ['final.tex'],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
     nodes: [
-      { id: 'work', title: 'Work', kind: 'research', roles: ['research_author'], expectedOutcome: 'w.', acceptance: [{ id: 'W-01', text: 'w.', required: true }], outputContract: { texMode: 'fragment' }, dependsOn: [] },
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: ['work'] },
+      canonicalNode({ id: 'work', kind: 'research', roles: ['research_author'], expectedOutcome: 'w.', acceptance: [criterion('W-01', 'w.')], outputContract: { artifactPath: 'output.tex', texMode: 'fragment' } }),
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' }, dependsOn: ['work'] }),
     ],
-  }
+  })
   const workRunRel = path.join('.research-agent', 'runs', 'NI-WORK', '2026-01-01T00-00-00-work')
   await setupProject({
     projectId: 'ni-proj',
@@ -974,18 +970,22 @@ const grfFinalBuild = {
 
 // ── S10. Fail-before-write ──────────────────────────────────────────────────
 async function makeFailProject({ projectId, deliverables, extraFiles = {}, occupy = null, conflictWorkspace = null, skipValidation = false }) {
-  const plan = {
-    schemaVersion: 2, projectId, projectName: projectId.toUpperCase(), approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId,
+    projectName: projectId.toUpperCase(),
     projectContract: {
       goal: 'Fail fixture.',
-      exposurePolicyVersion: 1,
       deliverables,
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const runRel = path.join('.research-agent', 'runs', projectId.toUpperCase().replace(/[^A-Z0-9-]/g, '-') + '-INT', '2026-01-01T00-00-00-integration')
   const files = {
     'output.tex': outputTex,
@@ -1053,13 +1053,22 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
 {
   // A crashed publish left: an interrupted staging dir (owner RR-INT) with a
   // journal, plus partially installed destination bytes.
-  const rrPlan = {
-    schemaVersion: 2, projectId: 'rr-proj', projectName: 'RR', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Rollback.', exposurePolicyVersion: 1, deliverables: ['final.tex'], acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+  const rrPlan = canonicalPlan({
+    projectId: 'rr-proj',
+    projectName: 'RR',
+    projectContract: {
+      goal: 'Rollback.',
+      deliverables: ['final.tex'],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'output.tex', texMode: 'standalone' } }),
     ],
-  }
+  })
   const runRel = path.join('.research-agent', 'runs', 'RR-INT', '2026-01-01T00-00-00-integration')
   await setupProject({
     projectId: 'rr-proj',
@@ -1085,12 +1094,12 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
   const stagingName = lib.helpers.tempStagingName('RR-INT')
   const stagingDir = path.join(baseDir, 'outputs', stagingName)
   await write(stagingDir, 'marker.json', JSON.stringify({
-    schema: 1, ownerId: 'RR-INT', runId: 'RR-INT', operation: 'publish-transaction', projectId: 'rr-proj',
+    kind: 'publish-staging-marker', ownerId: 'RR-INT', runId: 'RR-INT', operation: 'publish-transaction', projectId: 'rr-proj',
     state: 'installing', runDir: runRel,
     createdAt: '2026-01-01T20:00:00.000Z', expiresAt: '2026-01-01T20:15:00.000Z',
   }, null, 2) + '\n')
   await write(stagingDir, 'journal.json', JSON.stringify({
-    schema: 1, ownerId: 'RR-INT', runId: 'RR-INT', projectId: 'rr-proj', createdAt: '2026-01-01T20:00:00.000Z',
+    kind: 'publish-staging-marker', ownerId: 'RR-INT', runId: 'RR-INT', projectId: 'rr-proj', createdAt: '2026-01-01T20:00:00.000Z',
     snapshot: [{ path: 'final.tex', hash: v1Hash }, { path: 'MANIFEST.json', hash: '' }],
     backups: ['final.tex'],
     installedNew: ['final.pdf'],
@@ -1122,7 +1131,7 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
   const mk = async (name, marker) => {
     const dir = path.join(parent, '.publish-tmp-' + name)
     await fs.mkdir(dir, { recursive: true })
-    if (marker !== null) await fs.writeFile(path.join(dir, 'marker.json'), JSON.stringify({ schema: 1, createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:15:00.000Z', ...marker }, null, 2))
+    if (marker !== null) await fs.writeFile(path.join(dir, 'marker.json'), JSON.stringify({ kind: 'publish-staging-marker', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:15:00.000Z', ...marker }, null, 2))
     return '.publish-tmp-' + name
   }
   const leased = await mk('leased', { ownerId: 'OWN', runId: 'OWN', state: 'owned', runDir: 'rd-a', expiresAt: '2026-01-02T12:00:00.000Z' })
@@ -1173,7 +1182,8 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
   assert.equal(dry.code, 0, 'dry-run must exit 0: ' + dry.stderr)
   const dryJson = JSON.parse(dry.stdout)
   assert.equal(dryJson.dryRun, true)
-  assert.equal(dryJson.policyVersion, 1)
+  assert.equal(dryJson.policyVersion, undefined, 'no policy version marker in the republish proposal')
+  assert.equal(dryJson.mode, undefined, 'no publish-mode marker in the republish proposal')
   assert.equal(dryJson.rebuildable, true)
   assert.ok(dryJson.entries.some((entry) => entry.path === 'final.tex' && entry.sourceRule === 'declared'), JSON.stringify(dryJson.entries))
   assert.ok(!dryJson.entries.some((entry) => entry.path === 'output.tex'), 'internal names never appear as exposed entries')
@@ -1222,6 +1232,148 @@ async function makeFailProject({ projectId, deliverables, extraFiles = {}, occup
   assert.equal(finalMan.rebuildable, false)
   assert.deepEqual(finalMan.preservedExisting.map((item) => item.path).sort(), ['GAV-99/report.md', 'sentinel-user-file.txt'].sort())
   assert.ok(Buffer.from(await fs.readFile(path.join(grfOutputs, 'final.pdf'))).equals(finalPdf))
+}
+
+// ── S8. .tex deliverable on the format-correct path: never a PDF mismatch ─
+{
+  const texPlan = canonicalPlan({
+    projectId: 'tex-path-proj',
+    projectName: 'TEX-PATH',
+    projectContract: {
+      goal: 'TeX source exposure only.',
+      deliverables: ['final.tex'],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
+    nodes: [
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], artifactFormat: 'tex', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'final.tex' } }),
+    ],
+  })
+  const masterTex = '\\documentclass{article}\n\\begin{document}\nSee the section.\n\\input{sec}\n\\end{document}\n'
+  const secTex = 'The assembled section body.\n'
+  const runRel = path.join('.research-agent', 'runs', 'TEX-PATH-INT', '2026-01-01T00-00-00-integration')
+  await setupProject({
+    projectId: 'tex-path-proj',
+    plan: texPlan,
+    runs: {
+      integration: {
+        issueId: 'TEX-PATH-INT', runRel, outputHash: sha256(masterTex), artifactPath: 'final.tex',
+        files: { 'final.tex': masterTex, 'sec.tex': secTex },
+        ledger: {},
+      },
+    },
+  })
+  const mount = makeMount(baseDir)
+  const finalize = mount.registered.get('autoresearch_finalize_run')
+  const result = await finalize.execute({ runDir: runRel, baseDir }, mount.exec)
+  assert.equal(result.projectPublish.ok, true, JSON.stringify(result.projectPublish.errors))
+  const tree = (await walk(path.join(baseDir, 'outputs', 'tex-path-proj'))).sort()
+  assert.deepEqual(tree, ['MANIFEST.json', 'final.tex', 'sec.tex'].sort(), 'the .tex master publishes with its source-support closure: ' + JSON.stringify(tree))
+  assert.ok(!(result.projectPublish.errors ?? []).some((error) => /PDF|pdf/.test(String(error))), 'no PDF destination mismatch on the .tex path: ' + JSON.stringify(result.projectPublish.errors))
+  const man = JSON.parse(await fs.readFile(path.join(baseDir, 'outputs', 'tex-path-proj', 'MANIFEST.json'), 'utf8'))
+  assert.equal(man.entries.length, 2)
+  assert.ok(man.entries.every((entry) => entry.path.endsWith('.tex')), 'every published entry is a TeX source')
+}
+
+// ── S9. non-UTF8 closure files hash and publish byte-identically ───────────
+{
+  const binPlan = canonicalPlan({
+    projectId: 'bin-proj',
+    projectName: 'BIN',
+    projectContract: {
+      goal: 'Byte-exact publication.',
+      deliverables: ['final.tex', 'custom.sty'],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
+    nodes: [
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], artifactFormat: 'tex', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'final.tex' } }),
+    ],
+  })
+  const masterTex = '\\documentclass{article}\n\\usepackage{custom}\n\\begin{document}\nBody.\n\\end{document}\n'
+  // Latin-1 bytes: 0xE9 0x20 (é) is not valid UTF-8.
+  const latin1Sty = Buffer.from([0x25, 0x20, 0x63, 0x6f, 0x6d, 0x6d, 0x65, 0x6e, 0x74, 0x20, 0xe9, 0x20, 0x0a, 0x5c, 0x6e, 0x65, 0x77, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x7b, 0x5c, 0x78, 0x7d, 0x7b, 0x7d, 0x0a])
+  const runRel = path.join('.research-agent', 'runs', 'BIN-INT', '2026-01-01T00-00-00-integration')
+  const projectDir = path.join(baseDir, '.research-agent', 'projects', 'bin-proj')
+  await setupProject({
+    projectId: 'bin-proj',
+    plan: binPlan,
+    runs: {
+      integration: {
+        issueId: 'BIN-INT', runRel, outputHash: sha256(masterTex), artifactPath: 'final.tex',
+        files: { 'final.tex': masterTex },
+        ledger: {},
+      },
+    },
+  })
+  await write(path.join(baseDir, runRel), 'custom.sty', latin1Sty)
+  const mount = makeMount(baseDir)
+  const finalize = mount.registered.get('autoresearch_finalize_run')
+  const result = await finalize.execute({ runDir: runRel, baseDir }, mount.exec)
+  assert.equal(result.projectPublish.ok, true, JSON.stringify(result.projectPublish.errors))
+  const published = await fs.readFile(path.join(baseDir, 'outputs', 'bin-proj', 'custom.sty'))
+  assert.ok(Buffer.from(published).equals(latin1Sty), 'the non-UTF8 file publishes byte-identically')
+  const man = JSON.parse(await fs.readFile(path.join(baseDir, 'outputs', 'bin-proj', 'MANIFEST.json'), 'utf8'))
+  const styEntry = man.entries.find((entry) => entry.path === 'custom.sty')
+  assert.ok(styEntry, 'the non-UTF8 closure file is inventoried in the manifest')
+  assert.match(styEntry.hash, /^[0-9a-f]{64}$/)
+}
+
+// ── S10. same-hash aliases collapse; different-hash collisions are named ──
+{
+  const aliasPlan = canonicalPlan({
+    projectId: 'alias-proj',
+    projectName: 'ALIAS',
+    projectContract: {
+      goal: 'Alias handling.',
+      deliverables: ['shared.tex'],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+    },
+    nodes: [
+      canonicalNode({ id: 'node-a', kind: 'research', roles: ['research_author'], artifactFormat: 'tex', acceptance: [criterion('A-01', 'A.')], outputContract: { artifactPath: 'output.tex' } }),
+      canonicalNode({ id: 'node-b', kind: 'research', roles: ['research_author'], artifactFormat: 'tex', acceptance: [criterion('B-01', 'B.')], outputContract: { artifactPath: 'output.tex' } }),
+      canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], artifactFormat: 'tex', acceptance: [criterion('INT-01', 'Final.')], outputContract: { artifactPath: 'final.tex' }, dependsOn: ['node-a', 'node-b'] }),
+    ],
+  })
+  const sharedSame = 'Shared fragment, identical bytes.\n'
+  const intRunRel = path.join('.research-agent', 'runs', 'ALIAS-INT', '2026-01-01T00-00-00-integration')
+  await setupProject({
+    projectId: 'alias-proj',
+    plan: aliasPlan,
+    runs: {
+      'node-a': { issueId: 'ALIAS-A', runRel: path.join('.research-agent', 'runs', 'ALIAS-A', '2026-01-01T00-00-00-node-a'), outputHash: sha256('a'), files: { 'output.tex': 'a', 'shared.tex': sharedSame }, ledger: {} },
+      'node-b': { issueId: 'ALIAS-B', runRel: path.join('.research-agent', 'runs', 'ALIAS-B', '2026-01-01T00-00-00-node-b'), outputHash: sha256('b'), files: { 'output.tex': 'b', 'shared.tex': sharedSame }, ledger: {} },
+      integration: { issueId: 'ALIAS-INT', runRel: intRunRel, outputHash: sha256('final'), files: { 'final.tex': 'final' }, ledger: {} },
+    },
+  })
+  const mount = makeMount(baseDir)
+  const finalize = mount.registered.get('autoresearch_finalize_run')
+  const result = await finalize.execute({ runDir: intRunRel, baseDir }, mount.exec)
+  assert.equal(result.projectPublish.ok, true, JSON.stringify(result.projectPublish.errors))
+  assert.ok(result.projectPublish.warnings.some((warning) => warning.includes('published once')), 'a same-hash alias collapses with a named warning: ' + JSON.stringify(result.projectPublish.warnings))
+  const man = JSON.parse(await fs.readFile(path.join(baseDir, 'outputs', 'alias-proj', 'MANIFEST.json'), 'utf8'))
+  assert.equal(man.entries.filter((entry) => entry.path === 'shared.tex').length, 1, 'the alias publishes exactly once')
+
+  // Different content for the same destination: the collision is explicit.
+  await write(path.join(baseDir, '.research-agent', 'runs', 'ALIAS-B', '2026-01-01T00-00-00-node-b'), 'shared.tex', 'Different bytes now.\n')
+  let collision = null
+  try {
+    await finalize.execute({ runDir: intRunRel, baseDir }, mount.exec)
+  } catch (error) { collision = error }
+  assert.ok(collision, 'a different-hash collision must fail the finalize')
+  assert.match(String(collision.message), /conflicting declared deliverable shared\.tex/)
+  assert.match(String(collision.message), /node-a/, 'both collision paths are named: ' + String(collision.message))
+  assert.match(String(collision.message), /node-b/, 'both collision paths are named: ' + String(collision.message))
 }
 
 await fs.rm(baseDir, { recursive: true, force: true })

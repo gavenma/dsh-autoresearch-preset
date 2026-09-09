@@ -1,4 +1,4 @@
-name: Verify preset snapshot
+name: Verify preset (full test suite)
 
 on:
   push:
@@ -15,4 +15,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm run check
+      # Gate 16: CI runs the FULL test suite (build + snapshot + every test),
+      # not snapshot verification alone.
+      - run: npm test

@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation 836c5e1f5fa7. Source: src/linear.mjs.
-import * as autoresearchCore from "./autoresearch-core-836c5e1f5fa7.mjs"
+// AUTO-GENERATED Linear entry, generation ebe5d61bf0da. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-ebe5d61bf0da.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -556,14 +556,14 @@ function makeLinearCore(util) {
 
   // Deterministic local WAL primitives. Linear has no mutation idempotency
   // key, so the local event digest and mutation key are the replay contract.
-  core.SUPPORTED_OUTBOX_OPERATIONS = Object.freeze(['relation.create', 'labels.update', 'comment', 'node.project'])
+  core.SUPPORTED_OUTBOX_OPERATIONS = Object.freeze(['relation.create', 'labels.update', 'comment', 'node.project', 'node.context.update'])
   core.isSupportedOutboxOperation = function (operation) { return core.SUPPORTED_OUTBOX_OPERATIONS.includes(String(operation ?? '')) }
   core.syncMutationKey = function (projectId, nodeId, operation, payload = {}) {
     return autoresearchCore.sha256Text(autoresearchCore.stableStringify({ projectId: String(projectId), nodeId: String(nodeId), operation: String(operation), payload }))
   }
   core.makeSyncEvent = function ({ prevDigest = '', projectId, nodeId, operation, payload = {}, phase = 'projection', expect = null, createdAt } = {}) {
     const body = {
-      schemaVersion: 2,
+      kind: 'sync-event',
       prevDigest: String(prevDigest ?? ''),
       projectId: String(projectId ?? ''),
       nodeId: String(nodeId ?? ''),
@@ -576,8 +576,15 @@ function makeLinearCore(util) {
     return { ...body, digest: autoresearchCore.sha256Text(autoresearchCore.stableStringify(body)) }
   }
   core.verifySyncEvent = function (event, expectedPrevDigest = '') {
-    if (!util.isPlainObject(event) || ![1, 2].includes(event.schemaVersion)) return { ok: false, error: 'invalid sync event schema' }
-    if (event.schemaVersion === 2 && (typeof event.phase !== 'string' || !event.phase)) return { ok: false, error: 'invalid sync event phase' }
+    if (!util.isPlainObject(event) || event.kind !== 'sync-event') return { ok: false, error: 'invalid sync event schema' }
+    // prevDigest is a string, but the empty string is the legal genesis
+    // predecessor: the first event in a project chain has nothing before it.
+    if (typeof event.prevDigest !== 'string') return { ok: false, error: 'invalid sync event field: prevDigest' }
+    for (const field of ['projectId', 'nodeId', 'operation', 'phase', 'createdAt']) {
+      if (typeof event[field] !== 'string' || !event[field]) return { ok: false, error: 'invalid sync event field: ' + field }
+    }
+    if (!util.isPlainObject(event.payload)) return { ok: false, error: 'invalid sync event payload' }
+    if (typeof event.digest !== 'string' || !event.digest) return { ok: false, error: 'invalid sync event digest' }
     if (String(event.prevDigest ?? '') !== String(expectedPrevDigest ?? '')) return { ok: false, error: 'sync event predecessor mismatch' }
     const { digest, ...body } = event
     const actual = autoresearchCore.sha256Text(autoresearchCore.stableStringify(body))
@@ -618,9 +625,16 @@ function makeLinearCore(util) {
       const issue = remote.issue ?? remote
       const labels = new Set((issue.labelRecords ?? issue.labels ?? []).map((label) => typeof label === 'string' ? label : label?.id).filter(Boolean))
       const stateMatches = issue.state?.id === expect.stateId
-      const labelMatches = expect.blocked ? labels.has(expect.blockedLabelId) : !labels.has(expect.blockedLabelId)
+      // Without a configured blocked label the label requirement is vacuous
+      // (preflight enforces the label when blocked holds are actually used).
+      const labelMatches = !expect.blockedLabelId || (expect.blocked ? labels.has(expect.blockedLabelId) : !labels.has(expect.blockedLabelId))
       const commentMatches = !expect.commentMarker || (remote.comments ?? []).some((comment) => String(comment.body ?? '').includes(expect.commentMarker))
       return stateMatches && labelMatches && commentMatches
+    }
+    if (expect.kind === 'context-block') {
+      const issue = remote.issue ?? remote
+      const parsed = autoresearchCore.parseContextBlock(String(issue.description ?? ''))
+      return parsed.ok === true && autoresearchCore.contextBlockDigest(parsed.state) === expect.contextDigest
     }
     if (expect.kind === 'labels') {
       const actual = new Set((remote.labelRecords ?? remote.labels ?? []).map((label) => typeof label === 'string' ? label : label?.id).filter(Boolean))
@@ -642,7 +656,7 @@ function makeLinearCore(util) {
     const blockers = [...new Set((Array.isArray(blockedBy) ? blockedBy : []).map(String).filter(Boolean))].sort()
     if (!String(nodeId ?? '').trim() || blockers.length === 0) return null
     return {
-      schemaVersion: 1,
+      kind: 'causal-hold',
       nodeId: String(nodeId),
       blockedBy: blockers,
       reason: String(reason ?? 'upstream causal dependency is unresolved'),
@@ -655,14 +669,15 @@ function makeLinearCore(util) {
     const operation = mutation.operation
     const payload = mutation.payload ?? {}
     const expected = confirms ?? event.expect ?? ({
-      kind: operation === 'comment' ? 'comment-marker' : operation === 'relation.create' ? 'relation-edge' : operation === 'node.project' ? 'node-projection' : 'labels',
+      kind: operation === 'comment' ? 'comment-marker' : operation === 'relation.create' ? 'relation-edge' : operation === 'node.project' ? 'node-projection' : operation === 'node.context.update' ? 'context-block' : 'labels',
       ...(operation === 'comment' ? { marker: payload.idempotencyMarker ?? payload.marker ?? null } : {}),
       ...(operation === 'relation.create' ? { issueId: payload.issueId ?? null, relatedIssueId: payload.relatedIssueId ?? null, type: payload.type ?? null } : {}),
       ...(operation === 'node.project' ? { issueId: payload.issueId ?? null, stateId: payload.stateId ?? null, blockedLabelId: payload.blockedLabelId ?? null, blocked: (payload.blockedBy ?? []).length > 0, commentMarker: ((payload.blockedBy ?? []).length > 0 || payload.reason) ? 'autoresearch-causal:' + event.digest : null } : {}),
+      ...(operation === 'node.context.update' ? { issueId: payload.issueId ?? null, contextDigest: payload.contextDigest ?? null } : {}),
       ...(operation === 'labels.update' ? { issueId: payload.issueId ?? null, labelIds: payload.labelIds ?? [], addIds: payload.addIds ?? [], removeIds: payload.removeIds ?? [] } : {}),
     })
     return {
-      schemaVersion: 2,
+      kind: 'outbox-record',
       phase: event.phase,
       confirms: expected,
       mutationKey: core.syncMutationKey(event.projectId, event.nodeId, mutation.operation, mutation.payload ?? {}),
@@ -678,12 +693,15 @@ function makeLinearCore(util) {
     }
   }
   core.transitionOutbox = function (record, action, details = {}, now = new Date().toISOString()) {
-    if (!util.isPlainObject(record) || ![1, 2].includes(record.schemaVersion)) throw new Error('invalid outbox record')
+    if (!util.isPlainObject(record) || record.kind !== 'outbox-record' || typeof record.mutationKey !== 'string' || !record.mutationKey || typeof record.eventDigest !== 'string' || !record.eventDigest || typeof record.operation !== 'string' || !record.operation) throw new Error('invalid outbox record')
     const terminal = record.status === 'confirmed' || record.status === 'dead'
     if (terminal) return { ...record }
     const next = { ...record, updatedAt: now }
     if (action === 'attempt') {
-      if (!['pending', 'retry'].includes(record.status)) throw new Error('cannot attempt outbox record in status ' + record.status)
+      // A hard crash can leave a record inflight; an inflight attempt is
+      // retryable (the mutation may or may not have landed — replay paths
+      // are idempotent and the context-update replay is CAS-guarded).
+      if (!['pending', 'retry', 'inflight'].includes(record.status)) throw new Error('cannot attempt outbox record in status ' + record.status)
       next.status = 'inflight'; next.attempts = Number(record.attempts ?? 0) + 1
     } else if (action === 'confirm') {
       if (record.status !== 'inflight') throw new Error('cannot confirm outbox record in status ' + record.status)
@@ -721,7 +739,7 @@ function makeLinearCore(util) {
     const existing = await fops.readJson(eventPath)
     if (existing) return { ok: true, duplicate: true, digest: event.digest, outbox: null }
     await fops.writeJson(eventPath, event, { kind: 'createIfAbsent' })
-    const head = { schemaVersion: 1, digest: event.digest, updatedAt: event.createdAt }
+    const head = { kind: 'sync-head', digest: event.digest, updatedAt: event.createdAt }
     if (stat?.version) await fops.writeJson(headPath, head, { kind: 'replaceIfVersion', version: stat.version })
     else await fops.writeJson(headPath, head, { kind: 'createIfAbsent' })
     return { ok: true, duplicate: false, digest: event.digest, outbox: null }
@@ -783,7 +801,17 @@ function makeLinearCore(util) {
       if (!event || !order.has(record.eventDigest)) throw new Error('outbox record references an event outside the active WAL chain: ' + record.mutationKey)
       if (event.projectId !== record.projectId || event.nodeId !== record.nodeId || event.operation !== record.operation || autoresearchCore.stableStringify(event.payload) !== autoresearchCore.stableStringify(record.payload)) throw new Error('outbox record does not match its WAL event: ' + record.mutationKey)
     }
-    return records.sort((a, b) => order.get(a.eventDigest) - order.get(b.eventDigest)).slice(0, limit)
+    // Non-terminal records are SELECTED first (a backlog of retained
+    // confirmed/dead records must never starve newer pending intent out of
+    // the window), but the returned window keeps WAL order so callers see
+    // results in causal sequence.
+    const prioritized = records.sort((a, b) => {
+      const aTerminal = a.status === 'confirmed' || a.status === 'dead'
+      const bTerminal = b.status === 'confirmed' || b.status === 'dead'
+      if (aTerminal !== bTerminal) return aTerminal ? 1 : -1
+      return order.get(a.eventDigest) - order.get(b.eventDigest)
+    })
+    return prioritized.slice(0, limit).sort((a, b) => order.get(a.eventDigest) - order.get(b.eventDigest))
   }
   core.listComments = async function (issueId, transport, opts = {}) {
     const first = typeof opts.first === 'number' ? opts.first : 50
@@ -847,7 +875,7 @@ function makeLinearCore(util) {
     const mutationCapability = ['read-write', 'read-only'].includes(opts.mutationCapability) ? opts.mutationCapability : 'unverified'
     if (mutationCapability === 'read-only') errors.push('Linear mutation permission is read-only')
     if (mutationCapability === 'unverified') warnings.push('Linear mutation permission is unverified; establish capability before replay')
-    return { ok: errors.length === 0, team: team ? { id: team.id, name: team.name } : null, states: stateMap, blockedLabelId: blockedLabel, capabilities: { read: metadata?.ok !== false, mutation: mutationCapability }, errors, warnings, checkedAt: new Date().toISOString() }
+    return { ok: errors.length === 0, team: team ? { id: team.id, name: team.name } : null, states: stateMap, blockedLabelId: blockedLabel, capabilities: { read: metadata?.ok !== false, mutation: mutationCapability, contextDescription: mutationCapability === 'read-write' ? 'available' : 'unavailable' }, errors, warnings, checkedAt: new Date().toISOString() }
   }
 
   core.mergeLabelIds = function (currentLabels, addIds = [], removeIds = []) {
@@ -869,6 +897,103 @@ function makeLinearCore(util) {
   core.updateIssueLabels = async function (issueId, currentLabels, transport, opts = {}) {
     const labelIds = core.mergeLabelIds(currentLabels, opts.addIds, opts.removeIds)
     return await core.execute('updateIssueLabels', { id: issueId, labelIds }, transport)
+  }
+
+  core.updateIssueDescription = async function (issueId, description, transport) {
+    return await core.execute('updateIssueDescription', { id: issueId, description: String(description ?? '') }, transport)
+  }
+
+  // Render the owned context block into a description, preserving all
+  // user-authored text outside the block (plan §7.2/§7.6).
+  core.buildContextDescription = function (currentDescription, state) {
+    const block = autoresearchCore.renderContextBlock(state)
+    return autoresearchCore.upsertContextBlock(String(currentDescription ?? ''), block)
+  }
+
+  // ── recovery cache (plan §7.7) ───────────────────────────────────────────
+  // Non-authoritative: the last successfully read block, its digest, and the
+  // pending write intent. It never authorizes claim/reopen/acceptance/
+  // completion/publication; on reconnection Linear is read first and the
+  // intent reconciled before work resumes.
+
+  core.recoveryCachePath = function (baseDir, projectId, nodeId) {
+    if (typeof baseDir !== 'string' || !baseDir.trim()) throw new Error('recovery cache requires a workspace base directory')
+    if (typeof projectId !== 'string' || !projectId.trim()) throw new Error('recovery cache requires a project id')
+    if (typeof nodeId !== 'string' || !nodeId.trim()) throw new Error('recovery cache requires a node id')
+    return pathutil.join(baseDir, '.research-agent', 'projects', projectId.trim(), 'linear-sync', 'recovery', nodeId.trim() + '.json')
+  }
+  core.validateRecoveryCache = function (cache) {
+    if (!util.isPlainObject(cache) || cache.kind !== 'linear-node-context-recovery') return { ok: false, error: 'invalid recovery cache shape' }
+    // expectedContextDigest may be empty: initializing a block that does not
+    // yet exist has no prior digest to expect. Every other field is required.
+    for (const field of ['projectId', 'nodeId', 'issueId', 'contextDigest', 'description', 'createdAt']) {
+      if (typeof cache[field] !== 'string' || !cache[field]) return { ok: false, error: 'recovery cache field ' + field + ' is required' }
+    }
+    if (typeof cache.expectedContextDigest !== 'string') return { ok: false, error: 'recovery cache field expectedContextDigest is required' }
+    if (!['pending', 'confirmed'].includes(cache.status)) return { ok: false, error: 'recovery cache status must be pending or confirmed' }
+    return { ok: true }
+  }
+  core.writeRecoveryCache = async function (fops, baseDir, projectId, nodeId, intent) {
+    if (!fops || typeof fops.writeJson !== 'function') throw new Error('recovery cache requires JSON filesystem operations')
+    const cache = {
+      kind: 'linear-node-context-recovery',
+      projectId: String(projectId),
+      nodeId: String(nodeId),
+      issueId: String(intent.issueId ?? ''),
+      expectedContextDigest: String(intent.expectedContextDigest ?? ''),
+      contextDigest: String(intent.contextDigest ?? ''),
+      description: String(intent.description ?? ''),
+      state: intent.state ?? null,
+      status: 'pending',
+      createdAt: typeof intent.createdAt === 'string' && intent.createdAt ? intent.createdAt : new Date().toISOString(),
+    }
+    if (!cache.issueId) throw new Error('recovery cache intent requires issueId')
+    const check = core.validateRecoveryCache(cache)
+    if (!check.ok) throw new Error(check.error)
+    const file = core.recoveryCachePath(baseDir, projectId, nodeId)
+    await fops.ensureDir(pathutil.dirname(file))
+    await fops.writeJson(file, cache)
+    return cache
+  }
+  core.readRecoveryCache = async function (fops, baseDir, projectId, nodeId) {
+    if (!fops || typeof fops.readJson !== 'function') return null
+    const cache = await fops.readJson(core.recoveryCachePath(baseDir, projectId, nodeId))
+    const check = core.validateRecoveryCache(cache)
+    return check.ok ? cache : null
+  }
+  core.markRecoveryCacheConfirmed = async function (fops, baseDir, projectId, nodeId, receipt = null) {
+    if (!fops || typeof fops.writeJson !== 'function') throw new Error('recovery cache requires JSON filesystem operations')
+    const file = core.recoveryCachePath(baseDir, projectId, nodeId)
+    const cache = await core.readRecoveryCache(fops, baseDir, projectId, nodeId)
+    if (!cache) return { ok: false, skipped: true, reason: 'absent' }
+    if (cache.status === 'confirmed') return { ok: true, skipped: true, cache }
+    const confirmed = { ...cache, status: 'confirmed', confirmedAt: typeof receipt === 'string' && receipt ? receipt : new Date().toISOString(), receipt: receipt === null || typeof receipt === 'object' ? receipt : null }
+    await fops.writeJson(file, confirmed)
+    return { ok: true, cache: confirmed }
+  }
+  core.clearRecoveryCache = async function (fops, baseDir, projectId, nodeId) {
+    if (!fops || typeof fops.remove !== 'function') return false
+    try { await fops.remove(core.recoveryCachePath(baseDir, projectId, nodeId)); return true } catch { return false }
+  }
+  // Read Linear FIRST (plan §7.7), then classify the pending intent:
+  //  - 'applied'     the live block already carries the intent digest (write
+  //                  landed; confirm and clear the cache)
+  //  - 'not-applied' the live block still carries the expected prior digest
+  //                  (replay through the WAL/outbox)
+  //  - 'conflict'    the live block carries something else (a human or a
+  //                  concurrent actor edited the owned area; surface it,
+  //                  never overwrite)
+  //  - 'missing'     the live issue has no valid block; the intent's prior
+  //                  was also empty, so a replay is safe
+  core.reconcileRecoveryCache = function (cache, liveDescription) {
+    const check = core.validateRecoveryCache(cache)
+    if (!check.ok) return { status: 'invalid', error: check.error }
+    const live = autoresearchCore.parseContextBlock(String(liveDescription ?? ''))
+    const liveDigest = live.ok ? autoresearchCore.contextBlockDigest(live.state) : null
+    if (liveDigest === cache.contextDigest) return { status: 'applied', liveState: live.state, liveDescription: String(liveDescription ?? '') }
+    if (!live.ok && cache.expectedContextDigest === '') return { status: 'not-applied', liveState: null }
+    if (live.ok && liveDigest === cache.expectedContextDigest) return { status: 'not-applied', liveState: live.state, liveDescription: String(liveDescription ?? '') }
+    return { status: 'conflict', liveState: live.ok ? live.state : null, liveDigest, expectedDigest: cache.expectedContextDigest, intentDigest: cache.contextDigest }
   }
 
   // Paginated project listing (plan C3): never assumes one page.
@@ -954,24 +1079,18 @@ function makeLinearCore(util) {
   }
 
   // Marker-based issue reconciliation keeps the Linear container id separate
-  // from the stable AutoResearch plan id embedded in node markers. It also
-  // detects the legacy marker shape produced when those two ids were conflated.
+  // from the stable AutoResearch plan id embedded in node markers. Only the
+  // canonical marker (keyed on the stable AutoResearch project id) is matched.
   core.reconcileIssueCandidates = async function (linearProjectId, autoresearchProjectId, nodeId, transport, opts = {}) {
     const marker = core.nodeMarker(autoresearchProjectId, nodeId)
-    const legacyMarker = core.nodeMarker(linearProjectId, nodeId)
     const { issues } = await core.listProjectIssues(linearProjectId, transport, opts)
     const canonicalMatches = issues.filter((issue) => (issue.description ?? '').includes(marker))
-    const legacyMatches = marker === legacyMarker
-      ? []
-      : issues.filter((issue) => (issue.description ?? '').includes(legacyMarker))
-    if (canonicalMatches.length > 1 || legacyMatches.length > 1 || (canonicalMatches.length === 1 && legacyMatches.length === 1 && canonicalMatches[0].id !== legacyMatches[0].id)) {
-      throw Object.assign(new Error(`Multiple Linear issues carry canonical or legacy markers for node "${nodeId}"; reconcile before creating.`), { code: 'LINEAR_AMBIGUOUS' })
+    if (canonicalMatches.length > 1) {
+      throw Object.assign(new Error(`Multiple Linear issues carry the canonical marker for node "${nodeId}"; reconcile before creating.`), { code: 'LINEAR_AMBIGUOUS' })
     }
     return {
       marker,
-      legacyMarker,
       canonical: canonicalMatches[0] ?? null,
-      legacy: legacyMatches[0] ?? null,
     }
   }
 
@@ -1034,7 +1153,7 @@ function makeLinearCore(util) {
 
   // Approval-gated issue creation (plan C2/§9.3/§9.13): the Linear project
   // UUID selects the container; autoresearchProjectId supplies the stable plan
-  // id embedded in markers. Legacy UUID-keyed markers migrate in place.
+  // id embedded in the canonical node marker.
   core.createIssueFlow = async function (params, transport, approver) {
     if (!params || typeof params.projectId !== 'string' || !params.projectId.trim()) {
       throw new Error('projectId must be a non-empty string (the Linear project id).')
@@ -1056,34 +1175,7 @@ function makeLinearCore(util) {
 
     const matches = await core.reconcileIssueCandidates(linearProjectId, autoresearchProjectId, nodeId, transport, params)
     if (matches.canonical) {
-      return { created: false, reconciled: true, migrated: false, issue: matches.canonical, team: teamReceipt, reason: 'existing issue with the same marker' }
-    }
-    if (matches.legacy) {
-      await approver(`migrate Linear issue ${matches.legacy.identifier ?? matches.legacy.id} to canonical AutoResearch marker ${matches.marker}`)
-      const description = String(matches.legacy.description ?? '').split(matches.legacyMarker).join(matches.marker)
-      const result = await core.execute('updateIssueDescription', { id: matches.legacy.id, description }, transport)
-      if (result.success !== true || !result.issue) {
-        throw Object.assign(new Error('Linear issueUpdate marker migration reported failure'), { code: 'LINEAR_MUTATION_FAILED' })
-      }
-      return {
-        created: false,
-        reconciled: true,
-        migrated: true,
-        issue: result.issue,
-        team: teamReceipt,
-        reason: 'migrated legacy Linear-project-id marker to the canonical AutoResearch project id',
-        receipt: {
-          marker: matches.marker,
-          legacyMarker: matches.legacyMarker,
-          teamId: team.id,
-          projectId: linearProjectId,
-          autoresearchProjectId,
-          issueId: result.issue.id,
-          identifier: result.issue.identifier,
-          url: result.issue.url ?? '',
-          migratedAt: new Date().toISOString(),
-        },
-      }
+      return { created: false, reconciled: true, issue: matches.canonical, team: teamReceipt, reason: 'existing issue with the same marker' }
     }
 
     await approver(`create Linear issue "${params.title.trim()}" in project ${linearProjectId} (team ${team.key})`)
@@ -1105,7 +1197,6 @@ function makeLinearCore(util) {
     return {
       created: true,
       reconciled: false,
-      migrated: false,
       issue: result.issue,
       team: teamReceipt,
       receipt: {
@@ -1133,8 +1224,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = '836c5e1f5fa7'
-export const EMBEDDED_BUILD_ID = '1141e5056c8674e89ab8321832ce0fd19d4697c517d4b4ffadcf8b1278888dce'
+export const EMBEDDED_GENERATION = 'ebe5d61bf0da'
+export const EMBEDDED_BUILD_ID = 'f271b154c4c92b0f959489528a295c86c66b03c55889ea5fee908a77c61aeb70'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
@@ -1298,6 +1389,7 @@ const LINEAR_PLUGIN = {
             return undefined
           }
         },
+        readText: async (p) => await fs.readText(await targetOf(p)),
         listDir: async (p) => {
           try {
             return (await fs.listDir(await targetOf(p))).map((entry) => ({ name: entry.name, dir: entry.type === 'directory' }))
@@ -1312,6 +1404,10 @@ const LINEAR_PLUGIN = {
           const result = await runSubprocess(subprocess, baseDir, [mkdir, '-p', target])
           if (result.exitCode !== 0) throw new Error('mkdir failed for ' + target + ': ' + result.stderr.slice(-400))
         },
+        remove: async (p) => {
+          if (typeof fs.remove !== 'function') throw new Error('REMOVE_UNAVAILABLE')
+          return await fs.remove(await targetOf(p))
+        },
       }
     }
 
@@ -1320,15 +1416,13 @@ const LINEAR_PLUGIN = {
     // prose.
     async function loadApprovedPlan(fops, baseDir, autoresearchProjectId) {
       if (!fops) throw new Error('fs service unavailable; cannot load the approved plan from the workspace')
-      const candidates = [
-        absPath(baseDir, 'research-agent/projects/' + autoresearchProjectId + '/plan.json'),
-        absPath(baseDir, '.research-agent/projects/' + autoresearchProjectId + '/plan.json'),
-      ]
-      for (const planPath of candidates) {
-        const plan = await fops.readJson(planPath)
-        if (util.isPlainObject(plan)) return plan
-      }
-      throw new Error('Approved plan not readable at ' + candidates.join(' or ') + '; Linear projection is blocked (plan §4.5).')
+      // Single root: the approved plan lives in the hidden .research-agent
+      // artifact root; the bare 'research-agent/' tree is migration input
+      // only, never a runtime candidate.
+      const planPath = absPath(baseDir, '.research-agent/projects/' + autoresearchProjectId + '/plan.json')
+      const plan = await fops.readJson(planPath)
+      if (util.isPlainObject(plan)) return plan
+      throw new Error('Approved plan not readable at ' + planPath + '; Linear projection is blocked (plan §4.5).')
     }
 
     function registerTool(definition) {
@@ -1404,11 +1498,21 @@ const LINEAR_PLUGIN = {
       }
     }
 
+    // The ONE tool-schema boundary (shared with the orchestrator): every
+    // tool's parameter schema is generated from autoresearch-core
+    // (plan §4.2 / §6.5); no transport-specific hand copy may diverge.
+    const GENERATED_TOOL_SCHEMAS = autoresearchCore.generateToolSchemas()
     function tool(name, description, paramsSchema, executor) {
+      const generated = GENERATED_TOOL_SCHEMAS[name]
+      if (paramsSchema != null && generated !== undefined) {
+        if (JSON.stringify(generated) !== JSON.stringify(paramsSchema)) {
+          throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core.')
+        }
+      }
       registerTool({
         name,
         description,
-        parameters: paramsSchema,
+        parameters: generated ?? paramsSchema ?? { type: 'object', additionalProperties: true },
         output: {
           schema: { type: 'object', additionalProperties: true },
           render(_args, value) {
@@ -1438,67 +1542,38 @@ const LINEAR_PLUGIN = {
     }
     // ── tools (installed behavior preserved; spec-block projection added) ──
 
-    tool('linear_whoami', 'Verify Linear authentication and list the viewer + organization. Run this first on any Linear workflow.', {
-      type: 'object', additionalProperties: true,
-      properties: { baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' } },
-    }, async (args, exec) => {
+    tool('linear_whoami', 'Verify Linear authentication and list the viewer + organization. Run this first on any Linear workflow.', null, async (args, exec) => {
       assertCallingAgent(exec)
       return await executeLinear('whoami', {}, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_workspace_metadata', 'List teams with their issue states and labels. Required before any issue state transition.', {
-      type: 'object', additionalProperties: true,
-      properties: { baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' } },
-    }, async (args, exec) => {
+    tool('linear_workspace_metadata', 'List teams with their issue states and labels. Required before any issue state transition.', null, async (args, exec) => {
       assertCallingAgent(exec)
       return await executeLinear('workspaceMetadata', {}, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_capability_preflight', 'Coordinator-only: validate team-scoped Linear state mappings and blocked-label capability without remote mutation.', {
-      type: 'object', additionalProperties: false,
-      required: ['metadata'],
-      properties: { metadata: { type: 'object', additionalProperties: true }, teamId: str('Expected team UUID.'), blockedLabel: str('Configured machine-hold label name.'), requestedStateIds: { type: 'array', items: { type: 'string' } }, mutationCapability: { type: 'string', enum: ['read-write', 'read-only', 'unverified'] } },
-    }, async (args, exec) => {
+    tool('linear_capability_preflight', 'Coordinator-only: validate team-scoped Linear state mappings and blocked-label capability without remote mutation.', null, async (args, exec) => {
       assertCoordinator(exec)
       return linearCore.preflightCapabilities(args.metadata, args)
     })
 
-    tool('linear_get_issue', 'Fetch one Linear issue as a structured snapshot plus init_run-ready markdown.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        id: { type: 'string', description: 'Issue identifier, e.g. ISS-123.' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_get_issue', 'Fetch one Linear issue as a structured snapshot plus init_run-ready markdown.', null, async (args, exec) => {
       assertCallingAgent(exec)
       return await executeLinear('getIssue', { id: args.id }, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_list_comments', 'List comments on one Linear issue.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        id: { type: 'string', description: 'Issue identifier, e.g. ISS-123.' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_list_comments', 'List comments on one Linear issue.', null, async (args, exec) => {
       assertCallingAgent(exec)
       return await executeLinear('listComments', { id: args.id }, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_list_relations', 'List all outgoing and inverse relations for one focused issue, with bounded pagination.', {
-      type: 'object', additionalProperties: true,
-      properties: { id: str('Linear issue id or identifier.'), first: { type: 'number' }, maxPages: { type: 'number' }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_list_relations', 'List all outgoing and inverse relations for one focused issue, with bounded pagination.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = baseDirOf(exec, args)
       return await linearCore.listIssueRelations(args.id, (request) => transport(request, exec, baseDir), args)
     })
 
-    tool('linear_sync_enqueue', 'Coordinator-only: append a local digest-chained event and durable outbox record before projecting a Linear mutation.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'nodeId', 'operation', 'payload'],
-      properties: { projectId: str('Stable AutoResearch project id.'), nodeId: str('Focused node id.'), operation: str('Projection operation.'), payload: { type: 'object', additionalProperties: true }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_sync_enqueue', 'Coordinator-only: append a local digest-chained event and durable outbox record before projecting a Linear mutation.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
@@ -1506,34 +1581,22 @@ const LINEAR_PLUGIN = {
       if (!linearCore.isSupportedOutboxOperation(args.operation)) throw new Error('unsupported outbox operation: ' + args.operation)
       const root = linearCore.syncRoot(baseDir, args.projectId)
       const head = await fops.readJson(pathutil.join(root, 'head.json'))
-      const expect = args.operation === 'comment'
-        ? { kind: 'comment-marker', marker: args.payload?.idempotencyMarker ?? args.payload?.marker ?? null }
-        : args.operation === 'relation.create'
-          ? { kind: 'relation-edge', issueId: args.payload?.issueId ?? null, relatedIssueId: args.payload?.relatedIssueId ?? null, type: args.payload?.type ?? null }
-          : args.operation === 'node.project'
-            ? { kind: 'issue-state', issueId: args.payload?.issueId ?? null, stateId: args.payload?.stateId ?? null }
-            : { kind: 'labels', issueId: args.payload?.issueId ?? null, labelIds: args.payload?.labelIds ?? [], addIds: args.payload?.addIds ?? [], removeIds: args.payload?.removeIds ?? [] }
-      const event = linearCore.makeSyncEvent({ prevDigest: head?.digest ?? '', projectId: args.projectId, nodeId: args.nodeId, operation: args.operation, payload: args.payload, expect })
+      // One shared expects-derivation (makeOutboxRecord's defaults): a
+      // replayed projection must confirm the SAME things a direct projection
+      // confirms — including the owned context block for node.context.update.
+      const event = linearCore.makeSyncEvent({ prevDigest: head?.digest ?? '', projectId: args.projectId, nodeId: args.nodeId, operation: args.operation, payload: args.payload })
       const persisted = await linearCore.persistSyncEvent(fops, baseDir, args.projectId, event)
-      const record = linearCore.makeOutboxRecord({ event, mutation: { operation: args.operation, payload: args.payload }, confirms: expect })
+      const record = linearCore.makeOutboxRecord({ event, mutation: { operation: args.operation, payload: args.payload } })
       const queued = await linearCore.persistOutboxRecord(fops, baseDir, args.projectId, record)
       return { ok: true, event, persisted, outbox: queued.record, duplicate: queued.duplicate }
     })
 
-    tool('linear_plan_relations', 'Coordinator-only: derive the exact approved-DAG dependency edges to project as upstream blocks downstream relations.', {
-      type: 'object', additionalProperties: false,
-      required: ['plan', 'issueByNode'],
-      properties: { plan: { type: 'object', additionalProperties: true }, issueByNode: { type: 'object', additionalProperties: true } },
-    }, async (args, exec) => {
+    tool('linear_plan_relations', 'Coordinator-only: derive the exact approved-DAG dependency edges to project as upstream blocks downstream relations.', null, async (args, exec) => {
       assertCoordinator(exec)
       return { ok: true, relations: linearCore.deriveDependencyRelations(args.plan, args.issueByNode) }
     })
 
-    tool('linear_sync_plan_relations', 'Coordinator-only: project the approved dependency DAG as WAL-backed Linear blocks relations.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'plan', 'issueByNode'],
-      properties: { projectId: str('Stable AutoResearch project id.'), plan: { type: 'object', additionalProperties: true }, issueByNode: { type: 'object', additionalProperties: true }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_sync_plan_relations', 'Coordinator-only: project the approved dependency DAG as WAL-backed Linear blocks relations.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args); const fops = makeFops(baseDir)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
@@ -1558,17 +1621,13 @@ const LINEAR_PLUGIN = {
       return { ok: results.every((entry) => entry.status === 'confirmed'), projectId: args.projectId, relationCount: relations.length, results }
     })
 
-    tool('linear_project_node', 'Coordinator-only: project one focused node lifecycle state and causal hold to Linear through the local WAL/outbox.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'nodeId', 'issueId', 'stateId', 'blockedLabelId', 'status'],
-      properties: { projectId: str('Stable AutoResearch project id.'), nodeId: str('Focused node id.'), issueId: str('Linear issue id.'), stateId: str('Team-scoped Linear state id.'), blockedLabelId: str('Preflight-resolved autoresearch-blocked label id.'), status: str('todo, in_progress, done, blocked, or retry.'), blockedBy: { type: 'array', items: { type: 'string' } }, reason: str('Causal hold reason.'), baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_project_node', 'Coordinator-only: project one focused node lifecycle state and causal hold to Linear through the local WAL/outbox.', null, async (args, exec) => {
       assertCoordinator(exec)
       if (!['todo', 'in_progress', 'done', 'blocked', 'retry'].includes(args.status)) throw new Error('unsupported node projection status: ' + args.status)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
-      const payload = { issueId: args.issueId, stateId: args.stateId, blockedLabelId: args.blockedLabelId, status: args.status, blockedBy: [...new Set(args.blockedBy ?? [])].sort(), reason: args.reason ?? '' }
+      const payload = { issueId: args.issueId, stateId: args.stateId, blockedLabelId: args.blockedLabelId, status: args.status, blockedBy: [...new Set(args.blockedBy ?? [])].sort(), reason: args.reason ?? '', contextDigest: typeof args.contextDigest === 'string' ? args.contextDigest : '' }
       const root = linearCore.syncRoot(baseDir, args.projectId)
       const head = await fops.readJson(pathutil.join(root, 'head.json'))
       const event = linearCore.makeSyncEvent({ prevDigest: head?.digest ?? '', projectId: args.projectId, nodeId: args.nodeId, operation: 'node.project', payload })
@@ -1583,19 +1642,58 @@ const LINEAR_PLUGIN = {
         const currentIssue = await executeLinear('getIssue', { id: args.issueId }, exec, baseDir)
         const snapshot = currentIssue?.issue ?? currentIssue
         if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
+        // Plan §7.1/§7.4: a lifecycle transition is not committed until the
+        // fresh Linear read confirms the current context block; a stale or
+        // missing digest fails closed (the coordinator re-queries).
+        const liveContext = autoresearchCore.parseContextBlock(String(snapshot.description ?? ''))
+        if (!liveContext.ok) {
+          throw Object.assign(new Error('LINEAR_CONTEXT_MISSING: this Linear node has no valid Current Node Context block. Initialize it with linear_update_node_context (from the node contract and latest comments) before projecting a lifecycle transition.'), { code: 'LINEAR_CONTEXT_MISSING' })
+        }
+        const liveContextDigest = autoresearchCore.contextBlockDigest(liveContext.state)
+        // Node cross-check: the block must belong to the node being projected.
+        if (typeof args.nodeId === 'string' && args.nodeId.trim() && liveContext.state.nodeId && liveContext.state.nodeId !== args.nodeId.trim()) {
+          throw Object.assign(new Error('LINEAR_CONTEXT_NODE_MISMATCH: the issue\'s Current Node Context block belongs to node ' + liveContext.state.nodeId + ', not ' + args.nodeId.trim() + '.'), { code: 'LINEAR_CONTEXT_NODE_MISMATCH' })
+        }
+        if (!autoresearchCore.isContextDigest(args.contextDigest)) {
+          throw Object.assign(new Error('LINEAR_CONTEXT_STALE: linear_project_node requires contextDigest — the SHA-256 digest from a fresh linear_get_node_context (the issue block digest is ' + liveContextDigest.slice(0, 12) + '...).'), { code: 'LINEAR_CONTEXT_STALE', liveDigest: liveContextDigest })
+        }
+        if (args.contextDigest !== liveContextDigest) {
+          throw Object.assign(new Error('LINEAR_CONTEXT_STALE: the context digest you passed (' + args.contextDigest.slice(0, 12) + '...) is not the current Linear block digest (' + liveContextDigest.slice(0, 12) + '...). New comments or edits invalidated it — re-run linear_get_node_context and retry.'), { code: 'LINEAR_CONTEXT_STALE', liveDigest: liveContextDigest })
+        }
+        // Human-input freshness (plan §7.4 / gate 12): a human comment newer
+        // than the block watermark invalidates the bound digest. Machine
+        // evidence comments are the coordinator's own reduced facts and do
+        // not rotate freshness (they are consumed by the next reduce).
+        const freshnessComments = await linearCore.listComments(args.issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
+        const blockWatermark = String(liveContext.state.watermark ?? '')
+        const newHumanComment = (freshnessComments.comments ?? []).some((comment) => !autoresearchCore.isAutoresearchComment(String(comment?.body ?? '')) && autoresearchCore.newerThan(String(comment?.createdAt ?? ''), blockWatermark))
+        if (newHumanComment) {
+          throw Object.assign(new Error('LINEAR_CONTEXT_STALE: a new human comment arrived after the context block watermark; re-run linear_get_node_context, reduce it into the block, and retry.'), { code: 'LINEAR_CONTEXT_STALE', liveDigest: liveContextDigest })
+        }
         const stateRemote = await executeLinear('updateIssue', { id: args.issueId, stateId: args.stateId }, exec, baseDir)
         const blocked = payload.blockedBy.length > 0
+        // A blocked hold cannot be confirmed without the configured blocked
+        // label (plan §7.1): fail before any remote mutation instead of
+        // posting an unconfirmable state and duplicating causal comments.
+        if (blocked && !payload.blockedLabelId) throw Object.assign(new Error('blocked projection requires blockedLabelId: the causal hold cannot be confirmed without the configured blocked label.'), { code: 'LINEAR_BLOCKED_LABEL_MISSING' })
         const labelsRemote = await linearCore.updateIssueLabels(args.issueId, snapshot.labelRecords ?? [], (request) => transport(request, exec, baseDir), { addIds: blocked ? [payload.blockedLabelId] : [], removeIds: blocked ? [] : [payload.blockedLabelId] })
         let remote = { state: stateRemote, labels: labelsRemote }
         if (payload.blockedBy.length > 0 || payload.reason) {
           const comment = linearCore.causalComment({ nodeId: args.nodeId, blockedBy: payload.blockedBy, reason: payload.reason, eventDigest: event.digest })
-          remote.comment = await executeLinear('createComment', { id: args.issueId, body: comment.body, idempotencyMarker: comment.idempotencyMarker }, exec, baseDir)
+          // Marker dedupe before creation: a prior crashed attempt may have
+          // already posted this exact causal comment.
+          const existingComments = await linearCore.listComments(args.issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
+          const alreadyPosted = (existingComments.comments ?? []).some((item) => String(item.body ?? '').includes(comment.idempotencyMarker))
+          if (!alreadyPosted) remote.comment = await executeLinear('createComment', { id: args.issueId, body: comment.body, idempotencyMarker: comment.idempotencyMarker }, exec, baseDir)
+          else remote.comment = { ok: true, success: true, skipped: true, deduplicated: true }
         }
         if (!linearCore.mutationSucceeded('node.project', remote)) throw Object.assign(new Error('Linear node projection returned success:false'), { code: 'LINEAR_MUTATION_FAILED' })
         const readBackIssue = await executeLinear('getIssue', { id: args.issueId }, exec, baseDir)
         const readBackComments = outbox.confirms.commentMarker ? await linearCore.listComments(args.issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 }) : { comments: [] }
         const readBack = { issue: readBackIssue?.issue ?? readBackIssue, comments: readBackComments.comments ?? [] }
         if (!linearCore.confirmationMatches(outbox.confirms, readBack)) throw Object.assign(new Error('Linear node projection read-back did not match the requested state, labels, and causal marker'), { code: 'LINEAR_CONFIRMATION_FAILED' })
+        const readBackContext = autoresearchCore.parseContextBlock(String(readBack.issue.description ?? ''))
+        if (!readBackContext.ok || autoresearchCore.contextBlockDigest(readBackContext.state) !== liveContextDigest) throw Object.assign(new Error('Linear node projection read-back did not confirm the owned context block'), { code: 'LINEAR_CONFIRMATION_FAILED' })
         remote.readBack = readBack
         const confirmed = linearCore.transitionOutbox(attempted, 'confirm', { remote })
         await fops.writeJson(recordPath, confirmed)
@@ -1610,11 +1708,7 @@ const LINEAR_PLUGIN = {
       }
     })
 
-    tool('linear_sync_reconcile', 'Coordinator-only: replay pending Linear outbox mutations with bounded read-back and durable retry/confirmation receipts.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId'],
-      properties: { projectId: str('Stable AutoResearch project id.'), limit: { type: 'number' }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_sync_reconcile', 'Coordinator-only: replay pending Linear outbox mutations with bounded read-back and durable retry/confirmation receipts.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
@@ -1628,7 +1722,9 @@ const LINEAR_PLUGIN = {
           if (record.operation === 'node.project') results.push({ mutationKey: record.mutationKey, status: record.status, journalRecovery: true, journal })
           continue
         }
-        if (!['pending', 'retry'].includes(record.status)) continue
+        // inflight records are retryable: a hard crash between the attempt
+        // write and the catch must not strand the mutation forever.
+        if (!['pending', 'retry', 'inflight'].includes(record.status)) continue
         const recordPath = pathutil.join(linearCore.syncRoot(baseDir, args.projectId), 'outbox', record.mutationKey + '.json')
         let attempted = null
         try {
@@ -1668,13 +1764,31 @@ const LINEAR_PLUGIN = {
             if (!snapshot?.id) throw Object.assign(new Error('Linear issue was deleted'), { code: 'LINEAR_NOT_FOUND' })
             if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
             alreadyApplied = linearCore.confirmationMatches(expected, snapshot) ? snapshot : null
+          } else if (expected?.kind === 'context-block' && expected.issueId && expected.contextDigest) {
+            const issue = await executeLinear('getIssue', { id: expected.issueId }, exec, baseDir)
+            const snapshot = issue?.issue ?? issue
+            if (!snapshot?.id) throw Object.assign(new Error('Linear issue was deleted'), { code: 'LINEAR_NOT_FOUND' })
+            if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
+            const parsedBlock = autoresearchCore.parseContextBlock(String(snapshot.description ?? ''))
+            alreadyApplied = (parsedBlock.ok && autoresearchCore.contextBlockDigest(parsedBlock.state) === expected.contextDigest) ? { issue: snapshot } : null
           }
           if (alreadyApplied) {
             const readBackAttempt = record.status === 'inflight' ? record : linearCore.transitionOutbox(record, 'attempt', {}, new Date().toISOString())
             const confirmed = linearCore.transitionOutbox(readBackAttempt, 'confirm', { remote: alreadyApplied, readBack: true }, new Date().toISOString())
             await fops.writeJson(recordPath, confirmed)
             const journal = await linearCore.markProjectionConfirmed(fops, baseDir, args.projectId, confirmed, confirmed.receipt)
-            results.push({ mutationKey: record.mutationKey, status: confirmed.status, readBack: true, journal })
+            // Digest-guarded settle: only the recovery cache that carries THIS
+            // record's intent digest may be settled — an older confirmation
+            // must never delete or confirm a newer pending intent.
+            let settled = null
+            if (record.operation === 'node.context.update') {
+              const pendingCache = await linearCore.readRecoveryCache(fops, baseDir, args.projectId, record.nodeId)
+              if (pendingCache && pendingCache.status === 'pending' && pendingCache.contextDigest === record.payload?.contextDigest) {
+                settled = await linearCore.markRecoveryCacheConfirmed(fops, baseDir, args.projectId, record.nodeId, confirmed.updatedAt)
+                if (settled?.ok && settled.cache?.status === 'confirmed') await linearCore.clearRecoveryCache(fops, baseDir, args.projectId, record.nodeId)
+              }
+            }
+            results.push({ mutationKey: record.mutationKey, status: confirmed.status, readBack: true, journal, ...(settled?.ok ? { recoveryCache: 'cleared' } : {}) })
             continue
           }
           attempted = linearCore.transitionOutbox(record, 'attempt')
@@ -1694,6 +1808,25 @@ const LINEAR_PLUGIN = {
             const snapshot = issue?.issue ?? issue
             if (!snapshot?.id) throw Object.assign(new Error('Linear issue was deleted'), { code: 'LINEAR_NOT_FOUND' })
             if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
+            const replayBlocked = (record.payload.blockedBy ?? []).length > 0
+            if (replayBlocked && !record.payload.blockedLabelId) {
+              const dead = linearCore.transitionOutbox(attempted, 'dead', { error: 'blocked projection replay requires blockedLabelId: the causal hold cannot be confirmed without the configured blocked label.' })
+              await fops.writeJson(recordPath, dead)
+              results.push({ mutationKey: record.mutationKey, status: 'dead', error: dead.lastError })
+              continue
+            }
+            // The replay must honor the same context binding as the direct
+            // path (gate 12): a projection bound to a stale block digest
+            // dead-letters instead of committing against any valid block.
+            if (typeof record.payload.contextDigest === 'string' && record.payload.contextDigest) {
+              const replayBound = autoresearchCore.parseContextBlock(String(snapshot.description ?? ''))
+              if (!replayBound.ok || autoresearchCore.contextBlockDigest(replayBound.state) !== record.payload.contextDigest) {
+                const dead = linearCore.transitionOutbox(attempted, 'dead', { error: 'LINEAR_CONTEXT_STALE on replay: the issue context block no longer matches the digest the projection was bound to; re-query and re-project.' })
+                await fops.writeJson(recordPath, dead)
+                results.push({ mutationKey: record.mutationKey, status: 'dead', error: dead.lastError })
+                continue
+              }
+            }
             const stateRemote = await executeLinear('updateIssue', { id: record.payload.issueId, stateId: record.payload.stateId }, exec, baseDir)
             const blocked = (record.payload.blockedBy ?? []).length > 0
             const labelsRemote = record.payload.blockedLabelId
@@ -1702,21 +1835,73 @@ const LINEAR_PLUGIN = {
             remote = { state: stateRemote, labels: labelsRemote }
             if ((record.payload.blockedBy ?? []).length > 0 || record.payload.reason) {
               const comment = linearCore.causalComment({ nodeId: record.nodeId, blockedBy: record.payload.blockedBy, reason: record.payload.reason, eventDigest: record.eventDigest })
-              remote.comment = await executeLinear('createComment', { id: record.payload.issueId, body: comment.body, idempotencyMarker: comment.idempotencyMarker }, exec, baseDir)
+              // Marker dedupe before creation: a crashed prior attempt may
+              // have already posted this exact causal comment.
+              const existingComments = await linearCore.listComments(record.payload.issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
+              const alreadyPosted = (existingComments.comments ?? []).some((item) => String(item.body ?? '').includes(comment.idempotencyMarker))
+              if (!alreadyPosted) remote.comment = await executeLinear('createComment', { id: record.payload.issueId, body: comment.body, idempotencyMarker: comment.idempotencyMarker }, exec, baseDir)
+              else remote.comment = { ok: true, success: true, skipped: true, deduplicated: true }
             }
-          } else throw new Error('unsupported outbox operation: ' + record.operation)
+          }
+          else if (record.operation === 'node.context.update') {
+            const issue = await executeLinear('getIssue', { id: record.payload.issueId }, exec, baseDir)
+            const snapshot = issue?.issue ?? issue
+            if (!snapshot?.id) throw Object.assign(new Error('Linear issue was deleted'), { code: 'LINEAR_NOT_FOUND' })
+            if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
+            // Replay CAS (plan §7.7): never roll the block back over newer
+            // machine updates or human edits. The enqueue path records the
+            // expected PRIOR digest; replay proceeds only when the live
+            // block still matches it (or both are absent/empty).
+            const replayLive = autoresearchCore.parseContextBlock(String(snapshot.description ?? ''))
+            const replayLiveDigest = replayLive.ok ? autoresearchCore.contextBlockDigest(replayLive.state) : ''
+            const expectedPrior = typeof record.payload.expectedContextDigest === 'string' ? record.payload.expectedContextDigest : null
+            const casOk = expectedPrior !== null && (replayLiveDigest === expectedPrior || (replayLiveDigest === '' && expectedPrior === ''))
+            if (!casOk) {
+              const dead = linearCore.transitionOutbox(attempted, 'dead', { error: 'LINEAR_CONTEXT_CONFLICT on replay: the live context block no longer matches the expected prior digest (live ' + (replayLiveDigest ? replayLiveDigest.slice(0, 12) + '...' : '(absent)') + ', expected ' + (expectedPrior ? expectedPrior.slice(0, 12) + '...' : '(none)') + '). Surface a conflict for coordinator/user resolution; never overwrite the change (plan §7.7).' })
+              await fops.writeJson(recordPath, dead)
+              results.push({ mutationKey: record.mutationKey, status: 'dead', conflict: true, error: dead.lastError })
+              continue
+            }
+            // Upsert the INTENDED block into the LIVE description: the
+            // payload carries a stale full description, so writing it
+            // verbatim would clobber user text edited outside the block
+            // since the crash.
+            const intendedBlock = autoresearchCore.parseContextBlock(String(record.payload.description ?? ''))
+            if (!intendedBlock.ok) {
+              const dead = linearCore.transitionOutbox(attempted, 'dead', { error: 'replay intent is not a valid Current Node Context block; dead-lettered instead of writing a malformed description.' })
+              await fops.writeJson(recordPath, dead)
+              results.push({ mutationKey: record.mutationKey, status: 'dead', conflict: true, error: dead.lastError })
+              continue
+            }
+            const replayDescription = autoresearchCore.upsertContextBlock(String(snapshot.description ?? ''), intendedBlock.blockText)
+            remote = await linearCore.updateIssueDescription(record.payload.issueId, replayDescription, (request) => transport(request, exec, baseDir))
+          }
+          else throw new Error('unsupported outbox operation: ' + record.operation)
           if (record.operation === 'node.project') {
             const readBackIssue = await executeLinear('getIssue', { id: record.payload.issueId }, exec, baseDir)
             const readBackComments = record.confirms?.commentMarker ? await linearCore.listComments(record.payload.issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 }) : { comments: [] }
             const readBack = { issue: readBackIssue?.issue ?? readBackIssue, comments: readBackComments.comments ?? [] }
             if (!linearCore.confirmationMatches(record.confirms, readBack)) throw Object.assign(new Error('Linear node projection read-back did not match the requested state, labels, and causal marker'), { code: 'LINEAR_CONFIRMATION_FAILED' })
+            // Plan §7.1: the lifecycle commit is confirmed together with the
+            // owned context block — a replay must never commit a node whose
+            // issue no longer carries the block.
+            const replayBlock = autoresearchCore.parseContextBlock(String(readBack.issue.description ?? ''))
+            if (!replayBlock.ok) throw Object.assign(new Error('Linear node projection read-back did not confirm a valid Current Node Context block'), { code: 'LINEAR_CONFIRMATION_FAILED' })
             remote.readBack = readBack
+          }
+          if (record.operation === 'node.context.update') {
+            const readBackIssue = await executeLinear('getIssue', { id: record.payload.issueId }, exec, baseDir)
+            const readBackSnapshot = readBackIssue?.issue ?? readBackIssue
+            const readBackBlock = autoresearchCore.parseContextBlock(String(readBackSnapshot.description ?? ''))
+            if (!readBackBlock.ok || autoresearchCore.contextBlockDigest(readBackBlock.state) !== record.payload.contextDigest) throw Object.assign(new Error('Linear context replay read-back did not confirm the requested digest'), { code: 'LINEAR_CONFIRMATION_FAILED' })
+            remote.readBack = { issue: readBackSnapshot }
           }
           if (!linearCore.mutationSucceeded(record.operation, remote)) throw Object.assign(new Error('Linear mutation returned success:false'), { code: 'LINEAR_MUTATION_FAILED' })
           const confirmed = linearCore.transitionOutbox(attempted, 'confirm', { remote }, new Date().toISOString())
           await fops.writeJson(recordPath, confirmed)
           const journal = await linearCore.markProjectionConfirmed(fops, baseDir, args.projectId, confirmed, confirmed.receipt)
-          results.push({ mutationKey: record.mutationKey, status: confirmed.status, remote, journal })
+          const settled = record.operation === 'node.context.update' ? await linearCore.markRecoveryCacheConfirmed(fops, baseDir, args.projectId, record.nodeId, confirmed.updatedAt) : null
+          results.push({ mutationKey: record.mutationKey, status: confirmed.status, remote, journal, ...(settled ? { recoveryCache: settled.cache.status } : {}) })
         } catch (error) {
           const failure = { error: error?.message ?? String(error) }
           const failedAttempt = attempted ?? linearCore.transitionOutbox(record, 'attempt')
@@ -1731,11 +1916,7 @@ const LINEAR_PLUGIN = {
       return { ok: true, projectId: args.projectId, results }
     })
 
-    tool('linear_create_relation', 'Coordinator-only: create one directed Linear issue relation after enqueueing the matching local WAL mutation.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'nodeId', 'issueId', 'relatedIssueId', 'type'],
-      properties: { projectId: str('Stable AutoResearch project id.'), nodeId: str('Focused node id.'), issueId: str('Source issue UUID.'), relatedIssueId: str('Target issue UUID.'), type: str('Linear relation type, normally blocks or related.'), baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_create_relation', 'Coordinator-only: create one directed Linear issue relation after enqueueing the matching local WAL mutation.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
@@ -1766,11 +1947,7 @@ const LINEAR_PLUGIN = {
       }
     })
 
-    tool('linear_update_labels', 'Coordinator-only: update labels by preserving current IDs and applying explicit additions/removals.', {
-      type: 'object', additionalProperties: false,
-      required: ['projectId', 'nodeId', 'id', 'currentLabels'],
-      properties: { projectId: str('Stable AutoResearch project id.'), nodeId: str('Focused node id.'), id: str('Issue UUID.'), currentLabels: { type: 'array', items: { type: 'object', additionalProperties: true } }, addIds: { type: 'array', items: { type: 'string' } }, removeIds: { type: 'array', items: { type: 'string' } }, baseDir: str('Workspace root.') },
-    }, async (args, exec) => {
+    tool('linear_update_labels', 'Coordinator-only: update labels by preserving current IDs and applying explicit additions/removals.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
@@ -1799,16 +1976,7 @@ const LINEAR_PLUGIN = {
       }
     })
 
-    tool('linear_list_issues', 'List recent Linear issues ordered by update time; pass projectId to list one project\'s issues (paginated, marker-bearing).', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        first: { type: 'number', description: 'Max issues per page.' },
-        projectId: str('Optional Linear project id: list that project\'s issues (paginated).'),
-        maxPages: { type: 'number', description: 'Optional pagination cap (default 10 pages; exceeding it fails closed).' },
-        maxNodes: { type: 'number', description: 'Optional project node ceiling (default 500; exceeding it fails closed).' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_list_issues', 'List recent Linear issues ordered by update time; pass projectId to list one project\'s issues (paginated, marker-bearing).', null, async (args, exec) => {
       assertCallingAgent(exec)
       if (typeof args.projectId === 'string' && args.projectId.trim()) {
         return await linearCore.listProjectIssues(args.projectId.trim(), (request) => transport(request, exec, baseDirOf(exec, args)), args)
@@ -1816,26 +1984,12 @@ const LINEAR_PLUGIN = {
       return await executeLinear('listIssues', { first: typeof args.first === 'number' ? args.first : 25 }, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_search_issues', 'Search Linear issues by term.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        term: { type: 'string', description: 'Search term.' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_search_issues', 'Search Linear issues by term.', null, async (args, exec) => {
       assertCallingAgent(exec)
       return await executeLinear('searchIssues', { term: args.term }, exec, baseDirOf(exec, args))
     })
 
-    tool('linear_create_comment', 'Post a comment on a Linear issue. Pass idempotencyMarker to make posting idempotent: when a comment already contains the marker, the call skips creation and returns the existing comment (revision-protocol replay converges without duplicates).', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        id: { type: 'string', description: 'Issue identifier, e.g. ISS-123.' },
-        body: { type: 'string', description: 'Comment body (markdown).' },
-        idempotencyMarker: str('Optional marker: if any existing comment contains it, no comment is created.'),
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_create_comment', 'Post a comment on a Linear issue. Pass idempotencyMarker to make posting idempotent: when a comment already contains the marker, the call skips creation and returns the existing comment (revision-protocol replay converges without duplicates).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       if (typeof args.idempotencyMarker === 'string' && args.idempotencyMarker.trim()) {
@@ -1849,34 +2003,247 @@ const LINEAR_PLUGIN = {
       return { ok: true, ...result, skipped: false }
     })
 
-    tool('linear_update_issue', "Update a Linear issue's state (stateId from linear_workspace_metadata).", {
-      type: 'object', additionalProperties: true,
-      properties: {
-        id: { type: 'string', description: 'Issue identifier, e.g. ISS-123.' },
-        stateId: { type: 'string', description: 'Target state id from linear_workspace_metadata.' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    // ── Linear Current Node Context (plan §7) ──────────────────────────────
+
+    function linearUnavailable(error) {
+      const message = error instanceof Error ? error.message : String(error ?? 'Linear unavailable')
+      return { ok: false, status: 'linear-unavailable', error: message }
+    }
+
+    async function requireIssueSnapshot(exec, baseDir, issueId) {
+      const remote = await executeLinear('getIssue', { id: issueId }, exec, baseDir)
+      if (remote && typeof remote === 'object' && remote.error) throw new Error(remote.error)
+      const snapshot = remote?.issue ?? remote
+      if (!snapshot?.id) throw Object.assign(new Error('Linear issue was not found: ' + issueId), { code: 'LINEAR_NOT_FOUND' })
+      if (linearCore.issueUnavailable(snapshot)) throw Object.assign(new Error('Linear issue is archived or trashed'), { code: 'LINEAR_ISSUE_UNAVAILABLE' })
+      return snapshot
+    }
+
+    // Local artifact integrity for evidence refs named in the block. A
+    // missing local file makes the reference 'unverified'/'missing' — it
+    // never blocks context reconstruction (plan §7.4 step 7).
+    async function checkEvidenceRefs(fops, baseDir, refs) {
+      const out = []
+      for (const ref of Array.isArray(refs) ? refs : []) {
+        const value = String(ref?.ref ?? '')
+        const hash = String(ref?.hash ?? '')
+        if (!value) continue
+        const localish = !value.includes('://') && !value.startsWith('/') && !value.startsWith('..') && !value.includes(':')
+        // Non-local references cannot be checked against local bytes; they
+        // are 'unverified', never 'missing' and never blocking.
+        if (!localish || !fops || typeof fops.readText !== 'function') {
+          out.push({ ref: value, status: 'unverified' })
+          continue
+        }
+        let localHash = null
+        try {
+          // Traversal-safe resolution + byte-first hashing (plan §9: hash
+          // bytes first; text decode only when text inspection is needed).
+          const abs = pathutil.resolveInside(baseDir, value)
+          const binary = /\.(pdf|png|jpe?g|gif|gz|zip|bin)$/i.test(value)
+          if (binary && typeof fops.readBytes === 'function') {
+            const bytes = await fops.readBytes(abs, 64 * 1024 * 1024)
+            localHash = bytes !== null ? autoresearchCore.sha256Bytes(bytes) : null
+          } else {
+            localHash = autoresearchCore.sha256Text(await fops.readText(abs))
+          }
+        } catch {
+          localHash = null
+        }
+        let status
+        if (localHash === null) status = 'missing'
+        else if (hash) status = localHash === hash ? 'verified' : 'unverified'
+        else status = 'unverified'
+        out.push({ ref: value, status })
+      }
+      return out
+    }
+
+    tool('linear_get_node_context', 'Coordinator-only, REQUIRED intake for Linear-backed work (plan §7.4): reconstructs the node\'s Current Node Context from the Linear issue description, comments, and relations. Reconstructs from Linear alone when local state.json is absent. Returns a compact structured NodeWorkContext plus readable Markdown; evidence references carry integrity status verified/unverified/missing without blocking. A missing or invalid owned block returns context-missing (repair it with linear_update_node_context before node work); a Linear outage returns a structured linear-unavailable pause result.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = baseDirOf(exec, args)
+      const issueId = String(args.issueId ?? '').trim()
+      if (!issueId) throw new Error('issueId is required')
+      let snapshot
+      try {
+        snapshot = await requireIssueSnapshot(exec, baseDir, issueId)
+      } catch (error) {
+        if (error?.code === 'LINEAR_NOT_FOUND' || error?.code === 'LINEAR_ISSUE_UNAVAILABLE') throw error
+        return linearUnavailable(error)
+      }
+      const description = String(snapshot.description ?? '')
+      const contextBlock = autoresearchCore.parseContextBlock(description)
+      const specBlock = autoresearchCore.parseSpecBlock(description)
+      const nodeId = String(args.nodeId ?? '').trim() || (contextBlock.ok ? contextBlock.state.nodeId : '') || (specBlock?.nodeId ?? '')
+      const comments = await linearCore.listComments(issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
+      const relations = await linearCore.listIssueRelations(issueId, (request) => transport(request, exec, baseDir), { maxPages: 10 })
+      const fops = makeFops(baseDir)
+      const evidenceStatus = contextBlock.ok ? await checkEvidenceRefs(fops, baseDir, contextBlock.state.evidenceRefs) : []
+      const drift = []
+      if (contextBlock.ok && String(snapshot.state?.type ?? snapshot.state?.name ?? '').toLowerCase() === 'completed' && contextBlock.state.status !== 'done') {
+        drift.push('Linear state is completed but the context block status is ' + contextBlock.state.status)
+      }
+      if (!contextBlock.ok && specBlock?.contractDigest) {
+        drift.push('the issue carries a node contract but no valid Current Node Context block; initialize it from the contract and latest comments')
+      }
+      let nodeIdMismatch = false
+      if (contextBlock.ok && typeof args.nodeId === 'string' && args.nodeId.trim() && contextBlock.state.nodeId !== args.nodeId.trim()) {
+        nodeIdMismatch = true
+        drift.push('the issue\'s Current Node Context block belongs to node ' + contextBlock.state.nodeId + ', not the requested ' + args.nodeId.trim())
+      }
+      const composed = autoresearchCore.composeNodeWorkContext({
+        issue: snapshot,
+        contextBlock,
+        specBlock,
+        comments: comments.comments ?? [],
+        relations: { relations: relations.relations ?? [], inverseRelations: relations.inverseRelations ?? [] },
+        evidenceStatus,
+        drift,
+      })
+      const result = { ...composed, nodeIdMismatch, issue: { id: snapshot.id, identifier: snapshot.identifier ?? '', title: snapshot.title ?? '', url: snapshot.url ?? '', state: snapshot.state?.name ?? snapshot.state?.id ?? '' } }
+      if (args.projectId && nodeId && fops) {
+        const cache = await linearCore.readRecoveryCache(fops, baseDir, String(args.projectId), nodeId)
+        if (cache && cache.status === 'pending') result.recoveryCache = { nodeId: cache.nodeId, issueId: cache.issueId, expectedContextDigest: cache.expectedContextDigest, contextDigest: cache.contextDigest, createdAt: cache.createdAt, status: cache.status }
+      }
+      if (!contextBlock.ok) result.repairHint = 'No valid owned Current Node Context block: repair it with linear_update_node_context from the latest verified Linear comments and the node contract before any node work starts (plan §7.4).'
+      return result
+    })
+
+    tool('linear_update_node_context', 'Coordinator-only: update the issue\'s owned Current Node Context block through the plan §7.6 write path — fresh read, expected-digest CAS (a concurrent change returns LINEAR_CONTEXT_CONCURRENT with the live state instead of overwriting), user text outside the block preserved, crash-safe recovery cache + WAL/outbox intent, owned-block-only description update, structural read-back, digest confirmation. Pass expectedContextDigest from a fresh linear_get_node_context (empty string when initializing a block that does not exist yet).', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = baseDirOf(exec, args)
+      const issueId = String(args.issueId ?? '').trim()
+      const projectId = String(args.projectId ?? '').trim()
+      const nodeId = String(args.nodeId ?? '').trim()
+      if (!issueId || !projectId || !nodeId) throw new Error('issueId, projectId, and nodeId are required')
+      if (!args.state || typeof args.state !== 'object' || Array.isArray(args.state)) throw new Error('state (the owned node context object) is required')
+      const expectedContextDigest = typeof args.expectedContextDigest === 'string' ? args.expectedContextDigest.trim() : ''
+      const fops = makeFops(baseDir)
+      if (!fops) throw new Error('fs service unavailable; cannot persist Linear recovery cache/WAL')
+      // 1. Read the latest issue.
+      const snapshot = await requireIssueSnapshot(exec, baseDir, issueId)
+      const currentDescription = String(snapshot.description ?? '')
+      // 2. Compute the expected prior digest from the live block. A block that
+      //      exists but whose digest no longer matches its content (a concurrent
+      //      human edit) still carries a parseable state + computed digest, so it
+      //      is surfaced for a fresh reduce instead of being reported as absent.
+      const live = autoresearchCore.parseContextBlock(currentDescription)
+      let liveState = null
+      let liveDigest = ''
+      if (live.ok) {
+        liveState = live.state
+        liveDigest = autoresearchCore.contextBlockDigest(live.state)
+      } else if (live.state) {
+        liveState = live.state
+        liveDigest = live.actual ?? ''
+      }
+      // 3. Validate + normalize the new state.
+      const state = autoresearchCore.normalizeContextState(args.state)
+      if (state.nodeId !== nodeId) throw new Error('state.nodeId (' + state.nodeId + ') does not match the target node (' + nodeId + ')')
+      // The LIVE block must belong to this node too: updating a block owned
+      // by another node (or another issue) is never allowed (plan §7.2).
+      if (liveState !== null && typeof liveState.nodeId === 'string' && liveState.nodeId && liveState.nodeId !== nodeId) {
+        throw Object.assign(new Error('LINEAR_CONTEXT_NODE_MISMATCH: the issue\'s Current Node Context block belongs to node ' + liveState.nodeId + ', not ' + nodeId + '.'), { code: 'LINEAR_CONTEXT_NODE_MISMATCH' })
+      }
+      // 4. CAS: never overwrite a concurrently changed block.
+      if (liveState !== null && expectedContextDigest !== liveDigest) {
+        throw Object.assign(new Error('LINEAR_CONTEXT_CONCURRENT: the issue\'s context block changed after your query (live digest ' + liveDigest.slice(0, 12) + '... vs expected ' + (expectedContextDigest ? expectedContextDigest.slice(0, 12) + '...' : '(none)') + '). Re-run linear_get_node_context, reduce again, and retry with the live expectedContextDigest. The user-authored text was not modified.'), { code: 'LINEAR_CONTEXT_CONCURRENT', liveState, liveDigest })
+      }
+      if (liveState === null && expectedContextDigest !== '') {
+        throw Object.assign(new Error('LINEAR_CONTEXT_CONCURRENT: expected a live context block (' + expectedContextDigest.slice(0, 12) + '...) but the issue carries none. Re-run linear_get_node_context and retry.'), { code: 'LINEAR_CONTEXT_CONCURRENT', liveState: null, liveDigest: '' })
+      }
+      // 5. Render + upsert (user text outside the block is preserved).
+      const contextDigest = autoresearchCore.contextBlockDigest(state)
+      const newState = { ...state, lastVerified: { at: new Date().toISOString(), contextDigest } }
+      const newDescription = linearCore.buildContextDescription(currentDescription, newState)
+      // 6. Crash-safe intent.
+      await linearCore.writeRecoveryCache(fops, baseDir, projectId, nodeId, { issueId, expectedContextDigest: liveDigest, contextDigest, description: newDescription, state: newState })
+      // 7. WAL event + outbox record + attempt. The expected PRIOR digest is
+      // persisted in the payload so a crash replay can CAS against the live
+      // block instead of overwriting newer machine updates or human edits.
+      const payload = { issueId, contextDigest, description: newDescription, nodeId, expectedContextDigest: liveDigest }
+      const root = linearCore.syncRoot(baseDir, projectId)
+      const head = await fops.readJson(pathutil.join(root, 'head.json'))
+      const event = linearCore.makeSyncEvent({ prevDigest: head?.digest ?? '', projectId, nodeId, operation: 'node.context.update', payload })
+      await linearCore.persistSyncEvent(fops, baseDir, projectId, event)
+      const outbox = linearCore.makeOutboxRecord({ event, mutation: { operation: 'node.context.update', payload } })
+      const queued = await linearCore.persistOutboxRecord(fops, baseDir, projectId, outbox)
+      if (['confirmed', 'dead'].includes(queued.record.status)) return { ok: queued.record.status === 'confirmed', skipped: true, outboxStatus: queued.record.status, contextDigest }
+      const recordPath = pathutil.join(root, 'outbox', outbox.mutationKey + '.json')
+      const attempted = linearCore.transitionOutbox(queued.record, 'attempt')
+      await fops.writeJson(recordPath, attempted)
+      try {
+        // 8. Update only the owned block.
+        const remote = await linearCore.updateIssueDescription(issueId, newDescription, (request) => transport(request, exec, baseDir))
+        if (!linearCore.mutationSucceeded('node.context.update', remote)) throw Object.assign(new Error('Linear context description mutation returned success:false'), { code: 'LINEAR_MUTATION_FAILED' })
+        // 9. Read back + structural parse + digest confirmation.
+        const readBack = await requireIssueSnapshot(exec, baseDir, issueId)
+        const readBackBlock = autoresearchCore.parseContextBlock(String(readBack.description ?? ''))
+        if (!readBackBlock.ok || autoresearchCore.contextBlockDigest(readBackBlock.state) !== contextDigest) {
+          throw Object.assign(new Error('Linear context read-back did not confirm the requested digest'), { code: 'LINEAR_CONFIRMATION_FAILED' })
+        }
+        // 10. Confirm + settle the recovery cache (confirmed intent is
+        // deleted; it is intent-only and must not accumulate).
+        const confirmed = linearCore.transitionOutbox(attempted, 'confirm', { remote: { issue: readBack } })
+        await fops.writeJson(recordPath, confirmed)
+        const cache = await linearCore.markRecoveryCacheConfirmed(fops, baseDir, projectId, nodeId)
+        if (cache.ok && cache.cache?.status === 'confirmed' && cache.cache?.contextDigest === contextDigest) await linearCore.clearRecoveryCache(fops, baseDir, projectId, nodeId)
+        return { ok: true, issueId, nodeId, contextDigest, eventDigest: event.digest, mutationKey: outbox.mutationKey, outboxStatus: confirmed.status, recoveryCache: cache.ok ? 'cleared' : 'absent', markdown: autoresearchCore.renderContextBlock(readBackBlock.state) }
+      } catch (error) {
+        const retry = linearCore.transitionOutbox(attempted, 'retry', { error: error?.message ?? String(error) })
+        await fops.writeJson(recordPath, retry)
+        throw error
+      }
+    })
+
+    tool('linear_post_evidence_event', 'Coordinator-only: post one idempotent linear-evidence-event comment for a decision-relevant milestone (plan §7.3) through the WAL/outbox. Replays with the same event digest are deduplicated by marker — repeated projection creates no duplicate comments. Evidence comments support the current block; they are not a substitute for it.', null, async (args, exec) => {
+      assertCoordinator(exec)
+      const baseDir = baseDirOf(exec, args)
+      const issueId = String(args.issueId ?? '').trim()
+      const projectId = String(args.projectId ?? '').trim()
+      const nodeId = String(args.nodeId ?? '').trim()
+      if (!issueId || !projectId || !nodeId) throw new Error('issueId, projectId, and nodeId are required')
+      const event = autoresearchCore.makeEvidenceEvent({ projectId, nodeId, type: args.type, summary: args.summary, evidence: args.evidence, completes: args.completes, finding: args.finding, source: args.source, requiredChange: args.requiredChange, at: args.at })
+      const comment = autoresearchCore.renderEvidenceComment(event)
+      const fops = makeFops(baseDir)
+      if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
+      const payload = { issueId, body: comment.body, idempotencyMarker: comment.marker }
+      const root = linearCore.syncRoot(baseDir, projectId)
+      const head = await fops.readJson(pathutil.join(root, 'head.json'))
+      const walEvent = linearCore.makeSyncEvent({ prevDigest: head?.digest ?? '', projectId, nodeId, operation: 'comment', payload, expect: { kind: 'comment-marker', marker: comment.marker } })
+      await linearCore.persistSyncEvent(fops, baseDir, projectId, walEvent)
+      const outbox = linearCore.makeOutboxRecord({ event: walEvent, mutation: { operation: 'comment', payload }, confirms: { kind: 'comment-marker', marker: comment.marker } })
+      const queued = await linearCore.persistOutboxRecord(fops, baseDir, projectId, outbox)
+      if (['confirmed', 'dead'].includes(queued.record.status)) return { ok: queued.record.status === 'confirmed', skipped: true, outboxStatus: queued.record.status, event: { digest: event.digest, type: event.type }, marker: comment.marker }
+      const recordPath = pathutil.join(root, 'outbox', outbox.mutationKey + '.json')
+      const attempted = linearCore.transitionOutbox(queued.record, 'attempt')
+      await fops.writeJson(recordPath, attempted)
+      try {
+        // Idempotent: a comment with the marker already exists → confirm.
+        const existing = await linearCore.listComments(issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
+        const hit = (existing.comments ?? []).find((item) => linearCore.confirmationMatches({ kind: 'comment-marker', marker: comment.marker }, item))
+        let remote
+        if (hit) remote = { ok: true, success: true, skipped: true, commentId: hit.id }
+        else remote = await executeLinear('createComment', { id: issueId, body: comment.body }, exec, baseDir)
+        if (!linearCore.mutationSucceeded('comment', remote)) throw Object.assign(new Error('Linear evidence comment mutation returned success:false'), { code: 'LINEAR_MUTATION_FAILED' })
+        const confirmed = linearCore.transitionOutbox(attempted, 'confirm', { remote })
+        await fops.writeJson(recordPath, confirmed)
+        return { ok: true, skipped: Boolean(hit), commentId: remote.comment?.id ?? hit?.id ?? null, event: { digest: event.digest, type: event.type }, marker: comment.marker, eventDigest: walEvent.digest, mutationKey: outbox.mutationKey, outboxStatus: confirmed.status }
+      } catch (error) {
+        const retry = linearCore.transitionOutbox(attempted, 'retry', { error: error?.message ?? String(error) })
+        await fops.writeJson(recordPath, retry)
+        throw error
+      }
+    })
+
+    tool('linear_update_issue', "Update a Linear issue's state (stateId from linear_workspace_metadata).", null, async (args, exec) => {
       assertCoordinator(exec)
       return await executeLinear('updateIssue', { id: args.id, stateId: args.stateId }, exec, baseDirOf(exec, args))
     })
 
     // ── project mode (plan §3 C1–C2, §4.5 spec projection) ────────────────
 
-    tool('linear_create_project', "Create a Linear project for an approved AutoResearch plan. Auto-approved by default (config linear.approval: 'auto'); set linear.approval: 'ask' to require approval prompts. Reconciles by marker, never by name alone.", {
-      type: 'object', additionalProperties: true,
-      properties: {
-        name: str('Project name.'),
-        projectId: str('Stable AutoResearch project id used in the marker (matches plan.projectId).'),
-        description: str('Optional project description; the AutoResearch marker is appended.'),
-        teamId: str('Approved Linear team id (resolved against workspace_metadata).'),
-        teamKey: str('Alternative to teamId: the team key to resolve.'),
-        priority: { type: 'number', description: 'Optional Linear priority.' },
-        startDate: str('Optional start date (YYYY-MM-DD).'),
-        targetDate: str('Optional target date (YYYY-MM-DD).'),
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_create_project', "Create a Linear project for an approved AutoResearch plan. Auto-approved by default (config linear.approval: 'auto'); set linear.approval: 'ask' to require approval prompts. Reconciles by marker, never by name alone.", null, async (args, exec) => {
       assertCoordinator(exec)
       return await linearCore.createProjectFlow(
         args,
@@ -1885,23 +2252,7 @@ const LINEAR_PLUGIN = {
       )
     })
 
-    tool('linear_create_issue', "Create or reconcile one Linear issue for an approved plan node. The generated specification block is rendered from the approved plan (node contract digest, kind, artifact format, roles, budget, plan revision) — never from caller prose; user-authored text outside the block is preserved. Replaying synchronizes only the generated block and appends one idempotent scope note per plan revision. Migrates legacy UUID-keyed markers in place. Auto-approved by default; set linear.approval: 'ask' to require approval prompts.", {
-      type: 'object', additionalProperties: true,
-      required: ['projectId', 'autoresearchProjectId', 'nodeId', 'title'],
-      properties: {
-        projectId: str('Linear project id (from linear_create_project). Selects the Linear container.'),
-        autoresearchProjectId: str('Stable AutoResearch project id encoded in the node marker (matches plan.projectId).'),
-        nodeId: str('Plan node id; encoded in the stable node marker.'),
-        title: str('Issue title.'),
-        description: str('Optional user-authored issue description; the generated spec block and the node marker are appended.'),
-        teamId: str('Approved Linear team id (resolved against workspace_metadata).'),
-        teamKey: str('Alternative to teamId: the team key to resolve.'),
-        parentId: str('Optional display-only parent issue id (Linear parentId is advisory; plan.json is the authoritative DAG).'),
-        stateId: str('Optional initial state id.'),
-        estimate: { type: 'number', description: 'Optional estimate.' },
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_create_issue', "Create or reconcile one Linear issue for an approved plan node. The generated specification block is rendered from the approved plan (node contract digest, kind, artifact format, roles, budget, plan revision) — never from caller prose; user-authored text outside the block is preserved. Replaying synchronizes only the generated block and appends one idempotent scope note per plan revision. The node marker embeds the stable AutoResearch project id. Auto-approved by default; set linear.approval: 'ask' to require approval prompts.", null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
       const fops = makeFops(baseDir)
@@ -1945,12 +2296,7 @@ const LINEAR_PLUGIN = {
       return result
     })
 
-    tool('linear_build_probe', 'Report the mounted Linear entry generation, expected/actual aggregate build ID, and graphMatches against the build manifest. Both preset entries must report the same candidate aggregate ID and graphMatches:true after a remount.', {
-      type: 'object', additionalProperties: true,
-      properties: {
-        baseDir: { type: 'string', description: 'Workspace root. Defaults to the calling session workspace.' },
-      },
-    }, async (args, exec) => {
+    tool('linear_build_probe', 'Report the mounted Linear entry generation, expected/actual aggregate build ID, and graphMatches against the build manifest. Both preset entries must report the same candidate aggregate ID and graphMatches:true after a remount.', null, async (args, exec) => {
       assertCallingAgent(exec)
       if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot run the build probe')
       const baseDir = baseDirOf(exec, args)

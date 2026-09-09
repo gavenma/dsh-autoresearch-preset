@@ -301,11 +301,17 @@ const checkpoint = registered.get('autoresearch_checkpoint')
   const withFallbacks = new Set(Object.entries(cfg.roleProfiles).filter(([, p]) => Array.isArray(p.modelFallbacks)).map(([role]) => role))
   for (const role of ['research_planner', 'research_author', 'research_synthesizer', 'research_abstract_writer', 'research_integration_editor']) {
     assert.ok(withFallbacks.has(role), role + ' must have modelFallbacks')
-    assert.ok(cfg.roleProfiles[role].modelFallbacks.includes('deepseek-official/deepseek-v4-pro'), role + ' fallback must name v4-pro')
+    assert.ok(cfg.roleProfiles[role].modelFallbacks.some((fallback) => (typeof fallback === 'string' ? fallback : fallback.model) === 'deepseek-official/deepseek-v4-pro'), role + ' fallback must name v4-pro')
   }
-  // Fallbacks are additive only: primary model unchanged for those roles.
-  for (const role of ['research_planner', 'research_author', 'research_synthesizer', 'research_abstract_writer', 'research_integration_editor']) {
-    assert.equal(cfg.roleProfiles[role].model, 'deepseek-official/deepseek-v4-flash')
+  // Fallback entries must be recognized models; primaries stay within the
+  // recognized pick list (config.default.json is the single source of truth).
+  const recognized = new Set(cfg._recognizedModels ?? [])
+  for (const [role, profile] of Object.entries(cfg.roleProfiles)) {
+    assert.ok(recognized.has(profile.model), role + ' primary must be a recognized model')
+    for (const fallback of profile.modelFallbacks ?? []) {
+      const model = typeof fallback === 'string' ? fallback : fallback.model
+      assert.ok(recognized.has(model), role + ' fallback must be a recognized model')
+    }
   }
   console.log('judge degradation tests passed for generation ' + manifest.generation)
 }

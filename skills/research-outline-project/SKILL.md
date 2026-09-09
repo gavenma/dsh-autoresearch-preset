@@ -1,6 +1,6 @@
 ---
 name: research-outline-project
-description: "Run AutoResearch from a substantial user-supplied outline, staged plan, table of contents, work breakdown, or specification: preserve its structure through a traceable v2 plan, then use the standard research-project execution pipeline unchanged."
+description: "Run AutoResearch from a substantial user-supplied outline, staged plan, table of contents, work breakdown, or specification: preserve its structure through a traceable canonical plan, then use the standard research-project execution pipeline unchanged."
 whenToUse: "Use when the user supplies a substantial outline or plan and asks AutoResearch to execute it. Use research-project for vague briefs."
 ---
 
@@ -8,13 +8,13 @@ whenToUse: "Use when the user supplies a substantial outline or plan and asks Au
 
 Use this skill when the user supplies a substantial outline, staged plan, table of contents, work breakdown, specification, or other concrete decomposition and asks AutoResearch to execute it.
 
-This is a planning specialization, not a second execution workflow. It shares the existing `research-project` pipeline after planning: approved v2 `plan.json`, Linear issue reconciliation, dependency-ordered per-node AutoReason loops, integration preflight/editor/verifier, acceptance receipts, redaction, and finalization all remain unchanged.
+This is a planning specialization, not a second execution workflow. It shares the existing `research-project` pipeline after planning: approved canonical `plan.json` (kind-tagged, no schemaVersion), Linear issue reconciliation, dependency-ordered per-node AutoReason loops, integration preflight/editor/verifier, acceptance receipts, redaction, and finalization all remain unchanged.
 
 ## Mode boundary
 
 - Treat the user's outline as an authoritative planning input. Treat it as intent and structure, not as approval: still produce a plan draft, refine it, validate it, and present it through `exit_plan_mode`.
 - Do not silently replace, broaden, or compress the outline. Preserve every required deliverable, section, milestone, constraint, ordering rule, and acceptance condition in the resulting DAG, or explicitly surface why a transformation is required.
-- The immutable approved `plan.json` remains the sole execution specification. Linear remains a derived view. After approval, follow the normal `research-project` skill without special outline behavior.
+- The immutable approved `plan.json` remains the sole execution specification and DAG/contract authority. In Linear mode, the issue's `Current Node Context` is authoritative current-work context; it is not a local mirror. After approval, follow the normal `research-project` skill without special outline behavior.
 - This mode changes only Phase 1 planning. Do not alter node execution, role semantics, budgets, integration, revision routing, or finalization.
 
 ## Outline intake
@@ -37,7 +37,7 @@ Run `research_planner` with the full brief, verbatim outline, and traceability c
 - retain all outline constraints as node acceptance criteria, project acceptance criteria, `expectedOutcome`, `test`, or `outputContract` fields;
 - ensure every outline item has a traceable disposition and no node owns unapproved extra scope;
 - distinguish user-mandated structure from planner recommendations in the rationale;
-- return schemaVersion 2 only, with stable IDs and a complete DAG accepted by `autoresearch_plan_validate`.
+- return the canonical plan shape only (kind `autoresearch-plan`, object acceptance criteria with stable IDs, explicit budgets with zero counts for omitted scout/judge roles, per-node `outputContract`), with a complete DAG accepted by `autoresearch_plan_validate`.
 
 The planner must include `## Outline traceability` after `## Plan rationale` and before `## Plan JSON`, listing every outline item and its target node or criterion IDs. The JSON remains the machine-readable source of truth.
 
@@ -56,4 +56,4 @@ After every planning pass, extract and run `autoresearch_plan_validate`. Before 
 
 ## Handoff
 
-After approval, write the same approved v2 `plan.json` and empty `state.json`, create or reconcile Linear issues one per node, and continue with the standard `research-project` execution procedure. Do not create a second executor, alternate issue schema, or outline-specific runtime state.
+After approval, write the same approved canonical `plan.json` and empty `state.json`, create or reconcile Linear issues one per node, and continue with the standard `research-project` execution procedure. Do not create a second executor, alternate issue schema, or outline-specific runtime state.

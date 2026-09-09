@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -13,15 +14,15 @@ const linear = linearBundle.createLibraries.linearCore
 const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-linear-lifecycle-'))
 const projectId = 'branch-converge'
 const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
-const plan = {
-  schemaVersion: 2, projectId, projectName: 'Branch convergence', revision: 1, integrationId: 'integration',
+const plan = canonicalPlan({
+  projectId, projectName: 'Branch convergence', revision: 1, integrationId: 'integration',
   nodes: [
-    { id: 'left', title: 'Left', dependsOn: [] },
-    { id: 'right', title: 'Right', dependsOn: [] },
-    { id: 'merge', title: 'Merge', dependsOn: ['left', 'right'] },
-    { id: 'integration', title: 'Integration', dependsOn: ['merge'] },
+    canonicalNode({ id: 'left', kind: 'research', roles: ['research_author'], title: 'Left' }),
+    canonicalNode({ id: 'right', kind: 'research', roles: ['research_author'], title: 'Right' }),
+    canonicalNode({ id: 'merge', kind: 'research', roles: ['research_author'], title: 'Merge', dependsOn: ['left', 'right'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', dependsOn: ['merge'] }),
   ],
-}
+})
 const versions = new Map()
 const fops = {
   async ensureDir(dir) { await fs.mkdir(dir, { recursive: true }) },
@@ -48,10 +49,17 @@ try {
 
   assert.deepEqual(projectstate.readySet(plan, state), ['left', 'right'])
   assert.equal(projectstate.readySet(plan, state)[0], 'left')
-  const leftClaim = await projectstate.transitionNode(fops, baseDir, projectId, 'left', 'claim', { leaseId: 'left-lease' })
+  // Linear-bound project (state.project.linearProjectId set): claim/complete
+  // require the freshly queried Linear context digest (plan §7.4).
+  const ctxDigestA = 'a'.repeat(64)
+  const ctxDigestB = 'b'.repeat(64)
+  const ctxDigestC = 'c'.repeat(64)
+  await assert.rejects(projectstate.transitionNode(fops, baseDir, projectId, 'left', 'claim', { leaseId: 'left-lease' }), /linear-bound claim requires contextDigest/)
+  const leftClaim = await projectstate.transitionNode(fops, baseDir, projectId, 'left', 'claim', { leaseId: 'left-lease', contextDigest: ctxDigestA })
+  assert.equal(leftClaim.state.nodes.left.contextDigest, ctxDigestA)
   assert.deepEqual(projectstate.readySet(plan, leftClaim.state), ['right'])
-  await projectstate.transitionNode(fops, baseDir, projectId, 'right', 'claim', { leaseId: 'right-lease' })
-  await projectstate.transitionNode(fops, baseDir, projectId, 'left', 'complete', { receipts: ['left-receipt'] })
+  await projectstate.transitionNode(fops, baseDir, projectId, 'right', 'claim', { leaseId: 'right-lease', contextDigest: ctxDigestB })
+  await projectstate.transitionNode(fops, baseDir, projectId, 'left', 'complete', { receipts: ['left-receipt'], contextDigest: ctxDigestA })
   const failure = await projectstate.failNode(fops, baseDir, projectId, 'right', 'verification failed')
 
   assert.deepEqual(failure.heldNodeIds, ['merge', 'integration'])
@@ -62,16 +70,16 @@ try {
   assert.equal(failure.state.nodes.merge.projectionStatus, 'pending')
   assert.equal(failure.state.nodes.integration.projectionStatus, 'pending')
   assert.deepEqual(projectstate.readySet(plan, failure.state), ['right'])
-  const recovered = await projectstate.transitionNode(fops, baseDir, projectId, 'right', 'complete', { receipts: ['right-receipt'] })
+  const recovered = await projectstate.transitionNode(fops, baseDir, projectId, 'right', 'complete', { receipts: ['right-receipt'], contextDigest: ctxDigestB })
   assert.deepEqual(recovered.state.nodes.merge.causalHolds, [])
   assert.deepEqual(recovered.state.nodes.integration.causalHolds, [])
   assert.equal(recovered.state.nodes.merge.projectionStatus, 'pending')
   assert.deepEqual(projectstate.readySet(plan, recovered.state), ['merge'])
   let injectedContention = false
   const contendedFops = { ...fops, async readJson(file) { const value = await fops.readJson(file); if (!injectedContention && file.endsWith('/state.json')) { injectedContention = true; versions.set(file, (versions.get(file) ?? 0) + 1) } return value } }
-  await assert.rejects(projectstate.transitionNode(contendedFops, baseDir, projectId, 'merge', 'claim', { leaseId: 'losing-writer' }), /version mismatch/)
+  await assert.rejects(projectstate.transitionNode(contendedFops, baseDir, projectId, 'merge', 'claim', { leaseId: 'losing-writer', contextDigest: ctxDigestC }), /version mismatch/)
   assert.equal((await fops.readJson(path.join(projectDir, 'state.json'))).nodes.merge.status, 'todo')
-  const merged = await projectstate.transitionNode(fops, baseDir, projectId, 'merge', 'complete', { receipts: ['merge-receipt'] })
+  const merged = await projectstate.transitionNode(fops, baseDir, projectId, 'merge', 'complete', { receipts: ['merge-receipt'], contextDigest: ctxDigestC })
   assert.equal(projectstate.integrationStatus(plan, merged.state).allLeavesDone, true)
   assert.equal(projectstate.integrationStatus(plan, merged.state).ready, true)
   assert.deepEqual(projectstate.readySet(plan, merged.state), [])

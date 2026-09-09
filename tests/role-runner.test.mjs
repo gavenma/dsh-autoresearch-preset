@@ -52,14 +52,19 @@ function makeMemoryFops() {
     async statInfo(file) { return files.has(file) ? { version: versions.get(file), type: 'file' } : undefined },
     async listDir(dir) {
       const prefix = dir.endsWith('/') ? dir : dir + '/'
-      const names = new Set()
+      const entries = new Map()
       for (const file of files.keys()) {
         if (!file.startsWith(prefix)) continue
         const tail = file.slice(prefix.length)
-        if (!tail || tail.includes('/')) continue
-        names.add(tail)
+        if (!tail) continue
+        const segments = tail.split('/')
+        for (let depth = 1; depth < segments.length; depth += 1) {
+          const dirName = segments.slice(0, depth).join('/')
+          if (!entries.has(dirName)) entries.set(dirName, true)
+        }
+        entries.set(tail, false)
       }
-      return [...names].sort().map((name) => ({ name, dir: false }))
+      return [...entries.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([name, isDir]) => ({ name, dir: isDir }))
     },
   }
 }
@@ -107,14 +112,14 @@ const base = {
   toolFilter: { allow: ['read'] },
   agentOptions: { provider: 'acme', model: 'alpha', maxTokens: 1234 },
   outputMode: 'text',
-  logicalGroupKey: { runDigest: 'run-1', nodeId: 'node-1', step: 'author', role: 'research_author', route: { provider: 'acme', model: 'alpha' } },
+  logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', nodeId: 'node-1', contractDigest: 'contract-1', pass: 0, step: 'author', role: 'research_author', route: { provider: 'acme', model: 'alpha' } },
 }
 
 {
   const fops = makeMemoryFops()
   const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
   const ownerPath = '/run/packets/role-attempts/' + groupId + '/owner.json'
-  await fops.writeJson(ownerPath, { schemaVersion: 1, ownerId: 'foreign-coordinator', logicalGroupId: groupId })
+  await fops.writeJson(ownerPath, { kind: 'owner-marker', ownerId: 'foreign-coordinator', logicalGroupId: groupId })
   await assert.rejects(() => runner.runRole({ ...base, fops, runDir: '/run', startSubagent: async () => { throw new Error('must not spawn') }, maxAttempts: 1 }), /owned by another coordinator/)
 }
 
@@ -289,7 +294,17 @@ const base = {
   const groupDir = '/run/packets/role-attempts/' + groupId
   const outputPath = groupDir + '/attempt-01.output.txt'
   fops.files.set(outputPath, 'recovered')
-  fops.files.set(groupDir + '/attempt-01.json', JSON.stringify({ logicalGroupId: groupId, attemptNumber: 1, attemptId: 'attempt-01', role: base.role, outcomeClass: 'success', stopReason: 'completed', retryable: false, output: 'recovered', outputPreview: 'recovered', outputLength: 9, partialOutput: false, outputRef: { path: outputPath, hash: createLibraries.core.sha256Text('recovered'), length: 9, complete: true }, structured: null, cleanupDegraded: false, cleanupError: null, status: 'terminal' }))
+  const recoveredRecord = createLibraries.core.makeRecord('role-attempt', {
+    runDigest: 'run-1', projectId: 'proj-1', nodeId: 'node-1', contractDigest: 'contract-1',
+    logicalGroupId: groupId, role: base.role, pass: 0, attempt: 1, attemptId: 'attempt-01',
+    status: 'terminal', createdAt: '2026-09-08T00:00:00.000Z',
+    selectedModel: 'acme/alpha', routeSource: 'configured',
+    outcomeClass: 'success', stopReason: 'completed', retryable: false,
+    output: 'recovered', outputPreview: 'recovered', outputLength: 9, partialOutput: false,
+    outputRef: { path: outputPath, hash: createLibraries.core.sha256Text('recovered'), length: 9, complete: true },
+    structured: null, cleanupDegraded: false, cleanupError: null,
+  })
+  fops.files.set(groupDir + '/attempt-01.json', JSON.stringify(recoveredRecord))
   const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: async () => { throw new Error('must discover the record') }, maxAttempts: 1 })
   assert.equal(result.cached, true)
   assert.equal(result.output, 'recovered')
@@ -351,6 +366,23 @@ const base = {
 }
 
 {
+  const fops = makeMemoryFops()
+  const runs = makeRuns([{ result: textResult('', 'error') }, { result: textResult('done via route-specific effort') }])
+  const modelChain = [
+    { model: 'openai/gpt-5.6-sol', reasoningEffort: 'medium' },
+    { model: 'deepseek-official/deepseek-v4-pro', reasoningEffort: 'high' },
+  ]
+  const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent.bind(runs), agentOptions: { ...base.agentOptions, provider: 'openai', model: 'gpt-5.6-sol', reasoningEffort: 'medium' }, modelChain, maxAttempts: 2 })
+  assert.equal(result.outcomeClass, 'success')
+  assert.equal(runs.requests[0].agentOptions.reasoningEffort, 'medium')
+  assert.equal(runs.requests[1].agentOptions.provider, 'deepseek-official')
+  assert.equal(runs.requests[1].agentOptions.model, 'deepseek-v4-pro')
+  assert.equal(runs.requests[1].agentOptions.reasoningEffort, 'high')
+  assert.equal(result.attempts[1].requestedReasoningEffort, 'high')
+  assert.equal(result.route.requested.reasoningEffort, 'high')
+}
+
+{
   // provider-error WITH partial output is terminal today; with a fallback
   // chain it hands off to the next model instead of failing the role.
   const fops = makeMemoryFops()
@@ -374,7 +406,7 @@ const base = {
   const first = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs1.startSubagent, modelChain: chain, breakerPath, maxAttempts: 1 })
   assert.equal(first.outcomeClass, 'provider-error')
   const breaker = await fops.readJson(breakerPath)
-  assert.equal(breaker.schemaVersion, 1, 'writer stamps schemaVersion on a fresh file')
+  assert.equal(breaker.kind, 'model-breaker-cache', 'writer stamps the kind tag on a fresh file')
   const entry = breaker.models['acme/alpha']
   assert.ok(entry && Number.isFinite(entry.blockedUntilMs) && entry.blockedUntilMs > 0)
   assert.equal(entry.lastOutcome, 'provider-error')
@@ -385,7 +417,7 @@ const base = {
     fops,
     runDir: '/run',
     startSubagent: runs2.startSubagent,
-    logicalGroupKey: { runDigest: 'run-1', nodeId: 'node-1', step: 'scout', role: 'research_scout' },
+    logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'node-1', step: 'scout', role: 'research_scout' },
     modelChain: chain,
     breakerPath,
     maxAttempts: 2,
@@ -407,14 +439,14 @@ const base = {
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
   const chain = ['acme/alpha', 'acme-beta/labs/model-x']
-  fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'acme/alpha': { blockedUntilMs: 2_000_000, lastOutcome: 'provider-error', lastAt: '1970-01-01T00:00:00.000Z', failures: 1 } } }, null, 2) + '\n')
+  fops.files.set(breakerPath, JSON.stringify({ kind: 'model-breaker-cache', models: { 'acme/alpha': { blockedUntilMs: 2_000_000, lastOutcome: 'provider-error', lastAt: '1970-01-01T00:00:00.000Z', failures: 1 } } }, null, 2) + '\n')
   const runs1 = makeRuns([{ result: textResult('still on the fallback') }])
-  const r1 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs1.startSubagent, logicalGroupKey: { runDigest: 'run-1', nodeId: 'node-1', step: 'a', role: 'research_author' }, modelChain: chain, breakerPath, maxAttempts: 1 })
+  const r1 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs1.startSubagent, logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'node-1', step: 'a', role: 'research_author' }, modelChain: chain, breakerPath, maxAttempts: 1 })
   assert.equal(r1.outcomeClass, 'success')
   assert.equal(runs1.requests[0].agentOptions.model, 'labs/model-x')
   now = 2_500_000
   const runs2 = makeRuns([{ result: textResult('primary is back') }])
-  const r2 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs2.startSubagent, logicalGroupKey: { runDigest: 'run-1', nodeId: 'node-1', step: 'b', role: 'research_author' }, modelChain: chain, breakerPath, maxAttempts: 1 })
+  const r2 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs2.startSubagent, logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'node-1', step: 'b', role: 'research_author' }, modelChain: chain, breakerPath, maxAttempts: 1 })
   assert.equal(r2.outcomeClass, 'success')
   assert.equal(runs2.requests[0].agentOptions.provider, 'acme')
   assert.equal(runs2.requests[0].agentOptions.model, 'alpha')
@@ -462,8 +494,8 @@ const base = {
   const a = makeRuns([{ result: textResult('', 'error') }])
   const b = makeRuns([{ result: textResult('', 'error') }])
   const [ra, rb] = await Promise.all([
-    runner.runRole({ ...base, fops, runDir: '/run', startSubagent: a.startSubagent, logicalGroupKey: { runDigest: 'run-1', nodeId: 'n', step: 'x', role: 'research_author' }, modelChain: chain, breakerPath: '/art/model-breaker.json', maxAttempts: 1 }),
-    runner.runRole({ ...base, fops, runDir: '/run', startSubagent: b.startSubagent, logicalGroupKey: { runDigest: 'run-1', nodeId: 'n', step: 'y', role: 'research_author' }, modelChain: chain, breakerPath: '/art/model-breaker.json', maxAttempts: 1 }),
+    runner.runRole({ ...base, fops, runDir: '/run', startSubagent: a.startSubagent, logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'n', step: 'x', role: 'research_author' }, modelChain: chain, breakerPath: '/art/model-breaker.json', maxAttempts: 1 }),
+    runner.runRole({ ...base, fops, runDir: '/run', startSubagent: b.startSubagent, logicalGroupKey: { runDigest: 'run-1', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'n', step: 'y', role: 'research_author' }, modelChain: chain, breakerPath: '/art/model-breaker.json', maxAttempts: 1 }),
   ])
   assert.equal(ra.outcomeClass, 'provider-error')
   assert.equal(rb.outcomeClass, 'provider-error')
@@ -562,7 +594,7 @@ const base = {
   const clocked = makeRoleRunner({ pathutil: createLibraries.pathutil, util: createLibraries.util, core: createLibraries.core, nowMs: () => now, previewLimit: 12, defaultMaxAttempts: 3, maxAttemptsCeiling: 5 })
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
-  fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'acme/alpha': { blockedUntilMs: 1_000, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
+  fops.files.set(breakerPath, JSON.stringify({ kind: 'model-breaker-cache', models: { 'acme/alpha': { blockedUntilMs: 1_000, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
   const runs = makeRuns([{ result: textResult('preferred again') }])
   const result = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1 })
   assert.equal(result.outcomeClass, 'success')
@@ -587,14 +619,22 @@ const base = {
   const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
   const groupDir = '/run/packets/role-attempts/' + groupId
   const breakerPath = '/art/model-breaker.json'
-  fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'acme/alpha': { blockedUntilMs: Number.MAX_SAFE_INTEGER, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
+  fops.files.set(breakerPath, JSON.stringify({ kind: 'model-breaker-cache', models: { 'acme/alpha': { blockedUntilMs: Number.MAX_SAFE_INTEGER, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
   fops.files.set(groupDir + '/manifest.json', JSON.stringify({ logicalGroupId: groupId, status: 'running', attempts: [] }, null, 2) + '\n')
-  fops.files.set(groupDir + '/attempt-01.json', JSON.stringify({ logicalGroupId: groupId, attemptNumber: 1, attemptId: 'attempt-01', role: base.role, requestedProvider: 'acme', requestedModel: 'alpha', outcomeClass: 'provider-error', stopReason: 'error', retryable: true, output: '', outputPreview: '', outputLength: 0, partialOutput: true, outputRef: null, structured: null, cleanupDegraded: false, cleanupError: null, status: 'terminal' }))
+  fops.files.set(groupDir + '/attempt-01.json', JSON.stringify(createLibraries.core.makeRecord('role-attempt', {
+    runDigest: 'run-1', projectId: 'proj-1', nodeId: 'node-1', contractDigest: 'contract-1',
+    logicalGroupId: groupId, role: base.role, pass: 0, attempt: 1, attemptId: 'attempt-01',
+    status: 'terminal', createdAt: '2026-09-08T00:00:00.000Z',
+    requestedProvider: 'acme', requestedModel: 'alpha', selectedModel: 'acme/alpha', routeSource: 'configured',
+    outcomeClass: 'provider-error', stopReason: 'error', retryable: true,
+    output: '', outputPreview: '', outputLength: 0, partialOutput: true,
+    outputRef: null, structured: null, cleanupDegraded: false, cleanupError: null,
+  })))
   const runs = makeRuns([{ result: textResult('resumed on fallback') }])
   const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 3 })
   assert.equal(result.outcomeClass, 'success')
   assert.equal(result.attempts.length, 2)
-  assert.equal(result.attempts[0].attemptNumber, 1)
+  assert.equal(result.attempts[0].attempt, 1)
   assert.equal(result.attempts[0].requestedModel, 'alpha', 'the persisted failed attempt is retained')
   assert.equal(runs.starts, 1)
   assert.equal(runs.requests[0].agentOptions.model, 'labs/model-x', 'the resumed run must not re-probe the breaker-blocked model')
@@ -622,11 +662,11 @@ const base = {
   const runsA = makeRuns([{ result: textResult('', 'error') }])
   const runsB = makeRuns([{ result: textResult('', 'error') }])
   await Promise.all([
-    runner.runRole({ ...base, role: 'research_scout', fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'race', nodeId: 'a', step: 'x', role: 'research_scout' } }),
-    runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, modelChain: ['acme-qwen/labs/qwen-max', 'acme/alpha'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'race', nodeId: 'b', step: 'x', role: 'research_critic' } }),
+    runner.runRole({ ...base, role: 'research_scout', fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'race', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'a', step: 'x', role: 'research_scout' } }),
+    runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, modelChain: ['acme-qwen/labs/qwen-max', 'acme/alpha'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'race', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'b', step: 'x', role: 'research_critic' } }),
   ])
   const breaker = JSON.parse(fops.files.get(breakerPath))
-  assert.equal(breaker.schemaVersion, 1)
+  assert.equal(breaker.kind, 'model-breaker-cache')
   assert.ok(breaker.models['acme/alpha'], 'run A model recorded')
   assert.ok(breaker.models['acme-qwen/labs/qwen-max'], 'run B model recorded (no last-writer clobber)')
 }
@@ -673,12 +713,12 @@ const base = {
   const cooldown = 1000
   const chain = ['acme/alpha', 'acme-beta/labs/model-x']
   const runs1 = makeRuns([{ result: textResult('', 'error') }])
-  await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs1.startSubagent, modelChain: chain, breakerPath, fallbackCooldownMs: cooldown, maxAttempts: 1, logicalGroupKey: { runDigest: 'probe', nodeId: '1', step: 'x', role: 'research_author' } })
+  await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs1.startSubagent, modelChain: chain, breakerPath, fallbackCooldownMs: cooldown, maxAttempts: 1, logicalGroupKey: { runDigest: 'probe', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: '1', step: 'x', role: 'research_author' } })
   const entry1 = JSON.parse(fops.files.get(breakerPath)).models['acme/alpha']
   assert.equal(entry1.blockedUntilMs, cooldown)
   now = cooldown + 10 // past expiry
   const runs2 = makeRuns([{ result: textResult('', 'error') }, { result: textResult('the fallback saves it') }])
-  const result2 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs2.startSubagent, modelChain: chain, breakerPath, fallbackCooldownMs: cooldown, maxAttempts: 2, logicalGroupKey: { runDigest: 'probe', nodeId: '2', step: 'x', role: 'research_author' } })
+  const result2 = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs2.startSubagent, modelChain: chain, breakerPath, fallbackCooldownMs: cooldown, maxAttempts: 2, logicalGroupKey: { runDigest: 'probe', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: '2', step: 'x', role: 'research_author' } })
   assert.equal(result2.outcomeClass, 'success')
   assert.equal(result2.attempts[0].requestedModel, 'alpha', 'expired model is re-probed')
   const entry2 = JSON.parse(fops.files.get(breakerPath)).models['acme/alpha']
@@ -693,10 +733,10 @@ const base = {
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
   const runsA = makeRuns([{ result: textResult('', 'error') }])
-  await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'legacy', nodeId: 'a', step: 'x', role: 'research_author' } })
+  await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'legacy', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'a', step: 'x', role: 'research_author' } })
   const before = fops.files.get(breakerPath)
   const runsB = makeRuns([{ result: textResult('', 'error') }])
-  const resultB = await runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, agentOptions: { provider: 'acme', model: 'alpha' }, breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'legacy', nodeId: 'b', step: 'x', role: 'research_critic' } })
+  const resultB = await runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, agentOptions: { provider: 'acme', model: 'alpha' }, breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'legacy', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'b', step: 'x', role: 'research_critic' } })
   assert.equal(resultB.outcomeClass, 'provider-error')
   assert.equal(runsB.requests[0].agentOptions.model, 'alpha', 'legacy role runs its model despite the breaker')
   assert.equal(fops.files.get(breakerPath), before, 'legacy failure must not touch the breaker file')
@@ -709,7 +749,7 @@ const base = {
   const clocked = makeRoleRunner({ pathutil: createLibraries.pathutil, util: createLibraries.util, core: createLibraries.core, nowMs: () => now, previewLimit: 12, defaultMaxAttempts: 3, maxAttemptsCeiling: 5 })
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
-  fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'acme/alpha': { blockedUntilMs: 500, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 }, 'acme-beta/labs/model-x': { blockedUntilMs: 400, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
+  fops.files.set(breakerPath, JSON.stringify({ kind: 'model-breaker-cache', models: { 'acme/alpha': { blockedUntilMs: 500, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 }, 'acme-beta/labs/model-x': { blockedUntilMs: 400, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
   const runs = makeRuns([{ result: textResult('recovered on the soonest window') }])
   const result = await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1 })
   assert.equal(result.outcomeClass, 'success')
@@ -747,7 +787,7 @@ const base = {
   for (const [expectedClass, script] of cases) {
     const fops = makeMemoryFops()
     const runs = makeRuns([script])
-    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: chain, breakerPath, maxAttempts: 3, logicalGroupKey: { runDigest: 'neg', nodeId: expectedClass, step: 'x', role: 'research_author' } })
+    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: chain, breakerPath, maxAttempts: 3, logicalGroupKey: { runDigest: 'neg', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: expectedClass, step: 'x', role: 'research_author' } })
     assert.equal(result.outcomeClass, expectedClass, expectedClass + ' class')
     assert.equal(result.attempts.length, 1, expectedClass + ': no second attempt')
     assert.equal(runs.starts, 1, expectedClass + ': fallback must not be consumed')
@@ -827,7 +867,7 @@ const base = {
     const breakerPath = 'model-breaker.json'
     await Promise.all(Array.from({ length: 8 }, (_, i) => {
       const runs = makeRuns([{ result: textResult('', 'error') }])
-      return runner.runRole({ ...base, role: 'research_scout', fops: realFops, runDir: 'run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'realfs', nodeId: 'g' + i, step: 'x', role: 'research_scout' } })
+      return runner.runRole({ ...base, role: 'research_scout', fops: realFops, runDir: 'run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'realfs', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'g' + i, step: 'x', role: 'research_scout' } })
     }))
     const parsed = JSON.parse(await nodeFs.readFile(path.join(realDir, breakerPath), 'utf8'))
     assert.ok(parsed.models['acme/alpha'], 'real-FS breaker entry survived the race')
@@ -843,9 +883,9 @@ const base = {
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
   const runsA = makeRuns([{ result: textResult('', 'error') }])
-  await runner.runRole({ ...base, role: 'research_scout', fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'xrole', nodeId: 'a', step: 'x', role: 'research_scout' } })
+  await runner.runRole({ ...base, role: 'research_scout', fops, runDir: '/run', startSubagent: runsA.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'xrole', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'a', step: 'x', role: 'research_scout' } })
   const runsB = makeRuns([{ result: textResult('critic on own fallback') }])
-  const resultB = await runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, modelChain: ['acme/alpha', 'acme-qwen/labs/qwen-max'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'xrole', nodeId: 'b', step: 'x', role: 'research_critic' } })
+  const resultB = await runner.runRole({ ...base, role: 'research_critic', fops, runDir: '/run', startSubagent: runsB.startSubagent, modelChain: ['acme/alpha', 'acme-qwen/labs/qwen-max'], breakerPath, maxAttempts: 1, logicalGroupKey: { runDigest: 'xrole', projectId: 'proj-1', contractDigest: 'contract-1', nodeId: 'b', step: 'x', role: 'research_critic' } })
   assert.equal(resultB.outcomeClass, 'success')
   assert.equal(runsB.requests[0].agentOptions.model, 'labs/qwen-max', 'role B skips the cross-blocked primary')
 }
@@ -856,7 +896,7 @@ const base = {
   const clocked = makeRoleRunner({ pathutil: createLibraries.pathutil, util: createLibraries.util, core: createLibraries.core, nowMs: () => now, previewLimit: 12, defaultMaxAttempts: 3, maxAttemptsCeiling: 5 })
   const fops = makeMemoryFops()
   const breakerPath = '/art/model-breaker.json'
-  fops.files.set(breakerPath, JSON.stringify({ schemaVersion: 1, models: { 'stale/model': { blockedUntilMs: 100, lastOutcome: 'provider-error', lastAt: 'x', failures: 3 }, 'live/model': { blockedUntilMs: Number.MAX_SAFE_INTEGER, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
+  fops.files.set(breakerPath, JSON.stringify({ kind: 'model-breaker-cache', models: { 'stale/model': { blockedUntilMs: 100, lastOutcome: 'provider-error', lastAt: 'x', failures: 3 }, 'live/model': { blockedUntilMs: Number.MAX_SAFE_INTEGER, lastOutcome: 'provider-error', lastAt: 'x', failures: 1 } } }))
   const runs = makeRuns([{ result: textResult('', 'error') }])
   await clocked.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['fresh/model', 'live/model'], breakerPath, maxAttempts: 1 })
   const models = JSON.parse(fops.files.get(breakerPath)).models
@@ -883,12 +923,12 @@ const base = {
   const profiles = createLibraries.profiles
   const cfg = {
     roleProfiles: {
-      research_author: { model: 'acme/alpha', modelFallbacks: ['acme-beta/labs/model-x', 'acme/alpha', 'acme-beta/labs/model-x', '  ', 42] },
+      research_author: { model: 'acme/alpha', modelFallbacks: [{ model: 'acme-beta/labs/model-x', reasoningEffort: 'high' }, 'acme/alpha', 'acme-beta/labs/model-x', '  ', 42] },
       research_scout: { model: 'acme/local-scout' },
     },
   }
   const author = profiles.resolveEffectiveProfile('research_author', cfg)
-  assert.deepEqual(author.modelFallbacks, ['acme-beta/labs/model-x'])
+  assert.deepEqual(author.modelFallbacks, [{ model: 'acme-beta/labs/model-x', reasoningEffort: 'high' }])
   const scout = profiles.resolveEffectiveProfile('research_scout', cfg)
   assert.deepEqual(scout.modelFallbacks, [])
 }
@@ -926,6 +966,345 @@ const base = {
   const highOwner = [...highFops.files.keys()].find((file) => file.endsWith('/owner.json'))
   const lowOwner = [...lowFops.files.keys()].find((file) => file.endsWith('/owner.json'))
   assert.notEqual(highOwner, lowOwner)
+}
+
+// ── Phase 2: gated tool grant at dispatch (confinement attestation) ─────────
+// The dispatch boundary (run_role / spawn_role) passes the run's capability
+// context into profile resolution: a fresh, workspace-matched, all-enforced
+// attestation unlocks the broad baseline; anything else fails closed to the
+// role's narrow default profile. Config may only narrow, never expand, in
+// either state — the child's toolFilter is exactly what this resolves.
+{
+  const profiles = createLibraries.profiles
+  const core = createLibraries.core
+  const BROAD = [...core.BROAD_BASELINE]
+  const WORKSPACE = '/workspace/role-runner'
+  const freshReceipt = () => ({
+    kind: 'confinement-attestation',
+    probedBoundary: 'role-child-adapters',
+    workspace: WORKSPACE,
+    probedAt: new Date().toISOString(),
+    ttlMs: 3600000,
+    checks: { writeScope: 'enforced', readScope: 'enforced', egress: 'enforced' },
+    passed: true,
+    notes: [],
+  })
+  const CODER_DEFAULTS = [...core.ROLE_MANIFEST.research_coder.defaultTools]
+
+  // 1. No capability context (list/profile/plan call sites): today's narrow
+  //    behavior, unchanged, no grant record.
+  const plain = profiles.resolveEffectiveProfile('research_coder', {})
+  assert.deepEqual([...plain.tools].sort(), CODER_DEFAULTS.slice().sort())
+  assert.equal(plain.toolGrant, undefined)
+
+  // 2. Unattested dispatch (no receipt in the run): narrow + explicit flag.
+  const unattested = profiles.resolveEffectiveProfile('research_coder', {}, { attestation: null, workspace: WORKSPACE })
+  assert.deepEqual([...unattested.tools].sort(), CODER_DEFAULTS.slice().sort())
+  assert.deepEqual(unattested.toolGrant, {
+    gated: false,
+    confinement: 'confinement-unattested',
+    base: CODER_DEFAULTS,
+    ceiling: [...core.ROLE_MANIFEST.research_coder.toolCeiling],
+  })
+
+  // 3. Stale attestation: fails closed and is flagged as invalid, not
+  //    silently treated as "no receipt".
+  const stale = { ...freshReceipt(), probedAt: '2020-01-01T00:00:00.000Z' }
+  const invalid = profiles.resolveEffectiveProfile('research_coder', {}, { attestation: stale, workspace: WORKSPACE })
+  assert.deepEqual([...invalid.tools].sort(), CODER_DEFAULTS.slice().sort())
+  assert.equal(invalid.toolGrant.gated, false)
+  assert.equal(invalid.toolGrant.confinement, 'attestation-invalid')
+
+  // 4. Attested dispatch: the broad baseline is unlocked, ceiling raised.
+  const attested = profiles.resolveEffectiveProfile('research_coder', {}, { attestation: freshReceipt(), workspace: WORKSPACE })
+  assert.deepEqual([...attested.tools].sort(), BROAD.slice().sort())
+  assert.equal(attested.toolGrant.gated, true)
+  assert.equal(attested.toolGrant.confinement, 'attested')
+  assert.deepEqual([...attested.toolGrant.ceiling].sort(), BROAD.slice().sort())
+
+  // 5. Visual node contract: read_image add-on on the attested grant.
+  const visual = profiles.resolveEffectiveProfile('research_coder', {}, { attestation: freshReceipt(), workspace: WORKSPACE, nodeContract: { artifactFormat: 'image' } })
+  assert.ok(visual.tools.includes('read_image'), 'visual evidence adds read_image')
+  assert.equal(visual.toolGrant.gated, true)
+
+  // 6. Web-capable role: web_search joins the attested grant; the unattested
+  //    profile keeps today's narrow defaults exactly.
+  const scoutAttested = profiles.resolveEffectiveProfile('research_scout', {}, { attestation: freshReceipt(), workspace: WORKSPACE })
+  assert.deepEqual([...scoutAttested.tools].sort(), [...BROAD, 'web_search'].sort())
+  const scoutUnattested = profiles.resolveEffectiveProfile('research_scout', {}, { attestation: null, workspace: WORKSPACE })
+  assert.deepEqual([...scoutUnattested.tools].sort(), ['read', 'web_search'])
+
+  // 7. Config may still narrow within the raised ceiling.
+  const narrowed = profiles.resolveEffectiveProfile('research_coder', { roleProfiles: { research_coder: { tools: ['read', 'bash'] } } }, { attestation: freshReceipt(), workspace: WORKSPACE })
+  assert.deepEqual(narrowed.tools, ['read', 'bash'])
+  assert.equal(narrowed.toolGrant.gated, true)
+
+  // 8. Config expansion beyond the broad ceiling still throws.
+  assert.throws(
+    () => profiles.resolveEffectiveProfile('research_coder', { roleProfiles: { research_coder: { tools: ['read', 'web_search'] } } }, { attestation: freshReceipt(), workspace: WORKSPACE }),
+    /exceed the ceiling/,
+  )
+}
+
+// ── Phase 2: file-based dispatch through autoresearch_spawn_role ────────────
+// The receipt lives in the run directory; the spawn plan (and its
+// recommendedRunRoleCall.toolFilter) is the child-facing tooling — it must
+// reflect the attested broad baseline only when a fresh receipt is on disk.
+{
+  const dispatchBaseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-role-runner-dispatch-'))
+  try {
+    const dispatchFileService = {
+      async resolve(target, options = {}) { return path.isAbsolute(target) ? target : path.resolve(options.cwd ?? dispatchBaseDir, target) },
+      async readText(target) { return await fs.readFile(target, 'utf8') },
+      async writeText(target, content) {
+        await fs.mkdir(path.dirname(target), { recursive: true })
+        await fs.writeFile(target, content)
+      },
+      async stat(target) { try { return await fs.stat(target) } catch { return undefined } },
+      async listDir(target) { try { return (await fs.readdir(target, { withFileTypes: true })).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' })) } catch { return [] } },
+    }
+    const registered = new Map()
+    bundle.default.apply({
+      get(name) {
+        if (name === 'fs') return dispatchFileService
+        if (name === 'subprocess') return { resolveExecutable: async () => { throw new Error('not needed for spawn audit') }, spawn: () => { throw new Error('not needed') } }
+        if (name === 'tools') return { register(definition) { registered.set(definition.name, definition) } }
+        return undefined
+      },
+    })
+    const spawnRole = registered.get('autoresearch_spawn_role')
+    assert.ok(spawnRole, 'spawn_role registered')
+    const exec = { agent: { session: { header: { cwd: dispatchBaseDir, delegationDepth: 1 } } } }
+    const runDir = 'dispatch-run'
+    await fs.mkdir(path.join(dispatchBaseDir, runDir, 'capability'), { recursive: true })
+    const receiptPath = path.join(dispatchBaseDir, runDir, 'capability', 'confinement-attestation.json')
+    const BROAD = [...createLibraries.core.BROAD_BASELINE].sort()
+    const CODER_NARROW = [...createLibraries.core.ROLE_MANIFEST.research_coder.defaultTools].sort()
+    const args = { baseDir: dispatchBaseDir, role: 'research_coder', task: 'Implement the node.', runDir }
+
+    // No receipt on disk: the spawn plan keeps the narrow profile.
+    const unattested = await spawnRole.execute(args, exec)
+    assert.equal(unattested.ok, true)
+    assert.deepEqual([...unattested.plan.tools].sort(), CODER_NARROW)
+    assert.deepEqual([...unattested.plan.recommendedRunRoleCall.toolFilter.allow].sort(), CODER_NARROW)
+
+    // A fresh, fully-enforced, workspace-matched receipt unlocks the broad
+    // baseline in the very plan the child would be spawned with.
+    await fs.writeFile(receiptPath, JSON.stringify({
+      kind: 'confinement-attestation',
+      probedBoundary: 'role-child-adapters',
+      workspace: dispatchBaseDir,
+      runDir,
+      probedAt: new Date().toISOString(),
+      ttlMs: 3600000,
+      checks: { writeScope: 'enforced', readScope: 'enforced', egress: 'enforced' },
+      passed: true,
+      notes: [],
+    }))
+    const attested = await spawnRole.execute(args, exec)
+    assert.equal(attested.ok, true)
+    assert.deepEqual([...attested.plan.tools].sort(), BROAD)
+    assert.deepEqual([...attested.plan.recommendedRunRoleCall.toolFilter.allow].sort(), BROAD)
+    // The spawn audit persists the exact grant the child receives.
+    assert.ok(attested.auditPath && attested.auditPath.includes('packets/spawn_research_coder_'), 'audit path under runDir/packets/')
+    const audit = JSON.parse(await fs.readFile(attested.auditPath, 'utf8'))
+    assert.equal(audit.packetType, 'spawn-plan')
+    assert.deepEqual([...audit.tools].sort(), BROAD)
+  } finally {
+    await fs.rm(dispatchBaseDir, { recursive: true, force: true })
+  }
+}
+
+// ── Phase 3: typed handoff — role-task packets, canonical records, route
+// source, and the bounded path guard (plan §6 / §11) ─────────────────────────
+{
+  const core = createLibraries.core
+  const identityFields = {
+    runDigest: 'run-1', projectId: 'proj-1', planDigest: 'plan-digest', nodeId: 'node-1',
+    contractDigest: 'contract-1', role: base.role, pass: 0,
+  }
+  const roleTaskFields = (overrides = {}) => ({
+    ...identityFields,
+    contextDigest: core.sha256Text(base.task),
+    description: base.task,
+    nextAction: 'Execute the task within the declared roots.',
+    tools: ['read'],
+    shellMode: 'none',
+    readRoots: ['/run'],
+    writeRoot: '/run',
+    egress: 'none',
+    attestationDigest: null,
+    outputMode: 'text',
+    outputContract: null,
+    route: null,
+    ...overrides,
+  })
+
+  // 1. The runner binds the canonical role-task packet (digest + group id)
+  //    and persists it once per group; attempt + result records on disk are
+  //    the closed role-attempt / role-result shapes carrying the run identity.
+  {
+    const fops = makeMemoryFops()
+    const runs = makeRuns([{ result: textResult('done') }])
+    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, maxAttempts: 1, roleTask: roleTaskFields() })
+    const groupDir = '/run/packets/role-attempts/' + result.logicalGroupId
+    const task = JSON.parse(fops.files.get(groupDir + '/task.json'))
+    assert.equal(task.kind, 'role-task')
+    assert.equal(task.logicalGroupId, result.logicalGroupId, 'the runner binds the derived group id')
+    assert.equal(task.digest, result.roleTask.digest, 'envelope carries the bound packet')
+    assert.equal(task.contextDigest, core.sha256Text(base.task))
+    assert.equal(task.planDigest, 'plan-digest')
+    const attempt = JSON.parse(fops.files.get(groupDir + '/attempt-01.json'))
+    assert.equal(attempt.kind, 'role-attempt')
+    assert.equal(attempt.runDigest, 'run-1')
+    assert.equal(attempt.projectId, 'proj-1')
+    assert.equal(attempt.nodeId, 'node-1')
+    assert.equal(attempt.contractDigest, 'contract-1')
+    assert.equal(attempt.logicalGroupId, result.logicalGroupId)
+    assert.equal(attempt.attempt, 1)
+    assert.equal(attempt.attemptId, 'attempt-01')
+    assert.equal(attempt.status, 'terminal')
+    assert.equal(attempt.outcomeClass, 'success')
+    const roleResult = JSON.parse(fops.files.get(groupDir + '/result.json'))
+    assert.equal(roleResult.kind, 'role-result')
+    assert.equal(roleResult.outcomeClass, 'success')
+    assert.equal(roleResult.attempt, 1)
+    assert.equal(roleResult.outputRef.complete, true)
+    assert.equal(roleResult.outputRef.hash, core.sha256Text('done'))
+    // Replaying the same packet is a no-op (idempotent create-if-absent).
+    const runsAgain = makeRuns([{ result: textResult('done') }])
+    const replay = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runsAgain.startSubagent, maxAttempts: 1, roleTask: roleTaskFields() })
+    assert.equal(replay.cached, true)
+    assert.equal(runsAgain.starts, 0)
+  }
+
+  // 2. A different packet for the same logical group is a conflict; a packet
+  //    whose identity does not match the bound run is rejected before dispatch.
+  {
+    const fops = makeMemoryFops()
+    const groupId = runner.logicalId({ ...base.logicalGroupKey, route: { ...base.logicalGroupKey.route, maxTokens: 1234, reasoningEffort: null } })
+    const groupDir = '/run/packets/role-attempts/' + groupId
+    fops.files.set(groupDir + '/manifest.json', JSON.stringify({ logicalGroupId: groupId, status: 'running', attempts: [] }, null, 2) + '\n')
+    const other = core.makeRecord('role-task', roleTaskFields({ description: 'a different task', logicalGroupId: groupId }))
+    fops.files.set(groupDir + '/task.json', JSON.stringify(other, null, 2) + '\n')
+    await assert.rejects(
+      () => runner.runRole({ ...base, fops, runDir: '/run', startSubagent: async () => { throw new Error('must not spawn') }, maxAttempts: 1, roleTask: roleTaskFields() }),
+      /role task packet conflict/,
+    )
+  }
+  {
+    const fops = makeMemoryFops()
+    await assert.rejects(
+      () => runner.runRole({ ...base, fops, runDir: '/run', startSubagent: async () => { throw new Error('must not spawn') }, maxAttempts: 1, roleTask: roleTaskFields({ contractDigest: 'other-contract' }) }),
+      /roleTask\.contractDigest does not match the bound run identity/,
+    )
+  }
+
+  // 3. Route source: configured (primary of the chain), fallback (later
+  //    chain entry after a route failure), coordinator-degradation (an
+  //    explicit degraded model appended after the chain, recorded as such).
+  {
+    const runs = makeRuns([{ result: textResult('configured ok') }])
+    const fops = makeMemoryFops()
+    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], maxAttempts: 1 })
+    assert.equal(result.outcomeClass, 'success')
+    assert.equal(result.routeSource, 'configured')
+    assert.deepEqual(result.route, { requested: { provider: 'acme', model: 'alpha', maxTokens: 1234, reasoningEffort: null }, actual: { provider: 'acme', model: 'alpha', reasoningEffort: null }, source: 'configured' })
+  }
+  {
+    const runs = makeRuns([{ result: textResult('', 'error') }, { result: textResult('fallback ok') }])
+    const fops = makeMemoryFops()
+    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha', 'acme-beta/labs/model-x'], maxAttempts: 2 })
+    assert.equal(result.outcomeClass, 'success')
+    assert.equal(result.routeSource, 'fallback')
+    assert.equal(result.selectedModel, 'acme-beta/labs/model-x')
+    assert.equal(result.attempts[1].routeSource, 'fallback')
+  }
+  {
+    const runs = makeRuns([{ result: textResult('', 'error') }, { result: textResult('degraded ok') }])
+    const fops = makeMemoryFops()
+    const result = await runner.runRole({ ...base, fops, runDir: '/run', startSubagent: runs.startSubagent, modelChain: ['acme/alpha'], degradedModel: 'acme-degraded/fallback-model', maxAttempts: 2 })
+    assert.equal(result.outcomeClass, 'success')
+    assert.equal(result.routeSource, 'coordinator-degradation', 'the degraded model is recorded as coordinator-degradation, never as configured')
+    assert.equal(result.selectedModel, 'acme-degraded/fallback-model')
+  }
+
+  // 4. Path guard: a child mutation outside the declared write root is
+  //    classified, and without a matching approval token the attempt is
+  //    converted to approval-violation (manifest failed, result persisted).
+  {
+    const fops = makeMemoryFops()
+    fops.files.set('/run/stable.md', 'untouched')
+    fops.files.set('/proj/stable.md', 'untouched')
+    const startSubagent = async () => {
+      await fops.writeText('/proj/plan.json', '{"projectId":"proj-1"}')
+      return { id: 'guard-child', localAgent: { options: {} }, result: Promise.resolve(textResult('wrote the plan without asking')), async dispose() {} }
+    }
+    const result = await runner.runRole({
+      ...base, fops, runDir: '/run', startSubagent, maxAttempts: 1,
+      roleTask: roleTaskFields({ readRoots: ['/run', '/proj'] }),
+      guardScan: { roots: ['/run', '/proj'], otherRunRoots: [] },
+    })
+    assert.equal(result.outcomeClass, 'approval-violation', 'unauthorized mutation converts even a successful attempt')
+    assert.equal(result.retryable, false)
+    const finding = result.guardFindings.find((entry) => entry.path === '/proj/plan.json')
+    assert.ok(finding, 'the plan mutation is reported')
+    assert.equal(finding.approvalClass, 'plan')
+    assert.equal(finding.authorized, false)
+    const groupDir = '/run/packets/role-attempts/' + result.logicalGroupId
+    const manifest = JSON.parse(fops.files.get(groupDir + '/manifest.json'))
+    assert.equal(manifest.status, 'failed')
+    const roleResult = JSON.parse(fops.files.get(groupDir + '/result.json'))
+    assert.equal(roleResult.outcomeClass, 'approval-violation')
+    assert.ok(roleResult.limitations.some((entry) => entry.includes('guard: plan')), 'the limitation records the guard finding')
+    const attempt = JSON.parse(fops.files.get(groupDir + '/attempt-01.json'))
+    assert.equal(attempt.outcomeClass, 'approval-violation')
+    assert.ok(attempt.guardFindings.some((entry) => entry.path === '/proj/plan.json'))
+  }
+
+  // 5. The same mutation with a valid coordinator approval token is
+  //    authorized: the attempt keeps its own outcome.
+  {
+    const fops = makeMemoryFops()
+    fops.files.set('/proj/stable.md', 'untouched')
+    const startSubagent = async () => {
+      await fops.writeText('/proj/plan.json', '{"projectId":"proj-1"}')
+      return { id: 'guard-child', localAgent: { options: {} }, result: Promise.resolve(textResult('approved plan edit')), async dispose() {} }
+    }
+    const token = core.makeApprovalToken({ approvalClass: 'plan', contractDigest: 'contract-1', nodeId: 'node-1', issuedAt: new Date().toISOString(), reason: 'coordinator approved the plan edit' })
+    const result = await runner.runRole({
+      ...base, fops, runDir: '/run', startSubagent, maxAttempts: 1,
+      roleTask: roleTaskFields({ readRoots: ['/run', '/proj'] }),
+      guardScan: { roots: ['/run', '/proj'], otherRunRoots: [] },
+      approvalTokens: [token],
+    })
+    assert.equal(result.outcomeClass, 'success')
+    const finding = result.guardFindings.find((entry) => entry.path === '/proj/plan.json')
+    assert.ok(finding, 'authorized findings are still reported for the audit')
+    assert.equal(finding.approvalClass, 'plan')
+    assert.equal(finding.authorized, true)
+  }
+
+  // 6. A token for the wrong class or a stale token does not authorize; the
+  //    'out-of-scope' class can never be token-authorized.
+  {
+    const fops = makeMemoryFops()
+    const startSubagent = async () => {
+      await fops.writeText('/proj/some-random-note.txt', 'stray')
+      return { id: 'guard-child', localAgent: { options: {} }, result: Promise.resolve(textResult('stray file')), async dispose() {} }
+    }
+    const planToken = core.makeApprovalToken({ approvalClass: 'plan', contractDigest: 'contract-1', nodeId: 'node-1', issuedAt: new Date().toISOString() })
+    const result = await runner.runRole({
+      ...base, fops, runDir: '/run', startSubagent, maxAttempts: 1,
+      roleTask: roleTaskFields({ readRoots: ['/run', '/proj'] }),
+      guardScan: { roots: ['/run', '/proj'], otherRunRoots: [] },
+      approvalTokens: [planToken],
+    })
+    assert.equal(result.outcomeClass, 'approval-violation', 'out-of-scope has no covering token')
+    const finding = result.guardFindings.find((entry) => entry.path === '/proj/some-random-note.txt')
+    assert.equal(finding.approvalClass, 'out-of-scope')
+    assert.equal(finding.authorized, false)
+  }
 }
 
 console.log('role-runner tests passed')

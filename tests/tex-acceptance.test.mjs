@@ -15,6 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -104,7 +105,7 @@ const cleanupSubprocess = {
     const done = (async () => {
       const outDir = argv.find((arg) => String(arg).startsWith('-outdir='))?.slice('-outdir='.length)
       assert.ok(outDir)
-      assert.equal(JSON.parse(await fs.readFile(path.join(outDir, '.autoresearch-compiler.json'), 'utf8')).owner, 'autoresearch-compiler-v1')
+      assert.equal(JSON.parse(await fs.readFile(path.join(outDir, '.autoresearch-compiler.json'), 'utf8')).owner, 'autoresearch-compiler')
       for (const [name, value] of [['final.log', 'ok'], ['final.fls', 'INPUT x'], ['final.pdf', '%PDF'], ['final.fdb_latexmk', 'scratch'], ['final.synctex.gz', 'scratch']]) await fs.writeFile(path.join(outDir, name), value)
       return { exitCode: 0 }
     })()
@@ -120,6 +121,69 @@ assert.equal(await fs.readFile(path.join(cleanupDir, 'final.pdf'), 'utf8'), '%PD
 assert.equal(await fs.access(path.join(cleanupDir, 'final.log')).then(() => true).catch(() => false), false)
 assert.equal(await fs.access(path.join(cleanupDir, 'final.fls')).then(() => true).catch(() => false), false)
 await fs.rm(cleanupDir, { recursive: true, force: true })
+
+// ── strictTexBuild: typed failure evidence + SOURCE_DATE_EPOCH pinning + ──
+//    no dot-prefixed compiler job names (plan §9/§11)
+{
+  const evidenceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-tex-evidence-'))
+  await fs.writeFile(path.join(evidenceDir, 'final.tex'), '\\documentclass{article}\n\\begin{document}\n\\foo\n\\end{document}\n')
+  const evidenceFops = {
+    ...fileService,
+    async exists(target) { return fs.access(target).then(() => true).catch(() => false) },
+    async ensureDir(target) { await fs.mkdir(target, { recursive: true }) },
+    async removeTree(target) { await fs.rm(target, { recursive: true, force: true }) },
+    async copy(source, destination) { await fs.mkdir(path.dirname(destination), { recursive: true }); await fs.copyFile(source, destination) },
+    async writeJson(target, value) { await fileService.writeText(target, JSON.stringify(value, null, 2) + '\n') },
+    async readJson(target) { try { return JSON.parse(await fileService.readText(target)) } catch { return null } },
+  }
+  const spawns = []
+  const failingSubprocess = {
+    async resolveExecutable(name) { return '/fake/bin/' + name },
+    spawn({ argv, cwd, env }) {
+      spawns.push({ argv, env })
+      const outDir = argv.find((arg) => String(arg).startsWith('-outdir='))?.slice('-outdir='.length)
+      const done = (async () => {
+        await fs.writeFile(path.join(outDir, 'final.log'), 'log bytes')
+        await fs.writeFile(path.join(outDir, 'final.fls'), 'INPUT x')
+        return { exitCode: 42 }
+      })()
+      return {
+        done,
+        collected: {
+          stdout: { readFrom: async () => ({ text: 'Runaway?\n' }) },
+          stderr: { readFrom: async () => ({ text: '! Undefined control sequence.\nl.42 \\foo\nMore context.\n' }) },
+        },
+      }
+    },
+  }
+  const evidence = await lib.helpers.strictTexBuild(evidenceFops, failingSubprocess, evidenceDir, evidenceDir, 'final.tex', { sourceDateEpoch: 1700000000 })
+  assert.equal(evidence.clean, false)
+  assert.equal(evidence.exitCode, 42)
+  assert.equal(evidence.firstError, 'Undefined control sequence.', 'the first ! error line is retained')
+  assert.equal(evidence.errorLine, 42, 'the l.<N> line number is retained')
+  assert.equal(evidence.errorContext, '\\foo', 'the error line context is retained')
+  assert.match(evidence.command, /latexmk/, 'the exact command is recorded')
+  assert.ok(evidence.logTail.includes('Runaway?'), 'the bounded tail is retained')
+  assert.equal(evidence.scratchCleaned, true)
+  assert.equal(evidence.cleanupError, null)
+  assert.equal(evidence.sourceDateEpoch, 1700000000, 'the pinned epoch is recorded')
+  assert.equal(spawns.length, 1)
+  const spawn = spawns[0]
+  assert.equal(spawn.env.SOURCE_DATE_EPOCH, '1700000000', 'SOURCE_DATE_EPOCH rides the compiler environment')
+  assert.ok(!spawn.argv.includes('-jobname'), 'no -jobname is ever passed: ' + JSON.stringify(spawn.argv))
+  assert.ok(!spawn.argv.some((arg) => String(arg).startsWith('.') && !String(arg).startsWith('-')), 'no dot-prefixed compiler job name is generated: ' + JSON.stringify(spawn.argv))
+  assert.equal(spawn.argv.at(-1), 'final.tex', 'the job name is the source basename')
+  await fs.rm(evidenceDir, { recursive: true, force: true })
+
+  // Deterministic fragment-template generation: same inputs, same bytes.
+  const fragment = 'The fragment body with math $x^2$.\n'
+  const template = '\\documentclass{article}\n\\begin{document}\n% FRAGMENT %\n\\end{document}\n'
+  const previewA = core.buildPreviewTex(fragment, template)
+  const previewB = core.buildPreviewTex(fragment, template)
+  assert.equal(previewA, previewB, 'preview assembly is deterministic')
+  assert.ok(previewA.includes(fragment), 'the fragment body rides the template')
+  assert.ok(previewA.includes('\\begin{document}'), 'the assembled preview is a complete document')
+}
 
 const previewSafetyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-preview-safety-'))
 await fs.writeFile(path.join(previewSafetyDir, 'final.pdf'), '%PDF')
@@ -188,6 +252,15 @@ const exec = { agent: { session: { header: { cwd: baseDir, delegationDepth: 0 } 
   assert.ok(graphic.graphics.includes('fig'))
   const bib = needs('\\bibliography{refs}')
   assert.ok(bib.bibliographies.includes('refs'))
+
+  // Comment-only markers (identity markers, commented-out \input and
+  // \bibliographystyle) must not affect any scan (plan §11).
+  const markerText = '% autoresearch-causal-event:proj:1:node:abc123\n% \\input{secret.tex}\n\\input{sec}\n% \\bibliographystyle{ieeetr}\n\\documentclass{article}\n\\begin{document}\nText.\n\\end{document}\n'
+  const markerNeeds = needs(markerText)
+  assert.deepEqual(markerNeeds.inputs, ['sec'], 'a commented-out \\input is not a need')
+  assert.deepEqual(markerNeeds.bibliographies, [], 'a commented-out \\bibliographystyle is not a need')
+  const markerValid = core.validateTexOutput(markerText, { texMode: 'standalone', declared: { packages: [], macros: [], inputs: ['sec'], graphics: [], bibliographies: [] } })
+  assert.equal(markerValid.ok, true, 'marker comments must not trip validation: ' + JSON.stringify(markerValid.errors))
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -374,16 +447,24 @@ const exec = { agent: { session: { header: { cwd: baseDir, delegationDepth: 0 } 
 // ══════════════════════════════════════════════════════════════════════════
 const projectDir = path.join(baseDir, '.research-agent', 'projects', 'tex-acc')
 await fs.mkdir(path.join(projectDir, 'revision-requests'), { recursive: true })
-const plan = {
-  schemaVersion: 2, projectId: 'tex-acc', projectName: 'Tex acceptance', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
-  projectContract: { goal: 'Exercise TeX acceptance.', acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+const plan = canonicalPlan({
+  projectId: 'tex-acc', projectName: 'Tex acceptance', approvedAt: '2026-01-01T00:00:00.000Z', revision: 1, integrationId: 'integration',
+  projectContract: {
+    goal: 'Exercise TeX acceptance.',
+    deliverables: [],
+    acceptance: [criterion('PROJECT-01', 'Complete.')],
+    test: '',
+    wordBudget: null,
+    rebuildable: false,
+    diagnosticMappings: [],
+  },
   nodes: [
-    { id: 'lit', title: 'Lit', kind: 'literature', roles: ['research_literature_writer'], expectedOutcome: 'Lit.', acceptance: [{ id: 'LIT-01', text: 'Lit exists.', required: true }], dependsOn: [] },
-    { id: 'notes', title: 'Notes', kind: 'research', roles: ['research_author'], artifactFormat: 'markdown', expectedOutcome: 'Notes.', acceptance: [{ id: 'NOT-01', text: 'Notes exist.', required: true }], dependsOn: [] },
-    { id: 'assembly', title: 'Assembly', kind: 'assembly', roles: ['research_coder', 'research_unit_tester'], expectedOutcome: 'Assembled.', acceptance: [{ id: 'ASM-01', text: 'Assembled.', required: true }], dependsOn: ['lit', 'notes'] },
-    { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: ['assembly'] },
+    canonicalNode({ id: 'lit', kind: 'literature', roles: ['research_literature_writer'], title: 'Lit', expectedOutcome: 'Lit.', acceptance: [criterion('LIT-01', 'Lit exists.')] }),
+    canonicalNode({ id: 'notes', kind: 'research', roles: ['research_author'], artifactFormat: 'markdown', title: 'Notes', expectedOutcome: 'Notes.', acceptance: [criterion('NOT-01', 'Notes exist.')] }),
+    canonicalNode({ id: 'assembly', kind: 'assembly', roles: ['research_coder', 'research_unit_tester'], title: 'Assembly', expectedOutcome: 'Assembled.', acceptance: [criterion('ASM-01', 'Assembled.')], dependsOn: ['lit', 'notes'] }),
+    canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], title: 'Integration', expectedOutcome: 'Final.', acceptance: [criterion('INT-01', 'Final.')], dependsOn: ['assembly'] }),
   ],
-}
+})
 await fs.writeFile(path.join(projectDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n')
 
 const initRun = registered.get('autoresearch_init_run')
@@ -547,6 +628,13 @@ assert.ok(guardRecord.errors[0].includes('fragment'), JSON.stringify(guardRecord
   assert.ok(record.staticErrors[0].includes('Expected output source "final.tex" is missing'), JSON.stringify(record.staticErrors))
   assert.equal(record.labelCheck.degraded, 'final-source-missing')
   assert.ok(!(await fs.readdir(dir)).some((name) => name.endsWith('.log')), 'no build may be attempted without the source')
+}
+
+// ── 8k. texcount -sum parsing (input-based masters, plan §11) ─────────────
+{
+  assert.equal(core.parseTexcountWords('Words in text: 1234\n'), 1234, 'the texcount total is the counted value')
+  assert.equal(core.parseTexcountWords('Words in text: 500\nSum count: 999.\n'), 500, 'the Words-in-text total is what the parser consumes')
+  assert.equal(core.parseTexcountWords('no count here'), null)
 }
 
 await fs.rm(baseDir, { recursive: true, force: true })

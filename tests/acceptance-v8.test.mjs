@@ -1,12 +1,13 @@
 // WS1 v8 — acceptance records and format-aware diagnostics (plan WS1 v8).
 //
-// Covers: outputContract.artifactPath honored by record_acceptance (with the
-// legacy format default only when absent), the format-aware missing-source
-// diagnostic (no LaTeX mentions for non-TeX artifacts), the receipt's
-// explicit artifact record { path, format, sha256 }, the accepted finalBuild
-// capture for TeX runs, and the exposed-TeX source-usability precondition
-// (missing inputs / unresolved labels fail acceptance with owner
-// identification; PDF-only exposure skips the check entirely).
+// Covers: outputContract.artifactPath honored by record_acceptance (and the
+// canonical requirement that it be explicit — no hidden format default), the
+// format-aware missing-source diagnostic (no LaTeX mentions for non-TeX
+// artifacts), the receipt's explicit artifact record { path, format, sha256 },
+// the accepted finalBuild capture for TeX runs, and the exposed-TeX
+// source-usability precondition (missing inputs / unresolved labels fail
+// acceptance with owner identification; PDF-only exposure skips the check
+// entirely).
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
@@ -15,6 +16,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -104,14 +106,16 @@ async function write(base, rel, content) {
   return abs
 }
 
-// Write an approved v2 plan + journal, then bind runs via the REAL init_run.
-async function makeBoundProject({ projectId, plan, issueIds }) {
+// Write an approved canonical plan + journal, then bind runs via the REAL init_run.
+async function makeBoundProject({ projectId, plan, issueIds, validate = true }) {
   const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
   await write(projectDir, 'plan.json', JSON.stringify(plan, null, 2) + '\n')
-  const validation = core.validatePlan(plan)
-  assert.equal(validation.ok, true, 'fixture plan must validate: ' + validation.errors.join('; '))
+  if (validate) {
+    const validation = core.validatePlan(plan)
+    assert.equal(validation.ok, true, 'fixture plan must validate: ' + validation.errors.join('; '))
+  }
   const state = {
-    schemaVersion: 1, projectId, marker: projectId, createdAt: NOW, updatedAt: NOW,
+    kind: 'project-state', projectId, marker: 'autoresearch-project:' + projectId, createdAt: NOW, updatedAt: NOW,
     project: { linearProjectId: '', url: '', createdAt: '' },
     integrationRevision: 1, nodes: {}, commentCursors: {}, lastError: '',
   }
@@ -137,18 +141,30 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
 
 // ── 1. artifactPath: custom artifact name is accepted and recorded ────────
 {
-  const plan = {
-    schemaVersion: 2, projectId: 'art-proj', projectName: 'ART', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId: 'art-proj',
+    projectName: 'ART',
     projectContract: {
       goal: 'Artifact path fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['report.md'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], artifactFormat: 'markdown', expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { artifactPath: 'report.md' }, dependsOn: [] },
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        artifactFormat: 'markdown',
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'report.md' },
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'art-proj', plan, issueIds: { integration: 'ART-INT' } })
   const runDirAbs = path.join(baseDir, inits.integration.runDir)
   await write(runDirAbs, 'report.md', '# Report\n\nAccepted custom artifact.\n')
@@ -160,30 +176,71 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
   assert.equal(receipt.artifact.sha256, sha256('# Report\n\nAccepted custom artifact.\n'))
   assert.equal(receipt.outputHash, receipt.artifact.sha256, 'outputHash stays the compatibility alias')
   assert.equal(receipt.finalBuild, null, 'markdown runs carry no finalBuild record')
-  // Legacy default only when the contract has no artifactPath.
-  const noPathPlan = JSON.parse(JSON.stringify(plan))
-  noPathPlan.projectId = 'artdef-proj'
-  noPathPlan.projectContract.deliverables = ['final.md']
-  noPathPlan.nodes[0].outputContract = {}
-  await makeBoundProject({ projectId: 'artdef-proj', plan: noPathPlan, issueIds: { integration: 'ARTDEF-INT' } })
-  const defInit = await initRun.execute({ projectId: 'artdef-proj', nodeId: 'integration', issueId: 'ARTDEF-INT2', issueTitle: 'default artifact', sourceType: 'local' }, exec)
-  const defRunAbs = path.join(baseDir, defInit.runDir)
-  await write(defRunAbs, 'final.md', '# Default name artifact.\n')
-  const defResult = await recordAcceptance.execute({ runDir: defInit.runDir, criteria: [{ id: 'INT-01', result: 'PASS' }] }, exec)
-  assert.equal(defResult.ok, true, JSON.stringify(defResult))
-  const defReceipt = JSON.parse(await fs.readFile(path.join(defRunAbs, 'acceptance.json'), 'utf8'))
-  assert.equal(defReceipt.artifact.path, 'final.md', 'legacy format default applies only without artifactPath')
+  // Canonical cut: there is no hidden format default. A contract without an
+  // explicit artifactPath fails validation with a field-specific error, and
+  // init_run refuses to contract-bind against such a plan.
+  const noPathPlan = canonicalPlan({
+    projectId: 'artdef-proj',
+    projectName: 'ARTDEF',
+    projectContract: {
+      goal: 'Artifact path fixture.',
+      deliverables: ['final.md'],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+    },
+    nodes: [
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        artifactFormat: 'markdown',
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: {},
+      }),
+    ],
+  })
+  await makeBoundProject({ projectId: 'artdef-proj', plan: noPathPlan, issueIds: {}, validate: false })
+  const noPathValidation = core.validatePlan(noPathPlan)
+  assert.equal(noPathValidation.ok, false, 'a node contract without an explicit artifactPath must not validate')
+  assert.ok(noPathValidation.errors.some((entry) => String(entry).includes('outputContract.artifactPath')), 'field-specific error expected: ' + noPathValidation.errors.join('; '))
+  let bindError = null
+  try {
+    await initRun.execute({ projectId: 'artdef-proj', nodeId: 'integration', issueId: 'ARTDEF-INT2', issueTitle: 'default artifact', sourceType: 'local' }, exec)
+  } catch (err) { bindError = err }
+  assert.ok(bindError, 'init_run must refuse to contract-bind against an invalid plan')
+  assert.ok(String(bindError.message).includes('approved plan is invalid'), String(bindError.message))
 }
 
 // ── 2. Format-aware missing-source diagnostic (no LaTeX for markdown) ─────
 {
-  const plan = {
-    schemaVersion: 2, projectId: 'diag-proj', projectName: 'DIAG', approvedAt: NOW, revision: 1, integrationId: 'integration',
-    projectContract: { goal: 'Diag fixture.', exposurePolicyVersion: 1, deliverables: ['final.md'], acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }] },
+  const plan = canonicalPlan({
+    projectId: 'diag-proj',
+    projectName: 'DIAG',
+    projectContract: {
+      goal: 'Diag fixture.',
+      deliverables: ['final.md'],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
+    },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], artifactFormat: 'markdown', expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], dependsOn: [] },
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        artifactFormat: 'markdown',
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'final.md' },
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'diag-proj', plan, issueIds: { integration: 'DIAG-INT' } })
   let error = null
   try {
@@ -201,19 +258,38 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
 {
   const master = '\\documentclass{article}\n\\begin{document}\n\\input{ghost}\n\\end{document}\n'
   const cert = '\\documentclass{article}\n\\begin{document}\nCertificate.\n\\end{document}\n'
-  const plan = {
-    schemaVersion: 2, projectId: 'usab-proj', projectName: 'USAB', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId: 'usab-proj',
+    projectName: 'USAB',
     projectContract: {
       goal: 'Usability fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['final.tex'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
     },
     nodes: [
-      { id: 'author', title: 'Author', kind: 'research', roles: ['research_author'], expectedOutcome: 'a.', acceptance: [{ id: 'AUT-01', text: 'a.', required: true }], outputContract: { texMode: 'fragment' }, dependsOn: [] },
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: ['author'] },
+      canonicalNode({
+        id: 'author',
+        kind: 'research',
+        roles: ['research_author'],
+        expectedOutcome: 'a.',
+        acceptance: [criterion('AUT-01', 'a.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'fragment' },
+      }),
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'standalone' },
+        dependsOn: ['author'],
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'usab-proj', plan, issueIds: { author: 'USAB-AUTH', integration: 'USAB-INT' } })
   const intRunAbs = path.join(baseDir, inits.integration.runDir)
   const authorRunAbs = path.join(baseDir, inits.author.runDir)
@@ -233,19 +309,38 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
   const master = '\\documentclass{article}\n\\begin{document}\nSee \\ref{eq:other}.\n\\end{document}\n'
   const cert = '\\documentclass{article}\n\\begin{document}\nCertificate.\n\\end{document}\n'
   const authorFragment = '\\begin{equation}\nx = 1 \\label{eq:other}\n\\end{equation}\n'
-  const plan = {
-    schemaVersion: 2, projectId: 'refl-proj', projectName: 'REFL', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId: 'refl-proj',
+    projectName: 'REFL',
     projectContract: {
       goal: 'Ref owner fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['final.tex'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
     },
     nodes: [
-      { id: 'author', title: 'Author', kind: 'research', roles: ['research_author'], expectedOutcome: 'a.', acceptance: [{ id: 'AUT-01', text: 'a.', required: true }], outputContract: { texMode: 'fragment' }, dependsOn: [] },
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: ['author'] },
+      canonicalNode({
+        id: 'author',
+        kind: 'research',
+        roles: ['research_author'],
+        expectedOutcome: 'a.',
+        acceptance: [criterion('AUT-01', 'a.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'fragment' },
+      }),
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'standalone' },
+        dependsOn: ['author'],
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'refl-proj', plan, issueIds: { author: 'REFL-AUTH', integration: 'REFL-INT' } })
   const intRunAbs = path.join(baseDir, inits.integration.runDir)
   const authorRunAbs = path.join(baseDir, inits.author.runDir)
@@ -267,19 +362,29 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
   const master = '\\documentclass{article}\n\\begin{document}\n\\section{Main}\\label{sec:main}\n\\input{sec}\nSee \\ref{eq:here}.\n\\end{document}\n'
   const sec = 'Fragment.\n\\begin{equation}\ny = 2 \\label{eq:here}\n\\end{equation}\n'
   const cert = '\\documentclass{article}\n\\begin{document}\nCertificate.\n\\end{document}\n'
-  const plan = {
-    schemaVersion: 2, projectId: 'okusab-proj', projectName: 'OKUSAB', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId: 'okusab-proj',
+    projectName: 'OKUSAB',
     projectContract: {
       goal: 'Usability pass fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['final.tex', 'final.pdf'],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
       rebuildable: true,
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      diagnosticMappings: [],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'standalone' },
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'okusab-proj', plan, issueIds: { integration: 'OKUSAB-INT' } })
   const intRunAbs = path.join(baseDir, inits.integration.runDir)
   await write(intRunAbs, 'output.tex', cert)
@@ -306,18 +411,29 @@ async function makeBoundProject({ projectId, plan, issueIds }) {
   const master = '\\documentclass{article}\n\\begin{document}\n\\input{ghost}\n\\end{document}\n'
   const cert = '\\documentclass{article}\n\\begin{document}\nCertificate.\n\\end{document}\n'
   const finalPdf = Buffer.from('%PDF-1.7 final\n')
-  const plan = {
-    schemaVersion: 2, projectId: 'pdfonly-proj', projectName: 'PDFONLY', approvedAt: NOW, revision: 1, integrationId: 'integration',
+  const plan = canonicalPlan({
+    projectId: 'pdfonly-proj',
+    projectName: 'PDFONLY',
     projectContract: {
       goal: 'PDF-only fixture.',
-      exposurePolicyVersion: 1,
       deliverables: ['final.pdf'],
-      acceptance: [{ id: 'PROJECT-01', text: 'Complete.', required: true }],
+      acceptance: [criterion('PROJECT-01', 'Complete.')],
+      test: '',
+      wordBudget: null,
+      rebuildable: false,
+      diagnosticMappings: [],
     },
     nodes: [
-      { id: 'integration', title: 'Integration', kind: 'integration', roles: ['research_integration_editor', 'research_integration_verifier'], expectedOutcome: 'Final.', acceptance: [{ id: 'INT-01', text: 'Final.', required: true }], outputContract: { texMode: 'standalone' }, dependsOn: [] },
+      canonicalNode({
+        id: 'integration',
+        kind: 'integration',
+        roles: ['research_integration_editor', 'research_integration_verifier'],
+        expectedOutcome: 'Final.',
+        acceptance: [criterion('INT-01', 'Final.')],
+        outputContract: { artifactPath: 'output.tex', texMode: 'standalone' },
+      }),
     ],
-  }
+  })
   const { inits } = await makeBoundProject({ projectId: 'pdfonly-proj', plan, issueIds: { integration: 'PDFONLY-INT' } })
   const intRunAbs = path.join(baseDir, inits.integration.runDir)
   await write(intRunAbs, 'output.tex', cert)

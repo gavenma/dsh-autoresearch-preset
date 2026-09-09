@@ -6,7 +6,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
-const { default: linearPlugin } = await import(pathToFileURL(path.join(root, manifest.entries.linear)).href)
+const { default: linearPlugin, createLibraries } = await import(pathToFileURL(path.join(root, manifest.entries.linear)).href)
+const core = createLibraries.core
 const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autoresearch-linear-reconcile-'))
 const projectId = 'reconcile-e2e'
 const projectDir = path.join(baseDir, '.research-agent', 'projects', projectId)
@@ -29,12 +30,32 @@ const fileService = {
   async listDir(target) { try { return (await fs.readdir(target, { withFileTypes: true })).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' })) } catch { return [] } },
 }
 
+// Plan §7.1: the node issue carries its authoritative Current Node Context
+// block before any lifecycle commit; lifecycle projection must preserve it.
+const initialContext = {
+  kind: 'node-context',
+  nodeId: 'accepted',
+  status: 'todo',
+  objective: 'Acceptance node for the reconcile test project',
+  contract: { planRevision: 1, nodeRevision: 0, contractDigest: 'd'.repeat(64) },
+  completed: [],
+  findings: [],
+  requiredRevisions: [],
+  remaining: [{ id: 'a11111111111', text: 'Accept the artifact' }],
+  dependencies: [],
+  nextAction: { text: 'Produce the artifact', owner: 'implementer', expectedOutput: 'artifact file', acceptanceCheck: 'artifact exists' },
+  evidenceRefs: [],
+  watermark: '2026-09-08T00:00:00.000Z',
+  lastVerified: { at: '2026-09-08T00:00:00.000Z', contextDigest: '' },
+}
+const contextDigest = core.contextBlockDigest(initialContext)
+
 const remote = {
   outage: true,
   failAfterComment: false,
   mutations: 0,
   issue: {
-    id: 'ISS-1', identifier: 'AR-1', title: 'Accepted node', description: '', url: 'https://linear.invalid/AR-1',
+    id: 'ISS-1', identifier: 'AR-1', title: 'Accepted node', description: core.renderContextBlock(initialContext), url: 'https://linear.invalid/AR-1',
     state: { id: 'todo', name: 'Todo', type: 'unstarted' }, labels: [{ id: 'user-label', name: 'user-label' }], comments: [], archivedAt: null, trashed: false,
   },
 }
@@ -86,9 +107,9 @@ const invoke = (name, args) => tools.get(name).execute(args, exec)
 
 try {
   await fs.mkdir(projectDir, { recursive: true })
-  const state = { schemaVersion: 2, projectId, project: { linearProjectId: 'LP-1' }, nodes: { accepted: { status: 'done', projectionStatus: 'pending', linearProjection: { projectId, nodeId: 'accepted', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid' } } } }
+  const state = { kind: 'project-state', projectId, project: { linearProjectId: 'LP-1' }, nodes: { accepted: { status: 'done', projectionStatus: 'pending', linearProjection: { projectId, nodeId: 'accepted', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid' } } } }
   await fileService.writeText(statePath, JSON.stringify(state, null, 2) + '\n')
-  await assert.rejects(invoke('linear_project_node', { projectId, nodeId: 'accepted', issueId: 'ISS-1', stateId: 'done', blockedLabelId: 'autoresearch-blocked', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid', baseDir }), /simulated Linear outage/)
+  await assert.rejects(invoke('linear_project_node', { projectId, nodeId: 'accepted', issueId: 'ISS-1', stateId: 'done', blockedLabelId: 'autoresearch-blocked', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid', contextDigest, baseDir }), /simulated Linear outage/)
   assert.equal(remote.mutations, 0)
   assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).nodes.accepted.projectionStatus, 'pending')
 
@@ -107,6 +128,11 @@ try {
   assert.equal(remote.mutations, mutationCount)
   assert.equal(remote.issue.comments.length, 1)
   assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).nodes.accepted.projectionStatus, 'confirmed')
+  // The lifecycle commit left the authoritative context block untouched.
+  const preservedBlock = core.parseContextBlock(remote.issue.description)
+  assert.equal(preservedBlock.ok, true)
+  assert.equal(core.contextBlockDigest(preservedBlock.state), contextDigest)
+  assert.equal(preservedBlock.state.nodeId, 'accepted')
 
   const pendingAgain = JSON.parse(await fs.readFile(statePath, 'utf8'))
   pendingAgain.nodes.accepted.projectionStatus = 'pending'

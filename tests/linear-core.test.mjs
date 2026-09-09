@@ -55,12 +55,12 @@ assert.equal(linear.verifySyncEvent(event, '').ok, true)
 assert.equal(linear.verifySyncEvent({ ...event, payload: { leaseId: 'tampered' } }, '').ok, false)
 assert.deepEqual(linear.causalComment({ nodeId: 'n2', blockedBy: ['n3', 'n1', 'n3'], reason: 'upstream failed', eventDigest: 'd1' }), { marker: 'autoresearch-causal:d1', body: 'autoresearch-causal:d1\n\nCausal hold for node `n2`. Blocked by: n1, n3. Reason: upstream failed', idempotencyMarker: 'autoresearch-causal:d1' })
 assert.deepEqual(linear.deriveCausalHold({ nodeId: 'n2', blockedBy: ['n3', 'n1', 'n3'], reason: 'upstream failed' }), {
-  schemaVersion: 1, nodeId: 'n2', blockedBy: ['n1', 'n3'], reason: 'upstream failed', sourceEventDigest: null,
+  kind: 'causal-hold', nodeId: 'n2', blockedBy: ['n1', 'n3'], reason: 'upstream failed', sourceEventDigest: null,
 })
 const outbox = linear.makeOutboxRecord({ event, mutation: { operation: 'comment', payload: { marker: 'm1' } }, createdAt: '2026-01-01T00:00:00.000Z' })
-assert.equal(event.schemaVersion, 2)
+assert.equal(event.kind, 'sync-event')
 assert.equal(event.phase, 'projection')
-assert.equal(outbox.schemaVersion, 2)
+assert.equal(outbox.kind, 'outbox-record')
 assert.equal(outbox.phase, 'projection')
 assert.equal(outbox.confirms.kind, 'comment-marker')
 assert.equal(outbox.status, 'pending')
@@ -71,7 +71,9 @@ const confirmed = linear.transitionOutbox(attempted, 'confirm', { remoteId: 'c1'
 assert.equal(confirmed.status, 'confirmed')
 assert.deepEqual(linear.transitionOutbox(confirmed, 'retry'), confirmed)
 assert.equal(linear.transitionOutbox({ ...attempted, attempts: 3 }, 'dead', { error: 'unavailable' }).status, 'dead')
-assert.equal(linear.transitionOutbox({ ...outbox, schemaVersion: 1, phase: undefined, confirms: undefined }, 'attempt').status, 'inflight')
+// Legacy outbox shape (schemaVersion, no kind tag) is rejected: the runtime
+// never adapts old records in place.
+assert.throws(() => linear.transitionOutbox({ ...outbox, kind: undefined, schemaVersion: 1, phase: undefined, confirms: undefined }, 'attempt'), /invalid outbox record/)
 const relationEvent = linear.makeSyncEvent({ projectId: 'p1', nodeId: 'merge', operation: 'relation.create', payload: { issueId: 'ISS-L', relatedIssueId: 'ISS-M', type: 'blocks' } })
 const relationOutbox = linear.makeOutboxRecord({ event: relationEvent, mutation: { operation: 'relation.create', payload: relationEvent.payload } })
 const relationInflight = linear.transitionOutbox(relationOutbox, 'attempt', {}, '2026-01-01T00:03:00.000Z')
@@ -134,14 +136,14 @@ assert.equal(shaped.nodes[0].relatedIssue.identifier, 'AR-2')
 
 let markerIssues = []
 let markerProjects = []
-let migratedDescription = null
+let createdInput = null
 const markerTransport = async (request) => {
   if (request.query.includes('query {\n      teams')) return { statusCode: 200, bodyText: JSON.stringify({ data: { teams: { nodes: [{ id: 'team-1', name: 'Research', key: 'RES', states: { nodes: [] }, labels: { nodes: [] } }] } } }) }
   if (request.query.includes('query ProjectIssues')) return { statusCode: 200, bodyText: JSON.stringify({ data: { project: { issues: { nodes: markerIssues, pageInfo: { hasNextPage: false, endCursor: null } } } } }) }
   if (request.query.includes('query Projects')) return { statusCode: 200, bodyText: JSON.stringify({ data: { projects: { nodes: markerProjects, pageInfo: { hasNextPage: false, endCursor: null } } } }) }
-  if (request.query.includes('mutation IssueDescriptionUpdate')) {
-    migratedDescription = request.variables.description
-    return { statusCode: 200, bodyText: JSON.stringify({ data: { issueUpdate: { success: true, issue: { id: request.variables.id, identifier: 'AR-1', title: 'Node', description: migratedDescription, url: 'u' } } } }) }
+  if (request.query.includes('mutation IssueCreate')) {
+    createdInput = request.variables.input
+    return { statusCode: 200, bodyText: JSON.stringify({ data: { issueCreate: { success: true, issue: { id: 'new-1', identifier: 'AR-9', title: 'Node', url: 'u' } } } }) }
   }
   throw new Error('unexpected marker transport query')
 }
@@ -151,14 +153,82 @@ await assert.rejects(linear.reconcileIssueCandidates('linear-project', 'auto-pro
 const projectMarker = linear.projectMarker('auto-project')
 markerProjects = [{ id: 'p1', description: projectMarker }, { id: 'p2', description: projectMarker }]
 await assert.rejects(linear.reconcileProject('auto-project', markerTransport), /Multiple Linear projects/)
+// The legacy Linear-project-UUID-keyed marker is no longer recognized at
+// runtime (the Phase 1 canonical cut removed in-place marker migration): an
+// issue carrying only the legacy marker is not matched, a fresh canonical
+// issue is created, and the legacy description is left untouched.
 const legacyMarker = linear.nodeMarker('linear-project', 'node-1')
-markerIssues = [{ id: 'legacy-1', identifier: 'AR-1', title: 'Node', description: 'User-authored prose.\n\n' + legacyMarker, url: 'u' }]
+const legacyDescription = 'User-authored prose.\n\n' + legacyMarker
+markerIssues = [{ id: 'legacy-1', identifier: 'AR-1', title: 'Node', description: legacyDescription, url: 'u' }]
 let approvals = 0
-const migrated = await linear.createIssueFlow({ projectId: 'linear-project', autoresearchProjectId: 'auto-project', nodeId: 'node-1', title: 'Node', teamId: 'team-1' }, markerTransport, async () => { approvals += 1 })
-assert.equal(migrated.migrated, true)
+const created = await linear.createIssueFlow({ projectId: 'linear-project', autoresearchProjectId: 'auto-project', nodeId: 'node-1', title: 'Node', teamId: 'team-1' }, markerTransport, async () => { approvals += 1 })
+assert.equal(created.created, true)
+assert.equal(created.reconciled, false)
+assert.equal(created.migrated, undefined, 'no in-place legacy marker migration in the canonical runtime')
 assert.equal(approvals, 1)
-assert.match(migratedDescription, /^User-authored prose\./)
-assert.ok(migratedDescription.includes(canonicalMarker))
-assert.equal(migratedDescription.includes(legacyMarker), false)
+assert.ok(createdInput.description.includes(canonicalMarker))
+assert.equal(createdInput.description.includes(legacyMarker), false)
+assert.equal(createdInput.description.includes('User-authored prose'), false, 'legacy prose is never folded into a new canonical issue')
+
+// ── Phase 4: Linear-first node context (plan §7) ────────────────────────────
+{
+  const core = createLibraries.core
+  const state = {
+    kind: 'node-context', nodeId: 'n1', status: 'in_progress',
+    objective: 'Deliver the section',
+    completed: [], findings: [], requiredRevisions: [],
+    remaining: [{ id: 'w1', text: 'Write the section' }],
+    dependencies: [],
+    nextAction: { text: 'Write the section', owner: 'research_author', expectedOutput: 'section.md', acceptanceCheck: 'reviewed' },
+    evidenceRefs: [], watermark: '2026-01-01T00:00:00.000Z', lastVerified: null,
+  }
+  const block = core.renderContextBlock(state)
+  const blockDigest = core.contextBlockDigest(state)
+  // context-block confirmation: only the owned digest confirms a read-back.
+  assert.equal(linear.confirmationMatches({ kind: 'context-block', issueId: 'I1', contextDigest: blockDigest }, { issue: { description: block } }), true)
+  assert.equal(linear.confirmationMatches({ kind: 'context-block', issueId: 'I1', contextDigest: '0'.repeat(64) }, { issue: { description: block } }), false)
+  assert.equal(linear.confirmationMatches({ kind: 'context-block', issueId: 'I1', contextDigest: blockDigest }, { issue: { description: 'no block' } }), false)
+  // node.context.update outbox record shape.
+  const ctxEvent = linear.makeSyncEvent({ projectId: 'p1', nodeId: 'n1', operation: 'node.context.update', payload: { issueId: 'I1', contextDigest: blockDigest, description: block, nodeId: 'n1' }, createdAt: '2026-01-01T00:05:00.000Z' })
+  const ctxRecord = linear.makeOutboxRecord({ event: ctxEvent, mutation: { operation: 'node.context.update', payload: ctxEvent.payload }, createdAt: ctxEvent.createdAt })
+  assert.deepEqual(ctxRecord.confirms, { kind: 'context-block', issueId: 'I1', contextDigest: blockDigest })
+  assert.equal(linear.isSupportedOutboxOperation('node.context.update'), true)
+  // The record round-trips through a transition without losing its confirms.
+  const ctxInflight = linear.transitionOutbox(ctxRecord, 'attempt', {}, '2026-01-01T00:06:00.000Z')
+  assert.equal(linear.confirmationMatches(ctxInflight.confirms, { issue: { description: block } }), true)
+  // buildContextDescription upserts the block and preserves user text.
+  const described = linear.buildContextDescription('# Title\n\nUser text.\n\n', state)
+  assert.equal(described.startsWith('# Title\n\nUser text.\n\n'), true)
+  assert.equal(core.parseContextBlock(described).ok, true)
+  // Recovery cache helpers (plan §7.7): intent-only, never authoritative.
+  const cacheDir = await fs.mkdtemp('/tmp/linear-recovery-')
+  const cacheFops = {
+    async ensureDir(dir) { await fs.mkdir(dir, { recursive: true }) },
+    async readJson(file) { try { return JSON.parse(await fs.readFile(file, 'utf8')) } catch { return undefined } },
+    async writeJson(file, value) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(value)) },
+    async remove(file) { await fs.rm(file, { force: true }) },
+  }
+  const written = await linear.writeRecoveryCache(cacheFops, cacheDir, 'p1', 'n1', { issueId: 'I1', expectedContextDigest: '', contextDigest: blockDigest, description: block, state, createdAt: '2026-01-01T00:07:00.000Z' })
+  assert.equal(written.status, 'pending')
+  assert.deepEqual(await linear.readRecoveryCache(cacheFops, cacheDir, 'p1', 'n1'), written)
+  assert.equal(await linear.readRecoveryCache(cacheFops, cacheDir, 'p1', 'missing'), null)
+  // Read-Linear-first classification of the pending intent.
+  assert.equal(linear.reconcileRecoveryCache(written, block).status, 'applied')
+  assert.equal(linear.reconcileRecoveryCache(written, '').status, 'not-applied', 'no live block and an empty prior: a replay is safe')
+  assert.equal(linear.reconcileRecoveryCache(written, core.renderContextBlock({ ...state, status: 'done' })).status, 'conflict')
+  assert.equal(linear.reconcileRecoveryCache({ ...written, kind: 'not-a-cache' }, block).status, 'invalid')
+  const marked = await linear.markRecoveryCacheConfirmed(cacheFops, cacheDir, 'p1', 'n1', '2026-01-01T00:08:00.000Z')
+  assert.equal(marked.cache.status, 'confirmed')
+  assert.equal((await linear.readRecoveryCache(cacheFops, cacheDir, 'p1', 'n1')).status, 'confirmed')
+  assert.deepEqual(await linear.markRecoveryCacheConfirmed(cacheFops, cacheDir, 'p1', 'n1'), { ok: true, skipped: true, cache: await linear.readRecoveryCache(cacheFops, cacheDir, 'p1', 'n1') }, 'confirming an already-confirmed cache is idempotent')
+  assert.equal(await linear.clearRecoveryCache(cacheFops, cacheDir, 'p1', 'n1'), true)
+  assert.equal(await linear.readRecoveryCache(cacheFops, cacheDir, 'p1', 'n1'), null)
+  await fs.rm(cacheDir, { recursive: true, force: true })
+  // Capability flag: the context write path requires a read-write mutation.
+  const meta = { ok: true, teams: [{ id: 'team-1', states: [{ id: 't', type: 'backlog' }, { id: 's', type: 'started' }, { id: 'd', type: 'completed' }, { id: 'c', type: 'canceled' }] }] }
+  assert.equal(linear.preflightCapabilities(meta, { teamId: 'team-1', mutationCapability: 'read-write' }).capabilities.contextDescription, 'available')
+  assert.equal(linear.preflightCapabilities(meta, { teamId: 'team-1', mutationCapability: 'read-only' }).capabilities.contextDescription, 'unavailable')
+  assert.equal(linear.preflightCapabilities(meta, { teamId: 'team-1' }).capabilities.contextDescription, 'unavailable')
+}
 
 console.log('linear core tests passed')

@@ -70,10 +70,83 @@ try {
   const texReceipt = { format: 'tex', path: 'main.tex', sourceHash: hash(await fs.readFile(path.join(reproducibleDir, 'main.tex'))), pdfHash: second.pdfHash, doubleBuildMatch: true }
   await fs.writeFile(path.join(reproducibleDir, 'receipt.json'), JSON.stringify(texReceipt, null, 2) + '\n')
 
+  // ── multi-node canonical project (blank-session smoke, no Linear) ────────
+  {
+    const core = await import(pathToFileURL(path.join(root, manifest.entries.core)).href)
+    const { default: orchestrator } = await import(pathToFileURL(path.join(root, manifest.entries.orchestrator)).href)
+    const { plan: canonicalPlan, node: canonicalNode, criterion, budgetFor } = await import('./helpers/canonical-fixtures.mjs')
+    const projectId = 'multi-smoke'
+    const planDoc = canonicalPlan({
+      projectId,
+      projectName: 'Multi-node smoke',
+      projectContract: {
+        goal: 'A two-node local smoke project.',
+        deliverables: ['report.md'],
+        acceptance: [criterion('PROJECT-01', 'Report published.')],
+        test: '',
+        wordBudget: null,
+        rebuildable: false,
+        diagnosticMappings: [],
+      },
+      nodes: [
+        canonicalNode({ id: 'source', kind: 'research', roles: ['research_author'], artifactFormat: 'markdown', acceptance: [criterion('SRC-01', 'Evidence collected.')], outputContract: { artifactPath: 'evidence.md' } }),
+        canonicalNode({ id: 'integration', kind: 'integration', roles: ['research_integration_editor'], artifactFormat: 'markdown', acceptance: [criterion('INT-01', 'Report assembled.')], outputContract: { artifactPath: 'report.md' }, dependsOn: ['source'], budget: budgetFor(['research_integration_editor']) }),
+      ],
+    })
+    assert.equal(core.validatePlan(planDoc).ok, true, 'smoke plan must validate: ' + JSON.stringify(core.validatePlan(planDoc).errors))
+    const projectDir = path.join(work, '.research-agent', 'projects', projectId)
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.writeFile(path.join(projectDir, 'plan.json'), JSON.stringify(planDoc, null, 2) + '\n')
+    await fs.writeFile(path.join(projectDir, 'state.json'), JSON.stringify({
+      kind: 'project-state', projectId, marker: 'autoresearch-project:' + projectId,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      project: { linearProjectId: '', url: '', createdAt: '' }, integrationRevision: 1,
+      nodes: {}, commentCursors: {}, integration: { epoch: 1, inputDigest: null, lastKnownGood: null, feedback: [] }, lastError: '',
+    }, null, 2) + '\n')
+    const registered = new Map()
+    orchestrator.apply({
+      get(name) {
+        if (name === 'fs') return {
+          async resolve(target) { return path.isAbsolute(target) ? target : path.resolve(work, target) },
+          async stat(target) { try { await fs.access(target); return { version: 1 } } catch { return undefined } },
+          ...fops,
+        }
+        if (name === 'subprocess') return subprocess
+        if (name === 'tools') return { register(definition) { registered.set(definition.name, definition) } }
+        return undefined
+      },
+    })
+    const exec = { agent: { session: { header: { cwd: work, delegationDepth: 0 } } } }
+    const invoke = (name, args) => registered.get(name).execute(args, exec)
+    const sourceRun = await invoke('autoresearch_init_run', { projectId, nodeId: 'source', issueId: 'SMOKE-SRC', issueTitle: 'Evidence run', sourceType: 'local' })
+    assert.ok(sourceRun.runDir, 'init_run returns the run directory')
+    await fs.writeFile(path.join(work, sourceRun.runDir, 'evidence.md'), '# Evidence\n\nCollected material.\n')
+    const sourceAccept = await invoke('autoresearch_record_acceptance', { runDir: sourceRun.runDir, criteria: [{ id: 'SRC-01', result: 'PASS' }] })
+    assert.equal(sourceAccept.ok, true, JSON.stringify(sourceAccept.error))
+    // The journal merges to done at finalize; a non-integration node
+    // finalizes with no visible output.
+    const sourceFinal = await invoke('autoresearch_finalize_run', { runDir: sourceRun.runDir, baseDir: work })
+    assert.equal(sourceFinal.journalSync.action, 'merged', JSON.stringify(sourceFinal.journalSync))
+    const intRun = await invoke('autoresearch_init_run', { projectId, nodeId: 'integration', issueId: 'SMOKE-INT', issueTitle: 'Assembly run', sourceType: 'local' })
+    assert.ok(intRun.runDir, 'init_run returns the run directory')
+    await fs.writeFile(path.join(work, intRun.runDir, 'report.md'), '# Report\n\nAssembled from the evidence run.\n')
+    const intAccept = await invoke('autoresearch_record_acceptance', { runDir: intRun.runDir, criteria: [{ id: 'INT-01', result: 'PASS' }] })
+    assert.equal(intAccept.ok, true, JSON.stringify(intAccept.error))
+    const finalized = await invoke('autoresearch_finalize_run', { runDir: intRun.runDir, baseDir: work })
+    assert.equal(finalized.projectPublish.ok, true, JSON.stringify(finalized.projectPublish.errors))
+    assert.equal(await fops.exists(path.join(work, 'outputs', projectId, 'report.md')), true, 'the multi-node smoke publishes the declared deliverable')
+    assert.equal(await fops.exists(path.join(work, 'outputs', projectId, 'MANIFEST.json')), true)
+    const stateAfter = await fops.readJson(path.join(projectDir, 'state.json'))
+    assert.equal(stateAfter.nodes.source.status, 'done')
+    assert.equal(stateAfter.nodes.integration.status, 'done')
+    assert.ok(stateAfter.integration.lastKnownGood, 'the multi-node publish records the last-known-good pointer')
+    assert.match(stateAfter.integration.lastKnownGood.manifestDigest, /^[0-9a-f]{64}$/)
+  }
+
   for (const project of [markdownDir, pdfDir, reproducibleDir]) {
     assert.equal(await fops.exists(path.join(project, 'linear-sync')), false)
   }
-  console.log(JSON.stringify({ ok: true, generation: manifest.generation, projects: ['markdown', 'pdf-only', 'reproducible-tex'] }))
+  console.log(JSON.stringify({ ok: true, generation: manifest.generation, projects: ['markdown', 'pdf-only', 'reproducible-tex', 'multi-node'] }))
 } finally {
   await fs.rm(work, { recursive: true, force: true })
 }

@@ -113,8 +113,8 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
     throw new Error('project-id mismatch: --project-id ' + projectId + ' does not equal plan.projectId ' + loadedPlan.plan.projectId)
   }
   const plan = loadedPlan.plan
+  if (!core.isCanonicalPlanShape(plan)) throw new Error(core.NOT_CANONICAL_ERROR)
   const rawProject = (plan.projectContract && typeof plan.projectContract === 'object') ? plan.projectContract : {}
-  const isNewPlan = rawProject.exposurePolicyVersion === 1
 
   let override = null
   if (deliverablesFile) {
@@ -168,7 +168,6 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
   const integrationId = plan.integrationId ?? 'integration'
   const integrationContract = core.nodeContract(plan, integrationId)
   const isTex = integrationContract.artifactFormat === 'tex'
-  const mode = isNewPlan || override ? 'new' : 'legacy-adapter'
 
   let specs = []
   let mappings = []
@@ -184,8 +183,8 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
     if (specErrors.length > 0) throw new Error('override deliverables: ' + specErrors.join('; '))
     mappings = Array.isArray(override.diagnosticMappings) ? override.diagnosticMappings : []
     rebuildable = override.rebuildable === true
-  } else if (isNewPlan) {
-    if (!Array.isArray(rawProject.deliverables)) throw new Error('exposure-policy plan requires an explicit deliverables array')
+  } else {
+    if (!Array.isArray(rawProject.deliverables)) throw new Error('the canonical project contract requires an explicit projectContract.deliverables array')
     const specErrors = []
     for (const entry of rawProject.deliverables) {
       const parsed = core.parseDeliverableSpec(entry)
@@ -205,7 +204,6 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
     baseDir,
     runDirAbs: sourceAbs,
     nodeRunDirs: [],
-    mode,
     isTex,
     deliverableSpecs: specs,
     rebuildable,
@@ -233,8 +231,6 @@ export async function republish({ baseDir, projectId, sourceRoot, outputRoot = '
     await walkInventory(projectDirAbs, '', 0)
     const proposed = {
       dryRun: true,
-      mode,
-      policyVersion: mode === 'legacy-adapter' ? 'legacy-adapter' : 1,
       projectId,
       outputDir: path.join(outputRoot, projectId),
       rebuildable,

@@ -4,14 +4,15 @@
 // It greets the user and walks through the two things a new deployment must
 // decide before mounting the preset:
 //
-//   1. Models — every research role defaults to deepseek-official/deepseek-v4-flash.
-//      You may accept the defaults or pick a different model per role.
+//   1. Models — the role model assignment lives in roleProfiles inside
+//      config.default.json. You may accept the current assignment or pick a
+//      different model per role.
 //   2. Linear — optional. The API key is verified against api.linear.app and
 //      stored in the DSH credentials store ($DSH_HOME/.credentials.yaml).
 //
-// Nothing personal is written into the repository:
-//   - model overrides differ from config.default.json -> config.local.json (git-ignored),
-//     which scripts/install-preset.mjs merges into the installed preset;
+// Model choices are written straight into config.default.json, which is the
+// single source of truth for deployment model routing. There is no separate
+// config.local.json overlay to maintain.
 //   - the Linear key -> $DSH_HOME/.credentials.yaml (created 0600, DSH-owned).
 //
 // Non-interactive terminals (CI, pipes) print the manual setup steps and exit 0.
@@ -24,7 +25,6 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const defaultConfigPath = path.join(root, 'config.default.json')
-const localConfigPath = path.join(root, 'config.local.json')
 const dshHome = process.env.DSH_HOME && process.env.DSH_HOME.trim()
   ? path.resolve(process.env.DSH_HOME)
   : path.join(os.homedir(), '.dsh')
@@ -229,22 +229,10 @@ async function probeLinear(key) {
   }
 }
 
-// ── config.local.json (user-local preset overrides) ─────────────────────────
+// ── config.default.json (single source of truth) ────────────────────────────
 
-function readLocalConfig() {
-  try {
-    const value = JSON.parse(fs.readFileSync(localConfigPath, 'utf8'))
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  } catch {
-    return {}
-  }
-}
-
-function writeLocalConfig(local) {
-  const stamp = {
-    _comment: 'User-local preset overrides created by npm run init. Merged into the installed preset by scripts/install-preset.mjs; never commit this file.',
-  }
-  fs.writeFileSync(localConfigPath, JSON.stringify({ ...stamp, ...local }, null, 2) + '\n', { mode: 0o600 })
+function writeDefaultConfig(config) {
+  fs.writeFileSync(defaultConfigPath, JSON.stringify(config, null, 2) + '\n')
 }
 
 // ── steps ───────────────────────────────────────────────────────────────────
@@ -263,50 +251,35 @@ function preflight() {
 
 async function modelStep(defaultConfig) {
   console.log(bold('\n1/2  Models'))
-  console.log('Every research role currently defaults to: ' + (defaultConfig.roleProfiles ? 'see config.default.json' : ''))
+  console.log('Model assignment is centralized in roleProfiles inside config.default.json.')
   const roles = Object.keys(defaultConfig.roleProfiles ?? {})
   const recognized = new Set(defaultConfig._recognizedModels ?? [])
-  const allDefault = roles.every((role) => defaultConfig.roleProfiles[role].model === 'deepseek-official/deepseek-v4-flash')
-  if (allDefault) {
-    console.log('   ' + dim(roles.length + ' roles -> deepseek-official/deepseek-v4-flash'))
+  for (const role of roles) {
+    console.log('   ' + dim(role + ' -> ' + (defaultConfig.roleProfiles[role].model ?? 'provider default')))
   }
-  const keepDefaults = await askYesNo('Keep the default model for every role?', 'y')
-  const local = readLocalConfig()
-  if (keepDefaults) {
-    // Drop stale role overrides so the shipped defaults apply cleanly.
-    if (local.roleProfiles) {
-      delete local.roleProfiles
-      writeLocalConfig(local)
-      console.log(dim('Cleared any previous model overrides in config.local.json.'))
-    } else {
-      console.log(dim('Nothing to change — the preset will run on its shipped defaults.'))
-    }
+  const keepCurrent = await askYesNo('Keep the current model for every role?', 'y')
+  if (keepCurrent) {
+    console.log(dim('Nothing to change — roleProfiles in config.default.json stays as-is.'))
     return
   }
 
-  local.roleProfiles = local.roleProfiles ?? {}
   let changed = 0
   for (const role of roles) {
     const current = defaultConfig.roleProfiles[role].model
     const answer = await ask('Model for ' + role + '?', current)
     const trimmed = answer.trim()
-    if (!trimmed) continue
+    if (!trimmed || trimmed === current) continue
     if (!recognized.has(trimmed)) {
       console.log('   ' + dim(trimmed + ' is not in this deployment recognized-model list; double-check the provider/model string.'))
       const ok = await askYesNo('Use it anyway?', 'n')
       if (!ok) continue
     }
-    if (trimmed !== current) {
-      local.roleProfiles[role] = { ...local.roleProfiles[role], model: trimmed }
-      changed++
-    } else if (local.roleProfiles[role] && local.roleProfiles[role].model === current) {
-      delete local.roleProfiles[role].model
-    }
+    defaultConfig.roleProfiles[role].model = trimmed
+    changed++
   }
-  if (Object.keys(local.roleProfiles).length === 0) delete local.roleProfiles
   if (changed > 0) {
-    writeLocalConfig(local)
-    console.log('Wrote ' + changed + ' model override(s) to config.local.json (git-ignored). The installer merges it into the preset you mount.')
+    writeDefaultConfig(defaultConfig)
+    console.log('Wrote ' + changed + ' model change(s) to config.default.json — the single source of truth for role routing.')
   } else {
     console.log(dim('No model changes.'))
   }
@@ -359,17 +332,17 @@ async function linearStep() {
 function printManualSteps(defaultConfig) {
   console.log(bold('\nNon-interactive terminal detected — here is the manual setup:'))
   console.log('')
-  console.log('1) Models. Every role defaults to deepseek-official/deepseek-v4-flash in config.default.json.')
-  console.log('   To change a role, create a git-ignored config.local.json, e.g.:')
+  console.log('1) Models. The role model assignment lives in roleProfiles in config.default.json.')
+  console.log('   To change a role, edit that file directly, e.g.:')
   console.log(JSON.stringify({ roleProfiles: { research_planner: { model: 'provider/model' } } }, null, 2))
-  console.log('   The installer merges config.local.json into the installed preset.')
+  console.log('   config.default.json is the single source of truth; there is no config.local.json overlay.')
   console.log('2) Linear (optional). Store your API key under refs: in ' + credentialsPath + ':')
   console.log('     version: 1')
   console.log('     refs:')
   console.log('       LINEAR_API_KEY: <your lin_api_... key>')
-  console.log('3) Then run: npm run verify:snapshot && npm run install:preset -- <target>')
+  console.log('3) Then run: npm run verify:snapshot && npm run install:preset -- <target> --replace-config')
   console.log('   The installer never touches a config.default.json that already exists at the target;')
-  console.log('   pass --apply-local to explicitly layer your config.local.json into it.')
+  console.log('   pass --replace-config to adopt the updated config.default.json from this checkout.')
   console.log('   (or re-run `npm run init` from an interactive terminal)')
   console.log('Recognized models in the shipped config: ' + (defaultConfig._recognizedModels ?? []).join(', '))
 }
@@ -403,13 +376,10 @@ async function main() {
   await linearStep()
   rl.close()
 
-  const localOverrides = fs.existsSync(localConfigPath)
   console.log(bold('\nDone. Next steps:'))
   console.log('  1. npm run verify:snapshot        # offline integrity check of the built preset')
-  console.log('  2. npm run install:preset -- ' + path.join(dshHome, '.agent-presets', 'research') + (localOverrides ? ' --apply-local' : ''))
-  if (localOverrides) {
-    console.log('     --apply-local explicitly layers your config.local.json into the installed preset.')
-  }
+  console.log('  2. npm run install:preset -- ' + path.join(dshHome, '.agent-presets', 'research') + ' --replace-config')
+  console.log('     --replace-config adopts the updated config.default.json into the installed preset.')
   console.log('     Note: the installer never touches a config.default.json that already exists at')
   console.log('     the target, so re-installing after an update can never change your setup.')
   console.log('  3. Start a NEW DSH session (restart the DSH process if the preset is already mounted)')

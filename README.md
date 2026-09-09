@@ -26,7 +26,9 @@ there as issues you can watch move from *todo* to *done*.
   agent looks for the responsible upstream step instead of papering over the
   symptom.
 - **Mirror progress into Linear (optional).** Each plan step becomes an issue,
-  so the project reads like a normal Linear board.
+  so the project reads like a normal Linear board — and each issue carries its
+  own short, human-readable `Current Node Context` block, so the live state of
+  the node is readable on the issue itself without opening the workspace.
 
 ## How a project runs
 
@@ -107,6 +109,62 @@ and a Linear outage never loses local progress. The approved plan and local
 journal remain authoritative for the DAG and immutable facts; local-only
 projects never call Linear.
 
+**8. Each Linear issue carries its own `Current Node Context`.** The node's
+*current* state — what is complete, the current evidence and findings, why it
+is open or was reopened, the exact remaining work, its dependencies, and the
+single next action — is written as a short, human-readable block directly in
+the issue description. A person opening the issue can answer "what does this
+node deliver, what is done, what is left, what happens next" without any local
+file or coordinator memory. The block is machine-owned: it is evolved by a
+deterministic reducer that *replaces* superseded facts (it never grows by
+gluing on every milestone — older detail stays in the idempotent evidence
+comments), and it is digest-bound, so the agent must re-read the issue and
+carry the current digest before it claims, reopens, or completes a node. A
+comment or edit that lands in between invalidates the stale digest and the
+action is refused until the fresh state is reduced in. The local project state
+stores only the digest pointer — never a narrative copy — so there is one
+current state, and it is the one on the Linear issue. If the Linear adapter
+cannot read and update issue descriptions, or Linear is unreachable, normal
+node progression **pauses** with a clear `context-missing` / unavailable
+result instead of silently falling back to a local copy; a small local cache
+may hold a pending write only as crash-recovery intent, is read back against
+Linear on reconnect, and can never authorize a claim, completion, or publish
+on its own.
+
+**9. User feedback after publication reopens only the smallest responsible
+closure.** A finished project can be corrected without starting over. The
+coordinator submits your feedback through one intake path
+(`autoresearch_submit_feedback`), which stores it verbatim as a hash-addressed
+record whose source is always the user — the record's authority is *computed*:
+your feedback is `granted` only when the supplied base digests match the
+project's last-known-good publication (the one recorded at the last successful
+integration publish), `stale` when they don't, and `not-recorded` when the
+project never published. A stale digest can never claim the judge-quorum
+bypass. Feedback is triaged item by item (editorial, substantive, conflict,
+scope, ambiguous); ambiguous feedback opens nothing, and a substantive finding
+reopens exactly the triage-derived closure — the owning nodes plus their
+transitive dependents, reset in one transaction, with unrelated completed
+nodes, their receipts, and the last-known-good output preserved until the
+replacement actually verifies. Closing a feedback requires a mechanical
+resolution gate (fresh, non-superseded, hash-bound acceptance receipts that
+PASS every triage acceptance check, a changed integration input, and a
+publish-manifest digest equal to the current last-known-good), after which a
+new resolved record and a republish event are written. If a repair or
+republish fails, the previous publication remains the last-known-good output,
+untouched.
+
+**10. Role authority is narrow and explicit.** Every role runs as a fresh
+subagent with a per-role tool-name allowlist. DSH does not currently expose a
+per-child preventive path/egress adapter seam to this preset, so the broad
+role baseline is disabled; `autoresearch_capability_probe` records
+coordinator-adapter diagnostics and cannot widen child tooling. The
+path/operation guard is a post-attempt mutation audit: it can fail an attempt
+that changed protected or out-of-scope files without a coordinator approval
+token, but it is not a read or egress sandbox. A role proposing a substantial
+or cross-scope change emits a structured approval request, and prompt guidance
+is never treated as the security boundary. Acceptance, promotion,
+publication, and Linear mutations stay coordinator-only.
+
 ## Quick start
 
 When you clone this repository, **the first thing to run is the initialization
@@ -121,31 +179,24 @@ npm run init
 `npm run init` is a guided setup that walks you through the two decisions
 every fresh deployment has to make:
 
-1. **Models.** Every research role ships on `deepseek-official/deepseek-v4-flash`
-   — the right default for DeepSeek Harness users. Accept it, or pick a
-   different model per role from your deployment's catalog.
+1. **Models.** The role model assignment lives in `roleProfiles` inside
+   `config.default.json` — the single source of truth for deployment model
+   routing. Accept it, or pick a different model per role from your
+   deployment's catalog.
 2. **Linear (optional).** If you want the preset to mirror project steps into
    Linear, paste your API key. It is verified against Linear right away, and on
    success stored in the DSH credentials store (`$DSH_HOME/.credentials.yaml`,
    mode 0600) — never in this repository.
 
-Anything personal stays out of the repository: model choices that differ from
-the shipped defaults are written to a git-ignored `config.local.json`. In a
-non-interactive terminal the script prints the same information as manual
-steps instead of prompting.
+Model choices are written straight into `config.default.json`; there is no
+separate `config.local.json` overlay to maintain. In a non-interactive terminal
+the script prints the same information as manual steps instead of prompting.
 
 Then verify and install:
 
 ```bash
 npm run verify:snapshot
 npm run install:preset -- "$HOME/.dsh/.agent-presets/research"
-```
-
-If `npm run init` wrote overrides to `config.local.json`, add `--apply-local`
-to the install command so they are layered into the installed preset:
-
-```bash
-npm run install:preset -- "$HOME/.dsh/.agent-presets/research" --apply-local
 ```
 
 Start a new DSH session afterwards (see Install below for the restart rule).
@@ -172,9 +223,11 @@ Start a new DSH session afterwards (see Install below for the restart rule).
 - Optional: a Linear credential exposed to DSH as `LINEAR_API_KEY` for Linear
   workflows (`npm run init` stores it for you). Local-only projects do not
   require it.
-- A model provider reachable from your DSH deployment. Every role ships on
-  `deepseek-official/deepseek-v4-flash`; change any role with `npm run init`,
-  a local `config.local.json`, or a per-workspace `.research-agent/config.json`.
+- A model provider reachable from your DSH deployment. The role model
+  assignment ships in `roleProfiles` inside `config.default.json`; change any
+  role there or with `npm run init`. A per-workspace
+  `.research-agent/config.json` can further override role models for a single
+  workspace.
 
 ## Install
 
@@ -215,36 +268,32 @@ makes one simple promise:
 Two explicit command-line flags can write that file, and only because you told
 the installer to:
 
-- `--apply-local` — layer your git-ignored `config.local.json` overrides
-  (created by `npm run init`) into the target config. Without the flag,
-  `config.local.json` is simply ignored.
-- `--replace-config` — reset the target config to the shipped defaults. Combine
-  with `--apply-local` to reset and then re-apply your overrides.
-
-`--clean-target` removes the destination preset tree before reinstalling, which
-eliminates stale unmanaged residue and old bundles. If the target already has a
-`config.default.json`, that file is preserved byte-for-byte across the clean
-unless `--replace-config` or `--apply-local` explicitly changes it. Unsafe clean
-targets such as `/`, the home directory, or a parent of the source checkout are
-rejected.
+- `--replace-config` — reset the target config to this checkout's
+  `config.default.json` (the single source of truth for role model routing).
+  Use it after editing `config.default.json` or running `npm run init` so the
+  installed preset adopts the change.
+- `--clean-target` — remove the destination preset tree before reinstalling,
+  which eliminates stale unmanaged residue and old bundles. If the target
+  already has a `config.default.json`, that file is preserved byte-for-byte
+  across the clean unless `--replace-config` explicitly resets it. Unsafe clean
+  targets such as `/`, the home directory, or a parent of the source checkout
+  are rejected.
 
 The one exception that needs no instruction: a first install into a target
 that has no config yet receives the shipped `config.default.json`, because a
 mounted preset cannot run without one. If a future release adds new
 configuration keys, they stay out of your file until you deliberately pick them
-up (for example `--replace-config` + `--apply-local`, or by hand). The
-installer also *reports* — without changing anything — any role model that is
-no longer in the shipped recognized-model list.
+up (for example `--replace-config`, or by hand). The installer also *reports*
+— without changing anything — any role model that is no longer in the shipped
+recognized-model list.
 
 ## What ships vs what stays local
 
 - **Ships with this repository** (portable, deployment-free): the composition,
-  preset metadata, `config.default.json` with its `deepseek-official/deepseek-v4-flash`
-  role defaults, role prompts, skills, generated tools, and the build/test
+  preset metadata, `config.default.json` with its `roleProfiles` role model
+  assignment, role prompts, skills, generated tools, and the build/test
   tooling. No API keys, no personal provider catalogs, no runtime state.
-- **Stays local, never committed**: `config.local.json` (per-deployment model
-  choices and overrides, git-ignored; applied only when you explicitly pass
-  `--apply-local` to the installer), `$DSH_HOME/.credentials.yaml` (API keys,
+- **Stays local, never committed**: `$DSH_HOME/.credentials.yaml` (API keys,
   DSH-owned, mode 0600), `.research-agent/` runtime state, and any
   deployment-specific tuning applied to the installed preset under
   `~/.dsh/.agent-presets/` after installation.
@@ -258,22 +307,24 @@ npm run check
 The check is offline: it re-hashes every runtime file against the build
 manifest and verifies the preset's internal consistency. It calls nothing —
 no models, no DSH server, no Linear, no network — and takes seconds.
+CI runs the full test suite (`npm test`), not snapshot verification alone
+(gate 16).
 
 Run the complete local release gate with `npm run release:verify`. It executes
 the full test suite, local-only Markdown/PDF/reproducible-TeX smoke, installs the
-preset into a clean target with local overrides, and imports the installed orchestrator and Linear
-bundles for both build probes. A live rollout should additionally restart DSH,
-start a blank session, and run `autoresearch_build_probe` and
-`linear_build_probe`; both must report a healthy immutable graph, with mutable
-configuration differences listed separately as `configDrift`.
+preset into a clean target with this checkout's `config.default.json`, and
+imports the installed orchestrator and Linear bundles for both build probes. A
+live rollout should additionally restart DSH, start a blank session, and run
+`autoresearch_build_probe` and `linear_build_probe`; both must report a healthy
+immutable graph, with mutable configuration differences listed separately as
+`configDrift`.
 
 ## Configuration and operation
 
 `config.default.json` seeds configuration for new project workspaces. The
 precedence is: workspace `.research-agent/config.json` > installed preset
-config (the shipped defaults, optionally layered with `config.local.json` via
-the installer's `--apply-local`) > built-in defaults. Review the shipped
-defaults before use:
+config (this checkout's `config.default.json`) > built-in defaults. Review the
+shipped defaults before use:
 
 - The baseline includes `linear.approval: "auto"`; set a stricter approval mode
   in your deployment if side effects should require confirmation.
@@ -310,6 +361,35 @@ secret scanner in CI.
 The preset redaction checks final reports, but that is not a substitute for
 reviewing what external systems receive. Web pages, PDFs, Linear comments, and
 model output may contain prompt injection or sensitive data.
+
+## Schema discipline
+
+AutoResearch has **one canonical record shape**, not numbered generations of
+plan or receipt schemas. Every AutoResearch-owned record (plan, contract,
+state, run, attempt, packet, receipt, ledger, revision request, feedback
+record, Linear projection record, publish manifest) has one shape identified by
+its `kind`; `kind` is a record type, never a schema version. Keep it that way:
+
+- Change the core constructor/validator (`src/autoresearch-core.mjs`) and all
+  of its consumers atomically. There is one validator per record type; do not
+  add a second validator in the orchestrator.
+- Never add `schemaVersion` fields, `v1`/`v2` branches, legacy readers,
+  alternate field unions, policy-version markers, or numbered policy gates to
+  AutoResearch-owned records. Deployment build metadata (generation ids, build
+  manifests, install receipts) is separate and stays allowed.
+- Tool JSON Schemas are generated from the core validator source; transport
+  declarations are build artifacts, not second opinions. Never hand-maintain a
+  tool parameter schema.
+- Old persisted data belongs behind the offline migration boundary
+  (`scripts/migrate-workspace.mjs`), never in role prompts or normal runtime
+  paths. Runtime rejects an old shape with exactly one error:
+  `not canonical; run scripts/migrate-workspace.mjs`.
+- Update canonical fixtures, migration fixtures, docs, generated bundles,
+  snapshot checks, and the full test suite in the same change. A change that
+  needs two live shapes is incomplete and must not ship.
+- `scripts/assert-canonical-schema.mjs` enforces this in source and generated
+  runtime artifacts, including that every registered tool parameter schema
+  equals the schema generated from `autoresearch-core.mjs`.
 
 ## Development
 
