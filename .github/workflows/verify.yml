@@ -14,7 +14,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 24 (the current GitHub-hosted runner default). Node 20 is
+          # deprecated on Actions runners; the preset supports Node >= 20 and
+          # the suite is exercised on 24 here (and on 20 in local runs).
+          node-version: 24
       # Gate 16: CI runs the FULL test suite (build + snapshot + every test),
       # not snapshot verification alone.
+      # Note: the hosted runner has no TeX toolchain. The TeX tests are
+      # toolchain-aware: real-build branches run when latexmk is present and
+      # the no-compiler branches assert the strict-validation diagnostic
+      # instead (a missing compiler blocks with remediation, never passes).
       - run: npm test

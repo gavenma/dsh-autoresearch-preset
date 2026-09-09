@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation ebe5d61bf0da. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-ebe5d61bf0da.mjs"
+// AUTO-GENERATED orchestrator entry, generation ed085697907a. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-ed085697907a.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -3770,8 +3770,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = 'ebe5d61bf0da'
-export const EMBEDDED_BUILD_ID = 'f271b154c4c92b0f959489528a295c86c66b03c55889ea5fee908a77c61aeb70'
+export const EMBEDDED_GENERATION = 'ed085697907a'
+export const EMBEDDED_BUILD_ID = '12d05559adad5aaf74639f33d6619ae4cafb35b0d21d06b23afd6a0c6b460593'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -8717,15 +8717,25 @@ const ORCHESTRATOR_PLUGIN = {
       }
       let tex = null
       if (contract.artifactFormat === 'tex') {
-        tex = await validateNodeTex(fops, subprocess, baseDir, runDir, contract, {
-          texMode: args.texMode,
-          declared: args.declared,
-          templatePath: args.templatePath,
-          artifactPath: outputName,
-        })
+        try {
+          tex = await validateNodeTex(fops, subprocess, baseDir, runDir, contract, {
+            texMode: args.texMode,
+            declared: args.declared,
+            templatePath: args.templatePath,
+            artifactPath: outputName,
+          })
+        } catch (error) {
+          // Compiler/template unavailability or a build crash is a strict
+          // validation failure with a clear diagnostic, never a bare
+          // transport error (plan §5.3: missing tooling blocks with
+          // remediation, and the failure evidence stays on the node).
+          const message = error instanceof Error ? error.message : String(error)
+          await recordNodeFailure(fops, baseDir, contractFile, 'strict TeX validation failed: ' + message)
+          throw new Error('Strict TeX validation failed before acceptance: ' + message)
+        }
         if (!tex.clean) {
           await recordNodeFailure(fops, baseDir, contractFile, 'strict TeX validation failed: ' + (tex.errors ?? []).join('; '))
-           throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
+          throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
         }
       }
       const classification = args.artifactClassification ? core.classifyArtifact(args.artifactClassification) : null
@@ -9479,7 +9489,17 @@ const ORCHESTRATOR_PLUGIN = {
         // PDF bytes compare deterministically.
         const finalEpoch = plan?.ok ? planApprovalEpoch({ approvedAt: plan.plan.approvedAt }) : null
         const finalBuildOpts = finalEpoch !== null ? { sourceDateEpoch: finalEpoch } : {}
-        const build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
+        let build = null
+        try {
+          build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
+        } catch (error) {
+          // A missing compiler is a diagnostic, not a crash: the structured
+          // record reports the tooling gap with remediation (plan §5.3).
+          record.ok = false
+          record.compiled = false
+          record.staticErrors.push('strict final TeX build unavailable: ' + (error instanceof Error ? error.message : String(error)))
+          return record
+        }
         record.compiled = true
         record.clean = build.clean
         record.exitCode = build.exitCode

@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation ebe5d61bf0da. Source: src/linear.mjs.
-import * as autoresearchCore from "./autoresearch-core-ebe5d61bf0da.mjs"
+// AUTO-GENERATED Linear entry, generation ed085697907a. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-ed085697907a.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -1224,8 +1224,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = 'ebe5d61bf0da'
-export const EMBEDDED_BUILD_ID = 'f271b154c4c92b0f959489528a295c86c66b03c55889ea5fee908a77c61aeb70'
+export const EMBEDDED_GENERATION = 'ed085697907a'
+export const EMBEDDED_BUILD_ID = '12d05559adad5aaf74639f33d6619ae4cafb35b0d21d06b23afd6a0c6b460593'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)

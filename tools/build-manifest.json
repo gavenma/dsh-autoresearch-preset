@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "generation": "ebe5d61bf0da",
-  "aggregateId": "f271b154c4c92b0f959489528a295c86c66b03c55889ea5fee908a77c61aeb70",
+  "generation": "ed085697907a",
+  "aggregateId": "12d05559adad5aaf74639f33d6619ae4cafb35b0d21d06b23afd6a0c6b460593",
   "aggregateScope": [
-    "tools/autoresearch-core-ebe5d61bf0da.mjs",
+    "tools/autoresearch-core-ed085697907a.mjs",
     "tools/byte-utils.mjs",
     "tools/linear-client.mjs",
     "tools/research-web-fetch.mjs",
@@ -11,12 +11,12 @@
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs"
   ],
   "entries": {
-    "core": "tools/autoresearch-core-ebe5d61bf0da.mjs",
-    "orchestrator": "tools/research-orchestrator-ebe5d61bf0da.mjs",
-    "linear": "tools/linear-ebe5d61bf0da.mjs"
+    "core": "tools/autoresearch-core-ed085697907a.mjs",
+    "orchestrator": "tools/research-orchestrator-ed085697907a.mjs",
+    "linear": "tools/linear-ed085697907a.mjs"
   },
   "files": {
-    "agent.cordis.yml": "61fdcf8dc6ac5f5afc702f6804c86a25bd0422553f3870b7d8dfaf508856396a",
+    "agent.cordis.yml": "4dfd73dd6121477bcc744a1c6416c2b7cd9ffe10d67643e57593587f9a5ccfc3",
     "config.default.json": "2c4686e81166c3936ca2981c33eaea2fe0178009c135f69b05c0f27a8850df08",
     "preset.yml": "260c2617a7e525324c3f7f44cda98b211846f129dcc2cb0a552449b63f6d4f63",
     "roles/evidence_verifier.md": "bef5eb24ee3e6e4184ab21a27a8ea9893cddca17c6b0e6ef346d084ee8857fd4",
@@ -36,14 +36,14 @@
     "roles/research_unit_tester.md": "52da89fa2dd889e4576708dedb4d117b0ad36fe9a36ea2a38525666ca2b9f346",
     "skills/research-outline-project/SKILL.md": "ca8b11332ea9c70e9477d2f04760697c49c088ddd219887f32b65110bee78021",
     "skills/research-project/SKILL.md": "1b54380294e03831f4038736036bdc572f1fb4a0fd5dfa87202b93b36161d157",
-    "tools/autoresearch-core-ebe5d61bf0da.mjs": "82b012587a967238924e28db098b8ede7daf7120f376232d71ced90b29fed30c",
+    "tools/autoresearch-core-ed085697907a.mjs": "82b012587a967238924e28db098b8ede7daf7120f376232d71ced90b29fed30c",
     "tools/byte-utils.mjs": "26bc4e32dfe9c8c3c42b03d367d87fa52a6c0550e7d9bc4c4f4810a0e358503b",
     "tools/linear-client.mjs": "0f498876591b1555e5b5a3115f21cd41f5697f4f7d442df9814091988e5cfd4f",
-    "tools/linear-ebe5d61bf0da.mjs": "fa31b58c4bb2b004754cc2b58864d95d8384e308629da6fe9ab8d9af68bf792f",
-    "tools/research-orchestrator-ebe5d61bf0da.mjs": "84b325c5120f3df72a9f319fd9d46c9fb9b11d62481ca629557490983fea4fee",
+    "tools/linear-ed085697907a.mjs": "7b73112d3707181674a5a14d0cd28c6afd958d28ab10d34f0c9047a2c0f69766",
+    "tools/research-orchestrator-ed085697907a.mjs": "16f560151d505777e70f8686510a52a61455f30f15bce01eb72199a238b0a4bd",
     "tools/research-web-fetch.mjs": "a30f6c6c88a9c37768a1682daa54728eb6bacd36c4141820e065dd1c5f339b22",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.mjs": "081d3b6f426d38a8029766f8839f505e9cbf2c81a71d62c26eada142e6c21ae4",
     "tools/vendor/pdfjs-dist/legacy/build/pdf.worker.mjs": "5e9f76bd5e65fbd1602b29fc50e50490aeeacd34a715b2282b73f7e8029242e0"
   },
-  "generatedAt": "2026-09-09T08:42:11.578Z"
+  "generatedAt": "2026-09-09T10:19:09.017Z"
 }

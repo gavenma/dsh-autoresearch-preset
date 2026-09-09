@@ -8717,15 +8717,25 @@ const ORCHESTRATOR_PLUGIN = {
       }
       let tex = null
       if (contract.artifactFormat === 'tex') {
-        tex = await validateNodeTex(fops, subprocess, baseDir, runDir, contract, {
-          texMode: args.texMode,
-          declared: args.declared,
-          templatePath: args.templatePath,
-          artifactPath: outputName,
-        })
+        try {
+          tex = await validateNodeTex(fops, subprocess, baseDir, runDir, contract, {
+            texMode: args.texMode,
+            declared: args.declared,
+            templatePath: args.templatePath,
+            artifactPath: outputName,
+          })
+        } catch (error) {
+          // Compiler/template unavailability or a build crash is a strict
+          // validation failure with a clear diagnostic, never a bare
+          // transport error (plan §5.3: missing tooling blocks with
+          // remediation, and the failure evidence stays on the node).
+          const message = error instanceof Error ? error.message : String(error)
+          await recordNodeFailure(fops, baseDir, contractFile, 'strict TeX validation failed: ' + message)
+          throw new Error('Strict TeX validation failed before acceptance: ' + message)
+        }
         if (!tex.clean) {
           await recordNodeFailure(fops, baseDir, contractFile, 'strict TeX validation failed: ' + (tex.errors ?? []).join('; '))
-           throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
+          throw new Error('Strict TeX validation failed before acceptance: ' + (tex.errors ?? []).join('; '))
         }
       }
       const classification = args.artifactClassification ? core.classifyArtifact(args.artifactClassification) : null
@@ -9479,7 +9489,17 @@ const ORCHESTRATOR_PLUGIN = {
         // PDF bytes compare deterministically.
         const finalEpoch = plan?.ok ? planApprovalEpoch({ approvedAt: plan.plan.approvedAt }) : null
         const finalBuildOpts = finalEpoch !== null ? { sourceDateEpoch: finalEpoch } : {}
-        const build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
+        let build = null
+        try {
+          build = await strictTexBuild(fops, subprocess, baseDir, runDir, 'final.tex', finalBuildOpts)
+        } catch (error) {
+          // A missing compiler is a diagnostic, not a crash: the structured
+          // record reports the tooling gap with remediation (plan §5.3).
+          record.ok = false
+          record.compiled = false
+          record.staticErrors.push('strict final TeX build unavailable: ' + (error instanceof Error ? error.message : String(error)))
+          return record
+        }
         record.compiled = true
         record.clean = build.clean
         record.exitCode = build.exitCode
