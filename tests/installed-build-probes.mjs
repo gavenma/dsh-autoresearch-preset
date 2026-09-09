@@ -17,7 +17,9 @@ async function listFiles(dir, prefix = '') {
   return files.sort()
 }
 const installedFiles = await listFiles(presetRoot)
-const declaredFiles = [...Object.keys(manifest.files), 'tools/build-manifest.json', 'install-receipt.json'].sort()
+// The manifest's config slot tracks the public template; the installed preset
+// carries the effective deployment config as config.default.json.
+const declaredFiles = [...Object.keys(manifest.files).map((key) => (key === 'config.example.json' ? 'config.default.json' : key)), 'tools/build-manifest.json', 'install-receipt.json'].sort()
 assert.deepEqual(installedFiles, declaredFiles, 'installed preset contains missing or undeclared relic files')
 const subprocess = {
   async resolveExecutable(name) { return name },

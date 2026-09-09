@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation ed085697907a. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-ed085697907a.mjs"
+// AUTO-GENERATED orchestrator entry, generation 19bb7ce68e6c. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-19bb7ce68e6c.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -3770,8 +3770,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = 'ed085697907a'
-export const EMBEDDED_BUILD_ID = '12d05559adad5aaf74639f33d6619ae4cafb35b0d21d06b23afd6a0c6b460593'
+export const EMBEDDED_GENERATION = '19bb7ce68e6c'
+export const EMBEDDED_BUILD_ID = '9474975336c563aa7711985ad967f6a2102acc3771225b9faffbad3022097897'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -7023,8 +7023,12 @@ async function runBuildProbe(subprocessService, baseDir) {
   const scope = Array.isArray(manifest.aggregateScope) ? manifest.aggregateScope : Object.keys(manifest.files ?? {})
   const immutableScope = new Set(scope)
   for (const [relPath, expectedHash] of Object.entries(manifest.files ?? {})) {
+    // The manifest's config slot tracks the public template, while the
+    // installed preset carries the effective deployment config under its
+    // own name; hash the installed file for that slot.
+    const probePath = relPath === 'config.example.json' ? 'config.default.json' : relPath
     try {
-      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, relPath)])
+      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, probePath)])
       const match = String(result.stdout).match(/^([0-9a-f]{64})\s+/m)
       if (!match) {
         (immutableScope.has(relPath) ? failures : configDrift).push(relPath + ': shasum produced no hash')

@@ -31,3 +31,10 @@ tmp/
 # Python and OS caches
 __pycache__/
 *.py[cod]
+
+# Agent guidance and local docs (never committed)
+AGENTS.md
+docs/
+
+# Personal deployment configuration (local only)
+config.default.json

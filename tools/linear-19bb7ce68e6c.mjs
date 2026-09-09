@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation ed085697907a. Source: src/linear.mjs.
-import * as autoresearchCore from "./autoresearch-core-ed085697907a.mjs"
+// AUTO-GENERATED Linear entry, generation 19bb7ce68e6c. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-19bb7ce68e6c.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -1224,8 +1224,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = 'ed085697907a'
-export const EMBEDDED_BUILD_ID = '12d05559adad5aaf74639f33d6619ae4cafb35b0d21d06b23afd6a0c6b460593'
+export const EMBEDDED_GENERATION = '19bb7ce68e6c'
+export const EMBEDDED_BUILD_ID = '9474975336c563aa7711985ad967f6a2102acc3771225b9faffbad3022097897'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
@@ -1287,8 +1287,12 @@ async function runBuildProbe(subprocessService, baseDir) {
   const scope = Array.isArray(manifest.aggregateScope) ? manifest.aggregateScope : Object.keys(manifest.files ?? {})
   const immutableScope = new Set(scope)
   for (const [relPath, expectedHash] of Object.entries(manifest.files ?? {})) {
+    // The manifest's config slot tracks the public template, while the
+    // installed preset carries the effective deployment config under its
+    // own name; hash the installed file for that slot.
+    const probePath = relPath === 'config.example.json' ? 'config.default.json' : relPath
     try {
-      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, relPath)])
+      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, probePath)])
       const match = String(result.stdout).match(/^([0-9a-f]{64})\s+/m)
       if (!match) {
         (immutableScope.has(relPath) ? mismatches : configDrift).push(relPath + ': shasum produced no hash')

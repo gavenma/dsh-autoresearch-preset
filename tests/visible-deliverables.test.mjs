@@ -35,7 +35,7 @@ const result = await createLibraries.lifecycle.initRun(fops, {
   issueId: 'visible-check',
   issueTitle: 'Visible deliverable check',
   sourceType: 'local',
-}, path.join(root, 'config.default.json'))
+}, path.join(root, await fs.access(path.join(root, 'config.default.json')).then(() => 'config.default.json').catch(() => 'config.example.json')))
 assert.equal(result.artifactRoot, '.research-agent')
 assert.equal(result.outputRoot, 'outputs')
 assert.equal(result.runDir.startsWith('.research-agent/runs/'), true)

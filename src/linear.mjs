@@ -1287,8 +1287,12 @@ async function runBuildProbe(subprocessService, baseDir) {
   const scope = Array.isArray(manifest.aggregateScope) ? manifest.aggregateScope : Object.keys(manifest.files ?? {})
   const immutableScope = new Set(scope)
   for (const [relPath, expectedHash] of Object.entries(manifest.files ?? {})) {
+    // The manifest's config slot tracks the public template, while the
+    // installed preset carries the effective deployment config under its
+    // own name; hash the installed file for that slot.
+    const probePath = relPath === 'config.example.json' ? 'config.default.json' : relPath
     try {
-      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, relPath)])
+      const result = await runSubprocess(subprocessService, baseDir, [shasum, '-a', '256', absPath(presetRoot, probePath)])
       const match = String(result.stdout).match(/^([0-9a-f]{64})\s+/m)
       if (!match) {
         (immutableScope.has(relPath) ? mismatches : configDrift).push(relPath + ': shasum produced no hash')

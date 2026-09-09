@@ -21,9 +21,16 @@ const manifest = JSON.parse(await fs.readFile(path.join(installed, 'tools/build-
 const installedConfigBytes = await fs.readFile(path.join(installed, 'config.default.json'))
 const installedConfig = JSON.parse(installedConfigBytes)
 const configHash = createHash('sha256').update(installedConfigBytes).digest('hex')
-assert.equal(manifest.files['config.default.json'], configHash)
-assert.equal(installedConfig.roleProfiles.research_planner.model, 'openai/gpt-5.6-sol')
-assert.equal(installedConfig.roleProfiles.research_planner.reasoningEffort, 'max')
+// The manifest's config slot tracks the public template (the installed file
+// is always named config.default.json).
+assert.equal(manifest.files['config.example.json'], configHash)
+// The installed config equals the checkout's effective source: the local
+// config.default.json when present, otherwise the committed template.
+const hasLocalConfig = await fs.access(path.join(root, 'config.default.json')).then(() => true).catch(() => false)
+const sourceConfigPath = path.join(root, hasLocalConfig ? 'config.default.json' : 'config.example.json')
+const sourceConfig = JSON.parse(await fs.readFile(sourceConfigPath, 'utf8'))
+assert.equal(installedConfig.roleProfiles.research_planner.model, sourceConfig.roleProfiles.research_planner.model)
+assert.equal(installedConfig.roleProfiles.research_planner.reasoningEffort, sourceConfig.roleProfiles.research_planner.reasoningEffort)
 assert.match(result.stdout, /Updated deployed manifest hash/)
 const receipt = JSON.parse(await fs.readFile(path.join(installed, 'install-receipt.json'), 'utf8'))
 assert.equal(receipt.generation, manifest.generation)

@@ -46,7 +46,7 @@ const collectVendor = (dir, relative) => {
 }
 collectVendor(path.join(root, 'tools', 'vendor'), '')
 vendorAssetPaths.sort()
-const dataAssetPaths = ['config.default.json', 'preset.yml']
+const dataAssetPaths = ['config.example.json', 'preset.yml']
 const helperPaths = ['tools/linear-client.mjs', 'tools/research-web-fetch.mjs', 'tools/byte-utils.mjs']
 
 // Every non-generated runtime asset participates in the generation identity:

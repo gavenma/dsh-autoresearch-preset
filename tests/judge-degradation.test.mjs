@@ -297,7 +297,8 @@ const checkpoint = registered.get('autoresearch_checkpoint')
 // 3. Config: model fallbacks on the five writing roles (SOD #12)
 // ══════════════════════════════════════════════════════════════════════════
 {
-  const cfg = JSON.parse(await fs.readFile(path.join(root, 'config.default.json'), 'utf8'))
+  const cfgPath = path.join(root, fsSync.existsSync(path.join(root, 'config.default.json')) ? 'config.default.json' : 'config.example.json')
+  const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8'))
   const withFallbacks = new Set(Object.entries(cfg.roleProfiles).filter(([, p]) => Array.isArray(p.modelFallbacks)).map(([role]) => role))
   for (const role of ['research_planner', 'research_author', 'research_synthesizer', 'research_abstract_writer', 'research_integration_editor']) {
     assert.ok(withFallbacks.has(role), role + ' must have modelFallbacks')

@@ -33,7 +33,7 @@ const requiredAssets = [
   ...fs.readdirSync(path.join(root, 'skills'), { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(root, 'skills', entry.name, 'SKILL.md')))
     .map((entry) => 'skills/' + entry.name + '/SKILL.md'),
-  'config.default.json',
+  'config.example.json',
   'preset.yml',
   'agent.cordis.yml',
   ...collectVendor(path.join(root, 'tools', 'vendor')),

@@ -351,7 +351,15 @@ function printManualSteps(defaultConfig) {
 
 async function main() {
   console.log(banner)
-  if (!fs.existsSync(defaultConfigPath)) fail('config.default.json is missing from this checkout')
+  // config.default.json is local-only (gitignored). A fresh checkout seeds it
+  // from the committed public template so the guided flow has something to
+  // edit in place.
+  if (!fs.existsSync(defaultConfigPath)) {
+    const examplePath = path.join(root, 'config.example.json')
+    if (!fs.existsSync(examplePath)) fail('config.default.json is missing and config.example.json template is unavailable in this checkout')
+    fs.copyFileSync(examplePath, defaultConfigPath)
+    console.log(dim('Seeded config.default.json from config.example.json (local-only, gitignored).'))
+  }
   const defaultConfig = JSON.parse(fs.readFileSync(defaultConfigPath, 'utf8'))
 
   const problems = preflight()

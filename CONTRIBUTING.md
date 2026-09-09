@@ -33,6 +33,7 @@ authoritative current-work context in their `Current Node Context` block
 
 Role prompts and skills are public interface. When changing them, document the
 behavioral contract, preserve blind judging where applicable, and avoid claims
-that a model's causal attribution proves a root cause. The implemented causal lifecycle, Linear projection, and hardening contract is
-documented in `docs/autoresearch-hardening-linear-causal-plan.md`; changes must
-keep that contract and its release gates current.
+that a model's causal attribution proves a root cause. The preset keeps one
+canonical, unversioned record schema (see the README Schema discipline
+section); every change must update the core validators, consumers, fixtures,
+tests, and generated bundles atomically, and keep the release gates current.

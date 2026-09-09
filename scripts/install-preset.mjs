@@ -48,36 +48,41 @@ for (const relativePath of runtimeAssets) {
 // Re-installing after a code update therefore cannot change a working
 // deployment's configuration. The only way the installer writes that file
 // is the explicit --replace-config flag, which resets the target config to
-// this checkout's config.default.json — the single source of truth for
-// deployment model routing. The single exception that needs no instruction:
-// a first install into a target that has no config yet receives the shipped
-// config.default.json, because a mounted preset cannot run without one.
+// this checkout's local config.default.json — the single source of truth for
+// deployment model routing (gitignored, never committed). A checkout without
+// one falls back to the committed public template config.example.json. The
+// single exception that needs no instruction: a first install into a target
+// that has no config yet receives config.default.json (local, or seeded from
+// the example), because a mounted preset cannot run without one.
 // The installer never rewrites the repository itself.
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
 const sha256File = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-const repoConfigPath = path.join(root, 'config.default.json')
+const repoConfigPath = fs.existsSync(path.join(root, 'config.default.json'))
+  ? path.join(root, 'config.default.json')
+  : path.join(root, 'config.example.json')
 
 if (hadExistingConfig && replaceConfig) {
   fs.copyFileSync(repoConfigPath, installedConfigPath)
-  console.log('--replace-config: reset the existing config.default.json to this checkout\'s config.default.json.')
+  console.log('--replace-config: reset the existing config.default.json to this checkout\'s config (local config.default.json, or the config.example.json template).')
 } else if (!hadExistingConfig) {
   fs.copyFileSync(repoConfigPath, installedConfigPath)
-  console.log('Installed the shipped config.default.json (the target had no config yet).')
+  console.log('Installed config.default.json (seeded from the checkout\'s local config, or config.example.json; the target had no config yet).')
 }
 if (hadExistingConfig && !replaceConfig) {
   console.log('config.default.json already exists at the target — left untouched. '
-    + 'Use --replace-config to reset it to this checkout\'s config.default.json.')
+    + 'Use --replace-config to reset it to this checkout\'s config (local config.default.json, or the config.example.json template).')
 }
 
-// The deployed manifest describes the effective runtime files. A local overlay
-// intentionally changes config.default.json, so update only that mutable file's
-// hash; generated entries and aggregate identity remain immutable build facts.
+// The deployed manifest describes the effective runtime files. The installed
+// config.default.json is intentionally mutable, so update only the manifest's
+// config slot (the public config.example.json entry); generated entries and
+// aggregate identity remain immutable build facts.
 const installedManifestPath = path.join(target, 'tools', 'build-manifest.json')
 if (fs.existsSync(installedManifestPath) && fs.existsSync(installedConfigPath)) {
   const deployedManifest = readJson(installedManifestPath)
-  if (deployedManifest.files && Object.prototype.hasOwnProperty.call(deployedManifest.files, 'config.default.json')) {
-    deployedManifest.files['config.default.json'] = sha256File(installedConfigPath)
+  if (deployedManifest.files && Object.prototype.hasOwnProperty.call(deployedManifest.files, 'config.example.json')) {
+    deployedManifest.files['config.example.json'] = sha256File(installedConfigPath)
     fs.writeFileSync(installedManifestPath, JSON.stringify(deployedManifest, null, 2) + '\n')
     console.log('Updated deployed manifest hash for the effective config.default.json.')
   }
@@ -93,7 +98,10 @@ for (const name of fs.readdirSync(installedTools)) {
 }
 const mismatches = []
 for (const [relativePath, expectedHash] of Object.entries(deployedManifest.files ?? {})) {
-  const installedPath = path.join(target, relativePath)
+  // The manifest's config slot tracks the public template; the installed
+  // preset carries the effective deployment config as config.default.json.
+  const probePath = relativePath === 'config.example.json' ? 'config.default.json' : relativePath
+  const installedPath = path.join(target, probePath)
   if (!fs.existsSync(installedPath)) mismatches.push(relativePath + ': missing')
   else if (sha256File(installedPath) !== expectedHash) mismatches.push(relativePath + ': hash mismatch')
 }

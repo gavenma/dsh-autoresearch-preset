@@ -1,0 +1,125 @@
+{
+  "_help": "Public template for the AutoResearch preset configuration. Copy this file to config.default.json (or run `npm run init`, which seeds it) and edit roleProfiles there for your deployment. config.default.json is local-only and gitignored — personal model routing is never committed. Internal plans, receipts, packets, and run artifacts live in hidden .research-agent/, the single runtime artifact root. Completed user-facing deliverables publish under outputs/. MODEL ASSIGNMENT IS CENTRALIZED IN roleProfiles BELOW: every role has exactly one entry there. An optional roleProfiles.<role>.modelFallbacks array is an ordered handoff chain: when a model fails with a provider/route error the role runner steps to the next entry, and a per-workspace breaker (<artifactRoot>/model-breaker.json) skips a rate-limited model until the cooldown expires. There is no separate roleModels bucket and no per-role tool list here — per-role tools are fixed by the built-in role manifest. judgePanel is an optional per-judge override and only takes effect when research_judge.model is omitted. _recognizedModels is the pick list of valid 'provider/model' strings (refresh with autoresearch_list_models; unrecognized strings are flagged by autoresearch_dependency_check). The integration editor must use a multimodal model for visual inspection — if your deployment's default is text-only, point research_integration_editor at a multimodal model in roleProfiles. Each role may set reasoningEffort to a provider-supported effort identifier; unset roles use the provider default. These template defaults run every role on deepseek-official/deepseek-v4-flash; customize per deployment in config.default.json.",
+  "_recognizedModels": [
+    "deepseek-official/deepseek-v4-flash",
+    "deepseek-official/deepseek-v4-pro"
+  ],
+  "numScouts": 2,
+  "numJudges": 2,
+  "maxPasses": 2,
+  "convergenceThreshold": 2,
+  "externalResearch": true,
+  "artifactRoot": ".research-agent",
+  "outputRoot": "outputs",
+  "linear": {
+    "approval": "auto"
+  },
+  "backtracking": {
+    "mode": "observe",
+    "quorumJudges": 2,
+    "maxReopensPerUpstream": 2,
+    "maxReopensPerPair": 2,
+    "maxEpochs": 3,
+    "maxContextUpstreams": 8,
+    "maxExplanationLength": 500,
+    "maxObservations": 50,
+    "requireEvidenceFileHash": true
+  },
+  "roleExecution": {
+    "maxAttempts": 3,
+    "maxAttemptsCeiling": 5,
+    "retryDelayMs": 0,
+    "timeoutMs": 0,
+    "leaseMs": 900000,
+    "maxTokens": null,
+    "modelFallbackCooldownMs": 600000
+  },
+  "planning": {
+    "numJudges": 2,
+    "maxPasses": 2,
+    "convergenceThreshold": 2
+  },
+  "judgePanel": [],
+  "roleProfiles": {
+    "research_planner": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high",
+      "modelFallbacks": [{
+        "model": "deepseek-official/deepseek-v4-pro",
+        "reasoningEffort": "high"
+      }]
+    },
+    "research_scout": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "evidence_verifier": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_author": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high",
+      "modelFallbacks": [{
+        "model": "deepseek-official/deepseek-v4-pro",
+        "reasoningEffort": "high"
+      }]
+    },
+    "research_critic": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_synthesizer": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high",
+      "modelFallbacks": [{
+        "model": "deepseek-official/deepseek-v4-pro",
+        "reasoningEffort": "high"
+      }]
+    },
+    "research_judge": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_reporter": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_coder": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_unit_tester": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_literature_writer": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_abstract_writer": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high",
+      "modelFallbacks": [{
+        "model": "deepseek-official/deepseek-v4-pro",
+        "reasoningEffort": "high"
+      }]
+    },
+    "research_experiments_commentator": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    },
+    "research_integration_editor": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high",
+      "modelFallbacks": [{
+        "model": "deepseek-official/deepseek-v4-pro",
+        "reasoningEffort": "high"
+      }]
+    },
+    "research_integration_verifier": {
+      "model": "deepseek-official/deepseek-v4-flash",
+      "reasoningEffort": "high"
+    }
+  }
+}
