@@ -13,9 +13,10 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn, execFileSync } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
+import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -201,10 +202,6 @@ const previewSafetyFops = {
 await assert.rejects(() => lib.helpers.renderPreview(previewSafetyFops, { async resolveExecutable() { throw new Error('not reached') } }, baseDir, previewSafetyDir), /not owned by AutoResearch/)
 assert.equal(await fs.readFile(path.join(previewSafetyDir, 'preview', 'user-file.txt'), 'utf8'), 'do not remove')
 await fs.rm(previewSafetyDir, { recursive: true, force: true })
-
-const texAvailable = (() => {
-  try { fsSync.accessSync(fsSync.realpathSync('/usr/bin/latexmk'), fsSync.constants.X_OK); return true } catch { return false }
-})()
 
 const registered = new Map()
 const failNames = new Set()

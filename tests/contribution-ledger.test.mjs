@@ -13,6 +13,7 @@ import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
+import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -286,9 +287,6 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
 
 // ── 4b. TeX node: section slugs e2e + revision re-derivation ──────────────
 {
-  const texAvailable = (() => {
-    try { fsSync.accessSync('/usr/bin/latexmk', fsSync.constants.X_OK); return true } catch { return false }
-  })()
   if (!texAvailable) {
     console.log('skipping tex ledger e2e (latexmk unavailable)')
   } else {

@@ -17,6 +17,7 @@ import crypto from 'node:crypto'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
+import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -82,9 +83,7 @@ const subprocess = {
     }
   },
 }
-const texAvailable = (() => {
-  try { fsSync.accessSync(fsSync.realpathSync('/usr/bin/latexmk'), fsSync.constants.X_OK); return true } catch { return false }
-})()
+
 
 const registered = new Map()
 orchestrator.apply({
