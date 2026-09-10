@@ -13,7 +13,6 @@ import path from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
-import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -287,9 +286,6 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
 
 // ── 4b. TeX node: section slugs e2e + revision re-derivation ──────────────
 {
-  if (!texAvailable) {
-    console.log('skipping tex ledger e2e (latexmk unavailable)')
-  } else {
     const run = await initRun.execute({ projectId: 'ledger-proj', nodeId: 'methods', issueId: 'ledger-methods', issueTitle: 'Methods', sourceType: 'local' }, exec)
     const runAbs = path.join(baseDir2, run.runDir)
     const texV1 = '\\documentclass{article}\n\\begin{document}\n\\section{Data Collection}\nThe data collection procedure follows the protocol described in the appendix.\n\\end{document}\n'
@@ -318,7 +314,6 @@ const recordAcceptance = registered.get('autoresearch_record_acceptance')
     assert.deepEqual(ledgerV2.contributions.map((unit) => unit.id), ['data-gathering'], 'revision 2 must re-derive from the new heading')
     assert.equal(ledgerV2.nodeRevision, 2)
     assert.notEqual(ledgerV2.outputHash, ledgerV1.outputHash)
-  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════

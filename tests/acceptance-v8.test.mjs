@@ -17,7 +17,6 @@ import crypto from 'node:crypto'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
-import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -301,13 +300,7 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
   } catch (err) { error = err }
   assert.ok(error, 'acceptance must fail when the exposed master has a missing input')
   const msg3 = String(error.message)
-  if (texAvailable) {
-    assert.ok(msg3.includes('missing local input for the exposed TeX source final.tex: ghost'), msg3)
-  } else {
-    // Toolchain-less runners fail at the strict build first (the wrapped
-    // diagnostic), which is still a hard failure, never a pass.
-    assert.ok(msg3.includes('Strict TeX validation failed before acceptance'), msg3)
-  }
+  assert.ok(msg3.includes('missing local input for the exposed TeX source final.tex: ghost'), msg3)
 }
 
 // ── 4. Unresolved \ref names the owning node when identifiable ─────────────
@@ -359,12 +352,8 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
   } catch (err) { error = err }
   assert.ok(error, 'acceptance must fail on an unresolved ref in the exposed master')
   const msg = String(error.message)
-  if (texAvailable) {
-    assert.ok(msg.includes('unresolved \\ref target "eq:other"'), msg)
-    assert.ok(msg.includes('node author'), 'diagnostic must name the owning node: ' + msg)
-  } else {
-    assert.ok(msg.includes('Strict TeX validation failed before acceptance'), msg)
-  }
+  assert.ok(msg.includes('unresolved \\ref target "eq:other"'), msg)
+  assert.ok(msg.includes('node author'), 'diagnostic must name the owning node: ' + msg)
 }
 
 // ── 5. Resolvable exposed master passes (real build when available) ────────
@@ -405,15 +394,8 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
   try {
     result = await recordAcceptance.execute({ runDir: inits.integration.runDir, criteria: [{ id: 'INT-01', result: 'PASS' }] }, exec)
   } catch (err) { error = err }
-  if (texAvailable) {
-    assert.equal(error, null, 'resolvable exposed master must accept: ' + (error && error.message))
-    assert.equal(result.ok, true)
-  } else {
-    // Without latexmk the strict build cannot run — the usability check
-    // itself must still be the ONLY possible failure class here; verify the
-    // acceptance attempt reached the build (not the usability precondition).
-    assert.ok(!String(error?.message ?? '').includes('Exposed-TeX source usability'), 'usability must not fail: ' + (error && error.message))
-  }
+  assert.equal(error, null, 'resolvable exposed master must accept: ' + (error && error.message))
+  assert.equal(result.ok, true)
 }
 
 // ── 6. PDF-only exposure skips the source-usability precondition ───────────
@@ -454,13 +436,9 @@ async function makeBoundProject({ projectId, plan, issueIds, validate = true }) 
   try {
     result = await recordAcceptance.execute({ runDir: inits.integration.runDir, criteria: [{ id: 'INT-01', result: 'PASS' }] }, exec)
   } catch (err) { error = err }
-  if (texAvailable) {
-    assert.equal(error, null, 'PDF-only exposure must not run the TeX source usability precondition: ' + (error && error.message))
-    assert.equal(result.ok, true)
-  } else {
-    assert.ok(!String(error?.message ?? '').includes('Exposed-TeX source usability'), 'usability must not run: ' + (error && error.message))
-  }
-  if (texAvailable) {
+  assert.equal(error, null, 'PDF-only exposure must not run the TeX source usability precondition: ' + (error && error.message))
+  assert.equal(result.ok, true)
+  {
     const receipt = JSON.parse(await fs.readFile(path.join(intRunAbs, 'acceptance.json'), 'utf8'))
     // finalBuild capture: exposed final.tex + accepted PDF (no recorder in
     // the run dir, so fls fields are absent).

@@ -16,7 +16,6 @@ import path from 'node:path'
 import { spawn as nodeSpawn, execFileSync } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { plan as canonicalPlan, node as canonicalNode, criterion } from './helpers/canonical-fixtures.mjs'
-import { texAvailable } from './helpers/toolchain.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
@@ -516,29 +515,18 @@ assert.ok(guardRecord.errors[0].includes('fragment'), JSON.stringify(guardRecord
 {
   const assemblyText = '\\documentclass{article}\n\\usepackage{amsmath,amssymb}\n\\newcommand{\\R}{\\mathbb{R}}\n\\begin{document}\nThe reals are $\\R$ and $x^2$ is quadratic.\n\\end{document}\n'
   await fs.writeFile(path.join(assemblyRunDirAbs, 'output.tex'), assemblyText)
-  if (texAvailable) {
-    const result = await recordAcceptance.execute({
-      runDir: assemblyRunDir,
-      criteria: [{ id: 'ASM-01', result: 'PASS' }],
-    }, exec)
-    assert.equal(result.ok, true, 'standalone acceptance must pass despite an empty declared list (scanner is the source of truth)')
-    assert.equal(result.receipt.overall, 'PASS')
-    assert.ok(Array.isArray(result.receipt.derivedDeclared?.packages), 'receipt must carry derivedDeclared')
-    assert.ok(result.receipt.derivedDeclared.packages.includes('amsmath'), JSON.stringify(result.receipt.derivedDeclared))
-    assert.ok(result.receipt.derivedDeclared.macros.includes('R'), JSON.stringify(result.receipt.derivedDeclared))
-    assert.ok(result.receipt.warnings.length >= 2, 'receipt must record drift warnings: ' + JSON.stringify(result.receipt.warnings))
-    const onDisk = JSON.parse(await fs.readFile(path.join(assemblyRunDirAbs, 'acceptance.json'), 'utf8'))
-    assert.ok(onDisk.derivedDeclared && Array.isArray(onDisk.warnings), 'acceptance.json must persist derivedDeclared + warnings')
-  } else {
-    // Without a compiler, strict validation cannot pass; the failure must be
-    // the explicit subprocess-unavailable error, never a silent pass.
-    let error = null
-    try {
-      await recordAcceptance.execute({ runDir: assemblyRunDir, criteria: [{ id: 'ASM-01', result: 'PASS' }] }, exec)
-    } catch (e) { error = e }
-    assert.ok(error, 'acceptance must not pass without a compiler')
-    assert.ok(String(error.message).includes('Strict TeX validation failed before acceptance'), String(error.message))
-  }
+  const result = await recordAcceptance.execute({
+    runDir: assemblyRunDir,
+    criteria: [{ id: 'ASM-01', result: 'PASS' }],
+  }, exec)
+  assert.equal(result.ok, true, 'standalone acceptance must pass despite an empty declared list (scanner is the source of truth)')
+  assert.equal(result.receipt.overall, 'PASS')
+  assert.ok(Array.isArray(result.receipt.derivedDeclared?.packages), 'receipt must carry derivedDeclared')
+  assert.ok(result.receipt.derivedDeclared.packages.includes('amsmath'), JSON.stringify(result.receipt.derivedDeclared))
+  assert.ok(result.receipt.derivedDeclared.macros.includes('R'), JSON.stringify(result.receipt.derivedDeclared))
+  assert.ok(result.receipt.warnings.length >= 2, 'receipt must record drift warnings: ' + JSON.stringify(result.receipt.warnings))
+  const onDisk = JSON.parse(await fs.readFile(path.join(assemblyRunDirAbs, 'acceptance.json'), 'utf8'))
+  assert.ok(onDisk.derivedDeclared && Array.isArray(onDisk.warnings), 'acceptance.json must persist derivedDeclared + warnings')
 }
 
 // ── 8f. record_acceptance success: markdown node (no TeX) ────────────────
@@ -580,7 +568,7 @@ assert.ok(guardRecord.errors[0].includes('fragment'), JSON.stringify(guardRecord
   assert.equal(record.labelCheck.degraded, null)
   assert.deepEqual(record.labelCheck.warnings, [])
   assert.ok(record.wordCount > 0, 'word count must include the assembled fragment')
-  if (texAvailable) assert.equal(record.ok, true, JSON.stringify(record.staticErrors))
+  assert.equal(record.ok, true, JSON.stringify(record.staticErrors))
 
   // ── 8g-i. texcount unavailable → assembled word-count fallback ─────────
   failNames.add('texcount')
