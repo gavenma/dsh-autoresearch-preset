@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation 19bb7ce68e6c. Source: src/linear.mjs.
-import * as autoresearchCore from "./autoresearch-core-19bb7ce68e6c.mjs"
+// AUTO-GENERATED Linear entry, generation 56cc1b1b1353. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-56cc1b1b1353.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -1224,8 +1224,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = '19bb7ce68e6c'
-export const EMBEDDED_BUILD_ID = '9474975336c563aa7711985ad967f6a2102acc3771225b9faffbad3022097897'
+export const EMBEDDED_GENERATION = '56cc1b1b1353'
+export const EMBEDDED_BUILD_ID = 'f89e3591559c154726c8ece17f50434b5fd573ed3534344937f53fe262c29145'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
@@ -1330,6 +1330,7 @@ const LINEAR_PLUGIN = {
     const subprocess = ctx.get('subprocess')
     const credentials = ctx.get('credentials')
     const fs = ctx.get('fs')
+    const sandboxPolicy = ctx.get('sandboxPolicy')
 
     function assertCallingAgent(exec) {
       if (exec?.agent === undefined) throw new Error('This tool requires a calling agent.')
@@ -1380,15 +1381,27 @@ const LINEAR_PLUGIN = {
       return parsed
     }
 
-    function makeFops(baseDir) {
+    function makeFops(baseDir, exec) {
       if (fs === undefined) return null
       async function targetOf(p) {
         return await fs.resolve(p, { cwd: pathutil.normalize(baseDir) })
       }
+      // Shared with the orchestrator facet through the core: one policy seam,
+      // no second implementation to drift.
+      const checkedMutationPath = autoresearchCore.makeMutationGate({ fs, sandboxPolicy, pathutil, baseDir, exec })
       return {
         readJson: async (p) => {
+          let text
           try {
-            return JSON.parse(await fs.readText(await targetOf(p)))
+            text = await fs.readText(await targetOf(p))
+          } catch (error) {
+            // Absent keeps the long-standing "no record" answer; a refusal or
+            // transport fault propagates instead of masquerading as absent.
+            if (error?.code === 'FS_NOT_FOUND' || error?.code === 'ENOENT') return undefined
+            throw error
+          }
+          try {
+            return JSON.parse(text)
           } catch {
             return undefined
           }
@@ -1397,20 +1410,36 @@ const LINEAR_PLUGIN = {
         listDir: async (p) => {
           try {
             return (await fs.listDir(await targetOf(p))).map((entry) => ({ name: entry.name, dir: entry.type === 'directory' }))
-          } catch { return [] }
+          } catch (error) {
+            // A directory that is absent, or whose parent is not a directory, simply
+            // has no entries. Any other failure (a sandbox denial, an I/O fault)
+            // still propagates: swallowing those is what hid refusals.
+            if (error?.code === 'FS_NOT_FOUND' || error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'FS_NOT_DIRECTORY') return []
+            throw error
+          }
         },
         statInfo: async (p) => await fs.stat(await targetOf(p)),
         writeJson: async (p, value, expected) => await fs.writeText(await targetOf(p), JSON.stringify(value, null, 2) + '\n', expected),
         ensureDir: async (p) => {
           if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot create Linear sync directory')
+          const target = await checkedMutationPath(p)
           const mkdir = await subprocess.resolveExecutable('/bin/mkdir')
-          const target = typeof fs.processPath === 'function' ? await fs.processPath(await targetOf(p)) : pathutil.normalize(p)
           const result = await runSubprocess(subprocess, baseDir, [mkdir, '-p', target])
           if (result.exitCode !== 0) throw new Error('mkdir failed for ' + target + ': ' + result.stderr.slice(-400))
         },
         remove: async (p) => {
-          if (typeof fs.remove !== 'function') throw new Error('REMOVE_UNAVAILABLE')
-          return await fs.remove(await targetOf(p))
+          // The `fs` service Definition exposes no remove operation (0.1.5
+          // FileSystem: resolve/stat/lstat/read*/writeText/editText/listDir —
+          // no remove), and the sandboxed backend does not add one. A backend
+          // that DOES offer the primitive is preferred; otherwise deletion goes
+          // through the subprocess path, and either way the sandbox policy is
+          // consulted first.
+          const target = await checkedMutationPath(p)
+          if (typeof fs.remove === 'function') return await fs.remove(await targetOf(p))
+          if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot remove ' + String(p))
+          const rm = await subprocess.resolveExecutable('/bin/rm')
+          const result = await runSubprocess(subprocess, baseDir, [rm, '-f', target])
+          if (result.exitCode !== 0) throw new Error('rm failed for ' + target + ': ' + result.stderr.slice(-400))
         },
       }
     }
@@ -1504,21 +1533,24 @@ const LINEAR_PLUGIN = {
 
     // The ONE tool-schema boundary (shared with the orchestrator): every
     // tool's parameter schema is generated from autoresearch-core
-    // (plan §4.2 / §6.5); no transport-specific hand copy may diverge.
+    // (plan §4.2 / §6.5); no transport-specific hand copy may diverge, and a
+    // tool whose name has no generated schema is a build error rather than an
+    // unrestricted open parameter surface.
     const GENERATED_TOOL_SCHEMAS = autoresearchCore.generateToolSchemas()
     function tool(name, description, paramsSchema, executor) {
       const generated = GENERATED_TOOL_SCHEMAS[name]
-      if (paramsSchema != null && generated !== undefined) {
-        if (JSON.stringify(generated) !== JSON.stringify(paramsSchema)) {
-          throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core.')
-        }
+      if (generated === undefined) {
+        throw new Error('Tool schema missing for ' + name + ': every tool parameter schema must be generated from autoresearch-core. Add the definition to the core; do not hand-write a transport schema.')
+      }
+      if (paramsSchema != null && !autoresearchCore.jsonDeepEqual(generated, paramsSchema)) {
+        throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core.')
       }
       registerTool({
         name,
         description,
-        parameters: generated ?? paramsSchema ?? { type: 'object', additionalProperties: true },
+        parameters: generated,
         output: {
-          schema: { type: 'object', additionalProperties: true },
+          schema: { oneOf: [{ type: 'object' }, { type: 'string' }] },
           render(_args, value) {
             const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
             return [{ type: 'text', text }]
@@ -1580,7 +1612,7 @@ const LINEAR_PLUGIN = {
     tool('linear_sync_enqueue', 'Coordinator-only: append a local digest-chained event and durable outbox record before projecting a Linear mutation.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       if (!linearCore.isSupportedOutboxOperation(args.operation)) throw new Error('unsupported outbox operation: ' + args.operation)
       const root = linearCore.syncRoot(baseDir, args.projectId)
@@ -1602,7 +1634,7 @@ const LINEAR_PLUGIN = {
 
     tool('linear_sync_plan_relations', 'Coordinator-only: project the approved dependency DAG as WAL-backed Linear blocks relations.', null, async (args, exec) => {
       assertCoordinator(exec)
-      const baseDir = baseDirOf(exec, args); const fops = makeFops(baseDir)
+      const baseDir = baseDirOf(exec, args); const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       const relations = linearCore.deriveDependencyRelations(args.plan, args.issueByNode); const results = []
       for (const relation of relations) {
@@ -1629,7 +1661,7 @@ const LINEAR_PLUGIN = {
       assertCoordinator(exec)
       if (!['todo', 'in_progress', 'done', 'blocked', 'retry'].includes(args.status)) throw new Error('unsupported node projection status: ' + args.status)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       const payload = { issueId: args.issueId, stateId: args.stateId, blockedLabelId: args.blockedLabelId, status: args.status, blockedBy: [...new Set(args.blockedBy ?? [])].sort(), reason: args.reason ?? '', contextDigest: typeof args.contextDigest === 'string' ? args.contextDigest : '' }
       const root = linearCore.syncRoot(baseDir, args.projectId)
@@ -1715,7 +1747,7 @@ const LINEAR_PLUGIN = {
     tool('linear_sync_reconcile', 'Coordinator-only: replay pending Linear outbox mutations with bounded read-back and durable retry/confirmation receipts.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot reconcile Linear WAL')
       const records = await linearCore.listOutboxRecords(fops, baseDir, args.projectId, args)
       const maxAttempts = Number.isInteger(args.maxAttempts) && args.maxAttempts > 0 ? Math.min(args.maxAttempts, 10) : 3
@@ -1923,7 +1955,7 @@ const LINEAR_PLUGIN = {
     tool('linear_create_relation', 'Coordinator-only: create one directed Linear issue relation after enqueueing the matching local WAL mutation.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       const payload = { issueId: args.issueId, relatedIssueId: args.relatedIssueId, type: args.type }
       const root = linearCore.syncRoot(baseDir, args.projectId)
@@ -1954,7 +1986,7 @@ const LINEAR_PLUGIN = {
     tool('linear_update_labels', 'Coordinator-only: update labels by preserving current IDs and applying explicit additions/removals.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       const payload = { issueId: args.id, labelIds: linearCore.mergeLabelIds(args.currentLabels, args.addIds, args.removeIds), addIds: [...new Set(args.addIds ?? [])], removeIds: [...new Set(args.removeIds ?? [])] }
       const root = linearCore.syncRoot(baseDir, args.projectId)
@@ -2081,7 +2113,7 @@ const LINEAR_PLUGIN = {
       const nodeId = String(args.nodeId ?? '').trim() || (contextBlock.ok ? contextBlock.state.nodeId : '') || (specBlock?.nodeId ?? '')
       const comments = await linearCore.listComments(issueId, (request) => transport(request, exec, baseDir), { maxPages: 20 })
       const relations = await linearCore.listIssueRelations(issueId, (request) => transport(request, exec, baseDir), { maxPages: 10 })
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const evidenceStatus = contextBlock.ok ? await checkEvidenceRefs(fops, baseDir, contextBlock.state.evidenceRefs) : []
       const drift = []
       if (contextBlock.ok && String(snapshot.state?.type ?? snapshot.state?.name ?? '').toLowerCase() === 'completed' && contextBlock.state.status !== 'done') {
@@ -2122,7 +2154,7 @@ const LINEAR_PLUGIN = {
       if (!issueId || !projectId || !nodeId) throw new Error('issueId, projectId, and nodeId are required')
       if (!args.state || typeof args.state !== 'object' || Array.isArray(args.state)) throw new Error('state (the owned node context object) is required')
       const expectedContextDigest = typeof args.expectedContextDigest === 'string' ? args.expectedContextDigest.trim() : ''
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear recovery cache/WAL')
       // 1. Read the latest issue.
       const snapshot = await requireIssueSnapshot(exec, baseDir, issueId)
@@ -2209,7 +2241,7 @@ const LINEAR_PLUGIN = {
       if (!issueId || !projectId || !nodeId) throw new Error('issueId, projectId, and nodeId are required')
       const event = autoresearchCore.makeEvidenceEvent({ projectId, nodeId, type: args.type, summary: args.summary, evidence: args.evidence, completes: args.completes, finding: args.finding, source: args.source, requiredChange: args.requiredChange, at: args.at })
       const comment = autoresearchCore.renderEvidenceComment(event)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (!fops) throw new Error('fs service unavailable; cannot persist Linear WAL')
       const payload = { issueId, body: comment.body, idempotencyMarker: comment.marker }
       const root = linearCore.syncRoot(baseDir, projectId)
@@ -2259,7 +2291,7 @@ const LINEAR_PLUGIN = {
     tool('linear_create_issue', "Create or reconcile one Linear issue for an approved plan node. The generated specification block is rendered from the approved plan (node contract digest, kind, artifact format, roles, budget, plan revision) — never from caller prose; user-authored text outside the block is preserved. Replaying synchronizes only the generated block and appends one idempotent scope note per plan revision. The node marker embeds the stable AutoResearch project id. Auto-approved by default; set linear.approval: 'ask' to require approval prompts.", null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = baseDirOf(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       let description = args.description
       let block = null
       let scopeNote = ''

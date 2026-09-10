@@ -127,9 +127,16 @@ const base = {
   const fops = makeMemoryFops()
   const events = []
   let followups = 0
+  // 0.1.5 Session contract: a `seq` high-water mark plus `snapshotEvents(from)`,
+  // not the removed `session.events` array.
+  const session = {
+    events,
+    get seq() { return events.length },
+    snapshotEvents(fromSeq = 0) { return events.slice(fromSeq) },
+  }
   const localAgent = {
     options: { provider: 'acme', model: 'alpha' },
-    session: { events },
+    session,
     followup(message) {
       assert.equal(message.role, 'user')
       followups += 1
@@ -167,9 +174,14 @@ const base = {
 {
   const fops = makeMemoryFops()
   const events = []
+  const session = {
+    events,
+    get seq() { return events.length },
+    snapshotEvents(fromSeq = 0) { return events.slice(fromSeq) },
+  }
   const localAgent = {
     options: { provider: 'acme', model: 'alpha' },
-    session: { events },
+    session,
     followup() {
       events.push({ type: 'turn/end', data: { reason: { kind: 'max-tokens' } } })
     },
@@ -977,7 +989,9 @@ const base = {
 {
   const profiles = createLibraries.profiles
   const core = createLibraries.core
-  const BROAD = [...core.BROAD_BASELINE]
+  // The attested grant is the broad baseline plus the capability-driven
+  // read_image add-on, which every role now declares.
+  const BROAD = [...core.BROAD_BASELINE, 'read_image']
   const WORKSPACE = '/workspace/role-runner'
   const freshReceipt = () => ({
     kind: 'confinement-attestation',
@@ -1032,7 +1046,7 @@ const base = {
   const scoutAttested = profiles.resolveEffectiveProfile('research_scout', {}, { attestation: freshReceipt(), workspace: WORKSPACE })
   assert.deepEqual([...scoutAttested.tools].sort(), [...BROAD, 'web_search'].sort())
   const scoutUnattested = profiles.resolveEffectiveProfile('research_scout', {}, { attestation: null, workspace: WORKSPACE })
-  assert.deepEqual([...scoutUnattested.tools].sort(), ['read', 'web_search'])
+  assert.deepEqual([...scoutUnattested.tools].sort(), ['read', 'read_image', 'web_search'])
 
   // 7. Config may still narrow within the raised ceiling.
   const narrowed = profiles.resolveEffectiveProfile('research_coder', { roleProfiles: { research_coder: { tools: ['read', 'bash'] } } }, { attestation: freshReceipt(), workspace: WORKSPACE })
@@ -1078,7 +1092,7 @@ const base = {
     const runDir = 'dispatch-run'
     await fs.mkdir(path.join(dispatchBaseDir, runDir, 'capability'), { recursive: true })
     const receiptPath = path.join(dispatchBaseDir, runDir, 'capability', 'confinement-attestation.json')
-    const BROAD = [...createLibraries.core.BROAD_BASELINE].sort()
+    const BROAD = [...createLibraries.core.BROAD_BASELINE, 'read_image'].sort()
     const CODER_NARROW = [...createLibraries.core.ROLE_MANIFEST.research_coder.defaultTools].sort()
     const args = { baseDir: dispatchBaseDir, role: 'research_coder', task: 'Implement the node.', runDir }
 

@@ -90,13 +90,13 @@ const { default: orchestrator } = await import(pathToFileURL(path.join(root, man
 
   // Unattested: exactly today's narrow behavior, flagged.
   const coderNarrow = grant('research_coder', null, null)
-  assert.deepEqual(coderNarrow.tools, ['read', 'write', 'edit', 'bash'], 'unattested coder keeps the current defaults')
+  assert.deepEqual(coderNarrow.tools, ['read', 'read_image', 'write', 'edit', 'bash'], 'unattested coder keeps the current defaults (read_image is granted to every role)')
   assert.equal(coderNarrow.gated, false)
   assert.equal(coderNarrow.confinement, 'confinement-unattested')
 
   // Attested: broad baseline.
   const coderBroad = grant('research_coder', null, freshAttestation())
-  assert.deepEqual(coderBroad.tools, ['read', 'grep', 'glob', 'bash', 'write', 'edit'], 'attested coder gets the broad baseline')
+  assert.deepEqual(coderBroad.tools, ['read', 'grep', 'glob', 'bash', 'write', 'edit', 'read_image'], 'attested coder gets the broad baseline plus the capability-driven read_image add-on')
   assert.equal(coderBroad.gated, true)
   assert.equal(coderBroad.confinement, 'attested')
 
@@ -120,7 +120,7 @@ const { default: orchestrator } = await import(pathToFileURL(path.join(root, man
   const stale = freshAttestation()
   stale.probedAt = new Date(Date.now() - 7200000).toISOString()
   const coderStale = grant('research_coder', null, stale)
-  assert.deepEqual(coderStale.tools, ['read', 'write', 'edit', 'bash'])
+  assert.deepEqual(coderStale.tools, ['read', 'read_image', 'write', 'edit', 'bash'])
   assert.equal(coderStale.confinement, 'attestation-invalid')
 
   // Workspace mismatch fails closed.
@@ -143,7 +143,7 @@ const { default: orchestrator } = await import(pathToFileURL(path.join(root, man
   const narrowed = grant('research_coder', null, freshAttestation(), { tools: ['read'] })
   assert.deepEqual(narrowed.tools, ['read'])
   assert.equal(narrowed.narrowed, true)
-  assert.deepEqual(narrowed.ceiling, ['read', 'grep', 'glob', 'bash', 'write', 'edit'])
+  assert.deepEqual(narrowed.ceiling, ['read', 'grep', 'glob', 'bash', 'write', 'edit', 'read_image'])
   assert.throws(() => grant('research_coder', null, freshAttestation(), { tools: ['read', 'web_search'] }), /exceed the ceiling/)
 
   // The narrow-path ceiling is unchanged when unattested.

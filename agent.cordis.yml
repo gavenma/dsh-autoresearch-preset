@@ -24,14 +24,15 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
-      You are a research coordinator powered by the {{model}} model, running the AutoResearch mode on the DeepSeek Harness. Your working directory is {{cwd}}.
+    prefix: >-
+      You are a research coordinator powered by the {{model}} model, running the AutoResearch mode on the DeepSeek Harness. 
 
-      You orchestrate evidence-grounded research through AutoResearch Project Mode. Planning may use either the standard vague-brief skill or the outline-led planning skill; both must produce an approved canonical plan DAG (kind-tagged, no schemaVersion, object acceptance criteria) and then share the same execution: plan-mode approval, one Linear issue per node, one independent AutoReason loop per node in dependency order, then merge and re-verify all leaf finals in an integration loop before the project final. Fresh role subagents with narrow tool-name allowlists (scout/verifier/author/critic/synthesizer/judge/reporter) flow through an AutoReason A/B/AB refinement loop with blind Borda judging. Internal artifacts under the single runtime root .research-agent hold the immutable plan authority and operational receipts; only completed user-facing deliverables are published under outputs/<projectId>/. A bare research-agent/ directory is a migration input, never a runtime alternative — if the runtime refuses the workspace for it, point the user at scripts/migrate-workspace.mjs. Keep your context thin and checkpoint after every promoted artifact. Roles run through autoresearch_run_role; never hand them your own tools. Before dispatching a run, run autoresearch_dependency_preflight once per project (pass runDir once runs exist) and surface every blocker with its remediation; role tooling stays on narrow profiles because autoresearch_capability_probe is coordinator-adapter diagnostics and cannot attest the unavailable role-child preventive boundary. Never fabricate sources, and redact-check output before posting. plan.json is the immutable approved DAG and contract authority; state.json is the operational receipt journal (digests, ids, statuses — never a narrative context copy); in Linear mode, the issue's Current Node Context is authoritative current-work context, while Linear must never rewrite plan.json. Linear-backed nodes keep their narrative Current Node Context block in the issue description itself; before claim/complete/reopen, read it with linear_get_node_context and carry the fresh contextDigest — a stale digest is refused. User feedback after publication: autoresearch_submit_feedback records the hash-addressed intake (userAuthority computed against the last-known-good integration), autoresearch_record_feedback_triage derives the smallest responsible reopen closure, autoresearch_revision_request executes the multi-target causal reopen, and autoresearch_close_feedback verifies the repair against the current last-known-good before recording the resolved version and republish event.
+      You orchestrate evidence-grounded research through AutoResearch Project Mode. Planning may use either the standard vague-brief skill or the outline-led planning skill; both must produce an approved canonical plan DAG (kind-tagged, no schemaVersion, object acceptance criteria) and then share the same execution: plan-mode approval, one Linear issue per node, one independent AutoReason loop per node in dependency order, then merge and re-verify all leaf finals in an integration loop before the project final. Fresh role subagents, each on its own narrow tool-name allowlist, flow through an AutoReason A/B/AB refinement loop with blind Borda judging. Internal artifacts under the single runtime root .research-agent hold the immutable plan authority and operational receipts; only completed user-facing deliverables are published under outputs/<projectId>/. A bare research-agent/ directory is a migration input, never a runtime alternative — if the runtime refuses the workspace for it, point the user at scripts/migrate-workspace.mjs in the preset's SOURCE checkout (the installed runtime ships no scripts/). Keep your context thin and checkpoint after every promoted artifact. Roles run through autoresearch_run_role; never hand them your own tools. Before dispatching a run, run autoresearch_dependency_preflight once per project (pass runDir once runs exist) and surface every blocker with its remediation; role tooling stays on narrow profiles because autoresearch_capability_probe is coordinator-adapter diagnostics and cannot attest the unavailable role-child preventive boundary. Never fabricate sources, and redact-check output before posting. plan.json is the immutable approved DAG and contract authority; state.json is the operational receipt journal (digests, ids, statuses — never a narrative context copy); in Linear mode, the issue's Current Node Context is authoritative current-work context, while Linear must never rewrite plan.json. Linear-backed nodes keep their narrative Current Node Context block in the issue description itself; before claim/complete/reopen, read it with linear_get_node_context and carry the fresh contextDigest — a stale digest is refused. User feedback after publication: autoresearch_submit_feedback records the hash-addressed intake (userAuthority computed against the last-known-good integration), autoresearch_record_feedback_triage derives the smallest responsible reopen closure, autoresearch_revision_request executes the multi-target causal reopen, and autoresearch_close_feedback verifies the repair against the current last-known-good before recording the resolved version and republish event.
 
       Approval authority: before any change in these classes — plan — STOP and return a structured approval request (paths, diff summary, reason, affected criteria, rollback plan). The path/operation guard is a post-attempt mutation audit, not a read or egress sandbox; this instruction grants nothing.
 
       Bash sandbox discipline: on ordinary Bash calls, omit sandbox_permissions and justification entirely. Supply those fields only when retrying the exact command after a sandbox denial, using a strictly wider mode and a non-empty one-sentence justification. Never request escalation speculatively.
+    suffix: Your working directory is {{cwd}}.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
@@ -97,12 +98,24 @@
 
 # ── goals ───────────────────────────────────────────────────────────────────
 
-# Only the model-facing tool. The goal SERVICE, its session driver, and the
-# `/goal` command stay on the host plane: the Gateway serves the goal domain as
-# Remote endpoints whose receiver comes from a generated descriptor, so it
-# resolves `goals` on the host and an entry-local realm here would hide it. The
-# registry is keyed by session anyway, so one host instance serves every
-# session. What a preset chooses is whether its agent can call the goal tool.
+# The goal SERVICE and its session driver stay on the host plane: the Gateway
+# serves the goal domain as Remote endpoints whose receiver comes from a
+# generated descriptor, so it resolves `goals` on the host and an entry-local
+# realm here would hide it. The registry is keyed by session anyway, so one host
+# instance serves every session. What a preset chooses is the two model- and
+# human-facing surfaces: the tool an agent calls, and the command a human types.
+#
+# BOTH rows are required here. The `web` profile deliberately DISABLES the
+# host-plane `command-goal`/`tool-goal` rows (`dsh-web-app/cordis.patch.yml`,
+# "Presets own the human command and model-facing tool"), so in a web session a
+# preset that declares only `tool-goal` leaves `/goal` unregistered and the
+# GoalBar surface unreachable. `standard` declares both rows for exactly this
+# reason. A non-web profile that keeps the base rows enabled still composes:
+# this row registers into the preset's own command layer, which shadows rather
+# than collides.
+- id: command-goal
+  name: '@deepseek-ai/dsh-command-goal'
+
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
 
@@ -153,6 +166,15 @@
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
       config:
+        # Deliberate deployment routing, NOT copied boilerplate. The package
+        # defaults are threshold 0.8 / retain 0.16; every entry below is a
+        # measured override for a route this deployment actually serves, and
+        # the two local routes additionally cap summarization output.
+        #
+        # Cost of a stale entry is bounded, which is why these stay: a policy
+        # whose provider/model is renamed simply stops matching and that route
+        # falls back to the package default, while an entry for a route nobody
+        # runs is inert. If you retire a route, delete its entry here too.
         modelPolicies:
           - provider: deepseek-official
             model: deepseek-v4-flash
@@ -211,15 +233,26 @@
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
+    # `modelSelectionSettings: true` is what exposes the provider/model/
+    # reasoning_effort fields on this tool. It is an opt-in: without it the row
+    # registers a tool with no route arguments, so the host's
+    # `subagent-model-selection` settings (allowedModels, enabled) stay inert
+    # for every child this preset starts. Enabling it requires the host-scope
+    # `@deepseek-ai/dsh-tool-subagent/model-selection-settings` row, which the
+    # `web` profile mounts.
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
+        modelSelectionSettings: true
         backgroundMode: continuable
         toolFilter:
           deny: [ ask_user_question ]
 
+    # Fork deliberately omits `modelSelectionSettings`: the child inherits the
+    # parent route so the copied history stays eligible for KV-cache reuse, and
+    # a route override would forfeit that.
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
@@ -274,24 +307,43 @@
   config:
     allowParallelInProgress: true
 
-# The `web` service and search provider stay on the host plane. AutoResearch
-# also needs a concrete fetch provider for `autoresearch_presearch` direct mode;
-# register the official anonymous HTTP(S) provider once with this standing
-# preset mount. Keep the model-facing `web_fetch` tool disabled: the
-# coordinator's audited presearch path owns full-page retrieval.
-- id: web-fetch-http
-  name: ./tools/research-web-fetch.mjs
-  config:
-    maxUrlLength: 2048
-    maxResponseBytes: 5000000
-    maxBodyChars: 100000
-    timeoutMs: 30000
-    maxRedirects: 5
+# The 0.1.5 delivered-file surface. `present` declares files that already exist
+# under `outputs/<projectId>/` as final deliverables, appending
+# `deliverables/presented` to the session log that the Sidebar preview and the
+# "open in" flow read. It registers a tool and provides nothing, so it needs no
+# realm; it injects the host `tools`/`fs`/`sessionProjections` services.
+#
+# This row is NOT optional for this preset. Only the preset mounts it (the base
+# bundle does not), so without it the one artifact class this mode exists to
+# produce — completed user-facing deliverables — never reaches the handler the
+# user reads the run through.
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'
 
+# The standard web tools, mounted as the preset's DEFAULT way to reach the
+# internet: `web_search` for discovery and `web_fetch` for ordinary pages.
+# Standard-first is the policy — the host provider owns the deployment's
+# address safety, proxy routing, and content decoding, so nothing here should
+# re-implement an ordinary fetch.
+#
+# The `web` service, its search provider, AND its fetch provider all stay on
+# the host plane. 0.1.5's base bundle mounts `@deepseek-ai/dsh-web-fetch-http`
+# (provider id `http`) for every profile, and `web.fetch()` — like this
+# preset's own dependency preflight — resolves that capability by requiring
+# EXACTLY ONE usable provider: two registered providers raise
+# `WEB_PROVIDER_AMBIGUOUS`, and the preflight reports a blocker the operator
+# cannot clear from the workspace. This preset therefore mounts NO fetch
+# provider; `./tools/research-web-fetch.mjs` remains as the optional row for a
+# deployment whose host mounts none.
+#
+# `web_fetch` cannot return a PDF or another unsupported content type: the
+# host provider's body union is a closed `html | text`. For those the
+# coordinator falls back to `autoresearch_fetch_source`, which extracts PDF
+# text directly. Ordinary retrieval never needs it.
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   config:
-    fetch: false
+    fetch: true
     searchTimeoutMs: 60000
 
 # ── AutoResearch: the research orchestrator + Linear intake tools ──────────
@@ -299,8 +351,8 @@
 # Both rows consume host services only (fs/web/subagents/agents/credentials/
 # subprocess) and publish nothing, so they need no isolate realm.
 - id: tool-autoresearch
-  name: ./tools/research-orchestrator-19bb7ce68e6c.mjs
+  name: ./tools/research-orchestrator-56cc1b1b1353.mjs
 
 - id: tool-linear
-  name: ./tools/linear-19bb7ce68e6c.mjs
+  name: ./tools/linear-56cc1b1b1353.mjs
 

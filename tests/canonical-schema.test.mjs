@@ -255,8 +255,8 @@ assert.equal(core.detectLegacyShape(validCanonical), null, 'canonical plans have
   // linear_post_evidence_event; plan §7.3-7.6) + 3 Phase 5 feedback tools
   // (autoresearch_submit_feedback, autoresearch_record_feedback_triage,
   // autoresearch_close_feedback; plan §8.1/§8.2/§8.4).
-  assert.equal(registered.size, 61, 'all 61 model tools are registered')
-  assert.equal(Object.keys(generatedSchemas).length, 61, 'the generated boundary covers all 61 tools')
+  assert.equal(registered.size, 62, 'all 62 model tools are registered')
+  assert.equal(Object.keys(generatedSchemas).length, 62, 'the generated boundary covers all 62 tools')
   for (const [name, definition] of registered) {
     assert.ok(generatedSchemas[name] !== undefined, 'generated schema exists for ' + name)
     assert.deepEqual(definition.parameters, generatedSchemas[name], 'tool ' + name + ' parameter schema equals the generated schema')

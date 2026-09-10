@@ -50,6 +50,29 @@ The workspace `.research-agent/` directory is the single runtime artifact root f
   node(s) and the transitive downstream closure in one state transaction,
   projecting causal holds to Linear. It never rewrites the approved DAG, so
   integration cannot accept stale downstream artifacts.
+- **Figures and page images.** Call `autoresearch_fetch_source` with
+  `renderPages` (the page numbers whose figures matter) alongside the text
+  fetch: each page is rasterized to a PNG under `evidence/pages/` and returned
+  in `pageImages.paths`. Then call `read_image` on those paths to actually see
+  the diagram — a path in your context is not a seen figure. Text extraction
+  and page images answer different questions, so keep both: text for quotable
+  prose and citation, images for anything whose meaning is spatial.
+  Whether a ROLE can read the image depends on its route: roles whose model
+  accepts image input receive `read_image`; a role on a text-only route does
+  not, and its figure must travel as extracted text instead. Check
+  `autoresearch_get_role_profile` before promising a figure to a role.
+- **Source retrieval — standard tools first.** Reach the internet with the
+  standard `web_search` (discovery) and `web_fetch` (ordinary pages). Call
+  `autoresearch_fetch_source` only for what `web_fetch` cannot return: a PDF,
+  or another resource whose body kind it refuses. It tries the standard web
+  service first and falls back to direct retrieval with text extraction.
+  Nothing restricts WHICH sites count as sources — an arXiv preprint, a
+  project blog, a dataset card, or vendor documentation are all legitimate;
+  judge a source by relevance and citability, not by its domain. Persist every
+  source you rely on through `autoresearch_presearch` (`fetches[]`) so it
+  becomes an auditable packet under `evidence/sources/`; `web_search` /
+  `web_fetch` results quoted without that step have no packet and cannot back
+  an acceptance claim.
 
 ## Prerequisites
 
@@ -85,7 +108,9 @@ AutoResearch owns one canonical, unversioned record family. Every record is
 identified by a `kind` tag; `kind` is a record type, and no record carries
 version or policy markers of any kind. There is also no runtime reader for
 older shapes: a non-canonical plan fails validation with exactly one error
-(`not canonical; run scripts/migrate-workspace.mjs`) and execution stays
+(its message names the offline migrator, which ships in the preset's SOURCE
+checkout as `scripts/migrate-workspace.mjs`; the installed runtime carries no
+`scripts/` directory) and execution stays
 blocked until the offline migrator produces a proposed canonical revision and
 a human approves it. `autoresearch_migration_diagnostic` reports the
 closed-catalog legacy fingerprint of an old shape; it never rewrites the
@@ -233,11 +258,15 @@ description (machine-owned block); `state.json` stores only the
 
 - Roles run ONLY through `autoresearch_run_role` with per-role tool-name
   allowlists; the coordinator never hands roles its own tools.
-- The broad role baseline — `read`, `grep`, `glob`, `bash`, `write`, `edit`,
-  plus conditional `read_image` / `web_search` — remains disabled in this
-  preset because DSH does not expose a per-child preventive path/egress
-  adapter seam. `autoresearch_capability_probe` records coordinator-adapter
-  diagnostics only and cannot unlock broader child tooling.
+- Each role runs on its own narrow allowlist, and those narrow tools ARE
+  granted: `read` and `read_image` to EVERY role, `web_search` to
+  planner/scout, `bash` to unit_tester, `write`/`edit`/`bash` to coder. Only
+  the BROAD baseline (`grep`, `glob`, and the other tools outside a role's
+  declared ceiling) stays locked, because DSH does not expose a per-child
+  preventive path/egress adapter seam to this preset.
+  `autoresearch_capability_probe` records coordinator-adapter diagnostics only
+  and cannot unlock that broader child tooling; read the per-role truth with
+  `autoresearch_get_role_profile` rather than relying on this summary.
 - The path/operation guard is a post-attempt mutation audit. It fails an
   attempt that changed protected or out-of-scope files without a matching
   coordinator approval token, but it is not a read or egress sandbox. A role
@@ -308,20 +337,20 @@ hand-writes the plan.
 3. **Planning refinement loop (AutoReason-style, over the plan itself),** with
    the planning budget from `config.planning` (defaults `numJudges: 2,
    maxPasses: 2, convergenceThreshold: 2`). Planning artifacts live under
-   `.research-agent/planning/<projectId>/` with `pass_N/` canonical naming.
+   `.research-agent/planning/<projectId>/` with `pass_NN/` canonical naming.
    For each pass N up to `maxPasses`:
-   - Copy the incumbent plan → `pass_N/A.md`.
+   - Copy the incumbent plan → `pass_NN/A.md`.
    - `research_critic` critiques the plan as a plan (purpose per node, scope
      and length, mechanical acceptance/tests, dependency logic, budgets,
-     feasibility, panel fit) → `pass_N/critic.md`.
+     feasibility, panel fit) → `pass_NN/critic.md`.
    - `research_planner` produces plan B (a revision that addresses the
-     critique) → `pass_N/B.md`.
-   - `research_synthesizer` merges A + B → `pass_N/AB.md`.
+     critique) → `pass_NN/B.md`.
+   - `research_synthesizer` merges A + B → `pass_NN/AB.md`.
    - `autoresearch_anonymize_candidates` (runDir = planning dir, pass N) →
      parallel blind `research_judge` runs (`numJudges`): pass each judge the
      returned flat typed primitives, spawn exactly the returned judge count,
      and never re-derive references → `autoresearch_parse_ranking` per judge
-     → `autoresearch_score_borda` → write `pass_N/result.json`; update the
+     → `autoresearch_score_borda` → write `pass_NN/result.json`; update the
      incumbent and the consecutive-A-wins counter. Derive the anonymization
      judge count from the same planning budget every pass; the minimal
      planning `run.json` scaffold is created automatically when the planning
@@ -454,10 +483,10 @@ Do not spawn any role until the user confirms.
    `pass_00/A.<ext>` (`A.tex` for tex nodes, `A.md` for markdown); set the
    incumbent.
 4. For each pass N (up to the node's maxPasses):
-   - Copy incumbent → `pass_N/A.md`; checkpoint.
-   - `research_critic` → `pass_N/critic.md`.
-   - `research_author` (B) → `pass_N/B.md`.
-   - `research_synthesizer` → `pass_N/AB.md`.
+   - Copy incumbent → `pass_NN/A.md`; checkpoint.
+   - `research_critic` → `pass_NN/critic.md`.
+   - `research_author` (B) → `pass_NN/B.md`.
+   - `research_synthesizer` → `pass_NN/AB.md`.
    - `autoresearch_anonymize_candidates`; every packet is built in memory and
      scanned before any file is written — a Candidate/Report A/B/AB identity
      leak fails closed with zero dispatchable files. Pass the returned flat
@@ -466,10 +495,10 @@ Do not spawn any role until the user confirms.
      spawn, and a judge context digest mismatch fails with a field-specific
      error. Judges see only anonymized packets, never maps or original IDs.
      A missing judge panel fails closed — no silent local route.
-   - Parallel blind `research_judge` (numJudges) → `pass_N/judge_N.md`.
+   - Parallel blind `research_judge` (numJudges) → `pass_NN/judge_N.md`.
    - `autoresearch_parse_ranking` per judge → `autoresearch_score_borda`
      (records the tied set, configured priority, selected entry/index, and
-     fallback status) → write `pass_N/result.json`.
+     fallback status) → write `pass_NN/result.json`.
    - Parse critic and judge responses with `autoresearch_parse_attribution`.
      Preserve only a strict fenced block with its run-relative transcript
      path, SHA-256, pass, judge index, valid-ranking result, and shared task
@@ -567,7 +596,7 @@ finalize receipts are durable.
   `roles`. It ships with the preset (prompt `roles/research_planner.md`,
   planning budget in `config.planning`) — planning runs out of the box with
   no workspace configuration. Planning artifacts live under
-  `.research-agent/planning/<projectId>/` with `pass_N/` naming.
+  `.research-agent/planning/<projectId>/` with `pass_NN/` naming.
 
 ## Phase 3 — Integration & verification (provenance-constrained)
 
@@ -875,7 +904,8 @@ Never re-derive a ready set from Linear alone.
 - Plan invalid: fix and re-validate before any Linear side effect.
 - Non-canonical plan on disk: run `autoresearch_migration_diagnostic`
   (closed-catalog legacy fingerprint); execution stays blocked until the
-  offline migrator (`scripts/migrate-workspace.mjs`) proposes a canonical
+  offline migrator in the preset source checkout
+  (`scripts/migrate-workspace.mjs`) proposes a canonical
   revision and a human approves it. The migrator never silently rewrites an
   approved plan.
 - Drift (state/Linear/run mismatch): surface it; never auto-repair `plan.json`.
@@ -894,7 +924,7 @@ Never re-derive a ready set from Linear alone.
 - Comment cursor: repulling the same page twice appends nothing new.
 - Weak evidence: keep "Things Not Found"; do not invent sources.
 
-## Tool reference (61 tools — the complete surface)
+## Tool reference (62 tools — the complete surface)
 
 Only these names exist; do not invent or rename tools.
 
@@ -910,7 +940,8 @@ Only these names exist; do not invent or rename tools.
 - Judging: `autoresearch_anonymize_candidates`,
   `autoresearch_candidate_eligibility`, `autoresearch_parse_ranking`,
   `autoresearch_parse_attribution`, `autoresearch_score_borda`.
-- Evidence: `autoresearch_presearch`, `autoresearch_redact_check`.
+- Evidence: `autoresearch_presearch`, `autoresearch_redact_check`,
+  `autoresearch_fetch_source`.
 - Plan/state: `autoresearch_plan_validate`,
   `autoresearch_migration_diagnostic`, `autoresearch_node_transition`,
   `autoresearch_project_status`, `autoresearch_revision_request`,

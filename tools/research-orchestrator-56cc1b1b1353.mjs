@@ -1,5 +1,5 @@
-// AUTO-GENERATED orchestrator entry, generation 19bb7ce68e6c. Source: src/research-orchestrator.mjs.
-import * as core from "./autoresearch-core-19bb7ce68e6c.mjs"
+// AUTO-GENERATED orchestrator entry, generation 56cc1b1b1353. Source: src/research-orchestrator.mjs.
+import * as core from "./autoresearch-core-56cc1b1b1353.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -405,14 +405,14 @@ function makeConfig(pathutil, util) {
       '3. Spawn the initial author and write `pass_00/A.md`.',
       '',
       '## For each AutoReason pass',
-      '1. Copy the current incumbent to `pass_N/A.md`; checkpoint with `pass_N_critic`.',
-      '2. Spawn critic -> save `pass_N/critic.md`; checkpoint with `pass_N_author_b`. The critic is read-only: hand it the absolute resolved paths of the artifacts and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
-      '3. Spawn author B -> save `pass_N/B.md`; checkpoint with `pass_N_synthesis`.',
-      '4. Spawn synthesizer AB -> save `pass_N/AB.md`; checkpoint with `pass_N_judging`.',
+      '1. Copy the current incumbent to `pass_NN/A.md`; checkpoint with `pass_N_critic`.',
+      '2. Spawn critic -> save `pass_NN/critic.md`; checkpoint with `pass_N_author_b`. The critic is read-only: hand it the absolute resolved paths of the artifacts and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
+      '3. Spawn author B -> save `pass_NN/B.md`; checkpoint with `pass_N_synthesis`.',
+      '4. Spawn synthesizer AB -> save `pass_NN/AB.md`; checkpoint with `pass_N_judging`.',
       '5. Call `autoresearch_anonymize_candidates`; judges only see `judge_NN_candidates.md` (zero-based, zero-padded), never maps or original IDs; save judge prompts.',
       '6. Spawn blind judges -> save `pass_NN/judge_NN.md` (same zero-based zero-padded NN as the packet); checkpoint with `pass_NN_scoring` after all judges are saved. Each judge is read-only: hand it the absolute resolved packet paths and the pre-computed build/word-count evidence; it never compiles, counts, or writes.',
       '7. Parse rankings with `autoresearch_parse_ranking` and score with `autoresearch_score_borda`.',
-      '8. Save `pass_N/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`. When result.json carries `degraded: true` (unparseable or mis-mapped rankings, missing/duplicate labels, fewer than 2 candidates, all-tie, or fewer usable rankings than the quorum), the checkpoint mechanically forces the next action to the critic gate — spawn research_critic, no further judge spawns — per the result `degradedReasons`.',
+      '8. Save `pass_NN/result.json`, update `history.json`, then checkpoint the next pass or `final_reporting`. When result.json carries `degraded: true` (unparseable or mis-mapped rankings, missing/duplicate labels, fewer than 2 candidates, all-tie, or fewer usable rankings than the quorum), the checkpoint mechanically forces the next action to the critic gate — spawn research_critic, no further judge spawns — per the result `degradedReasons`.',
       '9. If winner is A, increment consecutive A wins; otherwise reset to 0 and set incumbent to B or AB.',
       `10. Stop when consecutive A wins >= ${cfg?.convergenceThreshold ?? D.convergenceThreshold} or pass >= ${cfg?.maxPasses ?? D.maxPasses}.`,
       '',
@@ -918,9 +918,11 @@ function makeScoring(pathutil, util, config) {
     if (duplicateLabels.length > 0) errors.push(`Duplicate labels: ${duplicateLabels.join(', ')}`)
     if (ranking.length !== labels.length) errors.push(`Expected ${labels.length} labels, found ${ranking.length}.`)
 
+    // `null`, never `undefined`: a tool result containing an undefined-valued
+    // key is rejected as lossless-JSON-invalid by the 0.1.5 tool registry.
     const originalRanking = anonymizedToOriginal
       ? ranking.map((label) => anonymizedToOriginal[label]).filter((value) => typeof value === 'string' && value.length > 0)
-      : undefined
+      : null
     if (anonymizedToOriginal && originalRanking && originalRanking.length !== ranking.length) {
       errors.push('Could not map all anonymized labels back to original candidate ids.')
     }
@@ -1739,7 +1741,21 @@ function makeRoleRunner(deps = {}) {
   }
 
   function readContinuationResult(localAgent, boundary, cancelled) {
-    const events = Array.isArray(localAgent?.session?.events) ? localAgent.session.events.slice(boundary) : []
+    // 0.1.5 exposes the session log through `snapshotEvents(fromSeq?)` /
+    // `ownEvents()` with `session.seq` as the high-water mark; the pre-0.1.5
+    // `session.events` array is gone. `boundary` is that sequence offset, so an
+    // unreadable session yields no events rather than the whole child log.
+    const session = localAgent?.session
+    let events = []
+    if (session !== undefined && session !== null) {
+      try {
+        if (typeof session.snapshotEvents === 'function') events = session.snapshotEvents(boundary) ?? []
+        else if (typeof session.ownEvents === 'function') events = session.ownEvents() ?? []
+      } catch {
+        events = []
+      }
+      if (!Array.isArray(events)) events = []
+    }
     const assistantEvents = events.filter((event) => event?.type === 'assistant/message' && Array.isArray(event.data?.message?.content))
     const output = assistantEvents.length > 0 ? assistantEvents[assistantEvents.length - 1].data.message.content : []
     const ends = events.filter((event) => event?.type === 'turn/end' && event.data?.reason?.kind)
@@ -2287,7 +2303,9 @@ function makeRoleRunner(deps = {}) {
         // Continue only text runs: structured capture is private to the original
         // provider driver and cannot be safely reconstructed here.
         if (result?.stopReason === 'max-tokens' && outputMode !== 'schema' && run.localAgent && typeof run.localAgent.followup === 'function' && typeof run.localAgent.whenIdle === 'function' && !combined.signal?.aborted) {
-          const boundary = Array.isArray(run.localAgent.session?.events) ? run.localAgent.session.events.length : 0
+          // The child's log position before the continuation turn: a sequence
+          // offset in 0.1.5 (`session.seq`), not an array index.
+          const boundary = Number.isSafeInteger(run.localAgent?.session?.seq) ? run.localAgent.session.seq : 0
           const abortContinuation = () => { void disposeActive() }
           if (combined.signal && typeof combined.signal.addEventListener === 'function') combined.signal.addEventListener('abort', abortContinuation, { once: true })
           try {
@@ -3157,6 +3175,8 @@ function makeLifecycle(pathutil, util, config, resume) {
     const runs = []
     const issueIds = issueId
       ? [issueId]
+      // A workspace that has never run a node has no runs root yet: absence is
+      // an ordinary state here, and the shim already answers `[]`.
       : (await fops.listDir(runsRoot)).filter((entry) => entry.dir).map((entry) => entry.name).slice(-10)
     for (const id of issueIds) {
       const issueDir = pathutil.join(runsRoot, id)
@@ -3770,8 +3790,8 @@ const roleRunner = makeRoleRunner({ pathutil, util, core, previewLimit: 4000, de
 // Runtime build identity: patched by build/deploy.mjs. The aggregate ID is
 // defined over the imported runtime graph (core + helpers); changing any
 // transitive module changes it and both probes report a mismatch.
-export const EMBEDDED_GENERATION = '19bb7ce68e6c'
-export const EMBEDDED_BUILD_ID = '9474975336c563aa7711985ad967f6a2102acc3771225b9faffbad3022097897'
+export const EMBEDDED_GENERATION = '56cc1b1b1353'
+export const EMBEDDED_BUILD_ID = 'f89e3591559c154726c8ece17f50434b5fd573ed3534344937f53fe262c29145'
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
 
 // ── manifest derivation (single source of truth: core.ROLE_MANIFEST) ──────
@@ -3825,18 +3845,76 @@ profiles.resolveEffectiveProfile = function (role, cfg, opts = {}) {
         if (!configuredTools.includes(required)) configuredTools.push(required)
       }
     }
+    // The role's candidate routes decide whether `read_image` is useful: the
+    // tool hands the model an image, and a text-only adapter rejects that call.
+    // Every configured route counts, because the runner may fall through the
+    // chain — the grant survives if ANY route on it can read images.
+    const routes = []
+    if (typeof profile.model === 'string' && profile.model.trim()) {
+      const parsed = modelparse.parseModelString(profile.model)
+      if (parsed) routes.push({ provider: parsed.provider, model: parsed.model })
+    }
+    for (const entry of Array.isArray(profile.modelFallbacks) ? profile.modelFallbacks : []) {
+      const raw = typeof entry === 'string' ? entry : entry?.model
+      const parsed = typeof raw === 'string' ? modelparse.parseModelString(raw) : null
+      if (parsed) routes.push({ provider: parsed.provider, model: parsed.model })
+    }
     const grant = core.resolveRoleToolGrant(profile.role, opts.nodeContract ?? null, opts.attestation ?? null, {
       workspace: typeof opts.workspace === 'string' ? opts.workspace : null,
       runDir: typeof opts.runDir === 'string' ? opts.runDir : null,
       tools: configuredTools,
+      routes,
+      availability: opts.availability,
+      ...(opts.imageCapable === true || opts.imageCapable === false ? { imageCapable: opts.imageCapable } : {}),
     })
     profile.tools = grant.tools
-    profile.toolGrant = { gated: grant.gated, confinement: grant.confinement, base: grant.base, ceiling: grant.ceiling }
+    profile.toolGrant = {
+      gated: grant.gated,
+      confinement: grant.confinement,
+      base: grant.base,
+      ceiling: grant.ceiling,
+      ...(grant.imageToolWithheld ? { imageToolWithheld: true } : {}),
+    }
   } else {
     const resolved = core.roleToolsWithinCeiling(profile.role, profile.tools)
     if (resolved !== null) profile.tools = resolved.tools
   }
   return profile
+}
+
+// One model-availability index per invocation, reused across the roles a
+// single tool call resolves. The gated tool grant needs the route's declared
+// modalities to decide whether `read_image` is usable, and a per-role
+// `listModels` sweep would repeat the same provider calls for no new answer.
+function makeAvailabilityLoader(llm) {
+  let cached = null
+  return async function availability() {
+    if (cached !== null) return cached
+    cached = { models: [], source: 'unavailable' }
+    if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') return cached
+    try {
+      const providers = (await llm.listProviders()) ?? []
+      const models = []
+      for (const provider of providers) {
+        const list = (await llm.listModels(provider.id)) ?? []
+        for (const m of list) {
+          // `inputModalities` is the adapter's own statement, resolved for every
+          // model it serves. A model entry that declares it and omits "image" is
+          // text-only; the flag is OMITTED only when the adapter stated nothing.
+          const modalities = Array.isArray(m.inputModalities) ? m.inputModalities : null
+          models.push({
+            provider: typeof m.provider === 'string' ? m.provider : provider.id,
+            model: m.id,
+            ...(modalities !== null && modalities.includes('image') ? { imageCapable: true } : {}),
+          })
+        }
+      }
+      cached = { models, source: 'live' }
+    } catch {
+      cached = { models: [], source: 'unavailable' }
+    }
+    return cached
+  }
 }
 
 // Run-scoped capability context for the gated tool grant: the run's
@@ -7391,11 +7469,79 @@ const ORCHESTRATOR_PLUGIN = {
     const fs = ctx.get('fs')
     if (fs === undefined) return
     const web = ctx.get('web')
+    // One retrieval module for the whole preset (standard service first, direct
+    // PDF fallback second). Declared once so presearch and fetch_source cannot
+    // drift into two different network policies.
+    const FETCH_SOURCE_MODULE = new URL('./fetch-source.mjs', import.meta.url).href
     const subagents = ctx.get('subagents')
     const subprocess = ctx.get('subprocess')
     const sandboxPolicy = ctx.get('sandboxPolicy')
+    const approval = ctx.get('approval')
     const timer = ctx.get('timer')
     const llm = ctx.get('llm')
+
+    // Approvals THIS plugin obtained from the host approval service, keyed by
+    // token digest. The register is the authority boundary: a model-authored
+    // token is only accepted when it matches an entry written here, so no
+    // caller can authorize its own out-of-scope mutation.
+    const issuedApprovals = new Map()
+
+    // ── approval authority ──────────────────────────────────────────────────
+    // A token is only evidence that THIS plugin obtained an approval; it is
+    // never authority a caller can supply. `grantApprovals` asks the host
+    // approval service and records what it granted; `validateIssuedApprovals`
+    // accepts a caller-held token only when it matches that register. A token
+    // the model invents therefore cannot match, and the mutation stays
+    // unauthorized. Approval outcomes are recorded verbatim, including
+    // refusals, so the register is also the audit trail.
+    async function grantApprovals(exec, classes, identity, reason, toolName) {
+      const issued = []
+      for (const approvalClass of [...new Set(classes)]) {
+        if (!core.APPROVAL_CLASSES.includes(approvalClass)) continue
+        let outcome = 'unavailable'
+        if (approval !== undefined && typeof approval.request === 'function' && exec?.agent !== undefined) {
+          try {
+            outcome = await approval.request({
+              agent: exec.agent,
+              toolName: toolName ?? 'autoresearch_run_role',
+              callId: exec.callId,
+              reason: reason + ' [' + approvalClass + ']',
+              ...(exec.signal ? { signal: exec.signal } : {}),
+            })
+          } catch (error) {
+            outcome = 'unavailable: ' + (error instanceof Error ? error.message : String(error))
+          }
+        }
+        // `'allowed-once'` is the only grant the approval service defines;
+        // every other outcome (rejected, cancelled, unavailable) refuses.
+        if (outcome !== 'allowed-once') {
+          issuedApprovals.set('refused:' + approvalClass + ':' + identity.contractDigest + ':' + identity.nodeId, { outcome, issuedAt: new Date().toISOString() })
+          continue
+        }
+        const token = core.makeApprovalToken({
+          approvalClass,
+          contractDigest: identity.contractDigest,
+          nodeId: identity.nodeId,
+          issuedAt: new Date().toISOString(),
+        })
+        issuedApprovals.set(token.digest, { token, outcome, issuedAt: token.issuedAt })
+        issued.push(token)
+      }
+      return issued
+    }
+
+    function validateIssuedApprovals(tokens, identity) {
+      return tokens.filter((token) => {
+        if (!util.isPlainObject(token) || typeof token.digest !== 'string') return false
+        const record = issuedApprovals.get(token.digest)
+        if (record === undefined || record.token === undefined) return false
+        return core.approvalTokenValid(token, {
+          approvalClass: token.approvalClass,
+          contractDigest: identity?.contractDigest,
+          nodeId: identity?.nodeId,
+        })
+      })
+    }
 
     function scheduleRoleCallback(callback, delay) {
       if (!timer || typeof timer.timeout !== 'function' || !Number.isFinite(delay) || delay <= 0) return undefined
@@ -7434,10 +7580,16 @@ const ORCHESTRATOR_PLUGIN = {
       return pathutil.join(base, value)
     }
 
-    function makeFops(baseDir) {
+    function makeFops(baseDir, exec) {
       async function targetOf(p) {
         return await fs.resolve(p, { cwd: pathutil.normalize(baseDir) })
       }
+
+      // The one seam that decides whether a mutation is permitted by the
+      // current sandbox policy. Shared verbatim with the Linear facet through
+      // the core, so the two can never drift into different policies.
+      const checkedMutationPath = core.makeMutationGate({ fs, sandboxPolicy, pathutil, baseDir, exec })
+
       return {
         resolveTarget: async (p) => await targetOf(p),
         statInfo: async (p) => await fs.stat(await targetOf(p)),
@@ -7475,16 +7627,20 @@ const ORCHESTRATOR_PLUGIN = {
         },
         ensureDir: async (p) => {
           if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot create artifact directory')
+          const targetPath = await checkedMutationPath(p)
           const mkdir = await subprocess.resolveExecutable('/bin/mkdir')
-          const targetPath = typeof fs.processPath === 'function' ? await (async () => fs.processPath(await targetOf(p)))() : pathutil.normalize(p)
           const result = await runSubprocess(subprocess, baseDir, [mkdir, '-p', targetPath])
           if (result.exitCode !== 0) throw new Error('mkdir failed for ' + targetPath + ': ' + result.stderr.slice(-400))
         },
         copy: async (source, destination) => {
           if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot copy binary deliverable')
+          // Both ends are gated: the destination is what the policy protects,
+          // and the source is validated so a check-here-copy-there mismatch is
+          // impossible. `cp` is retained because `fs.writeText` is UTF-8 only
+          // and this path carries binary deliverables (PDFs, images).
+          const sourcePath = await checkedMutationPath(source)
+          const destinationPath = await checkedMutationPath(destination)
           const cp = await subprocess.resolveExecutable('/bin/cp')
-          const sourcePath = typeof fs.processPath === 'function' ? await fs.processPath(await targetOf(source)) : pathutil.normalize(source)
-          const destinationPath = typeof fs.processPath === 'function' ? await fs.processPath(await targetOf(destination)) : pathutil.normalize(destination)
           const result = await runSubprocess(subprocess, baseDir, [cp, sourcePath, destinationPath])
           if (result.exitCode !== 0) throw new Error('copy failed for ' + destinationPath + ': ' + result.stderr.slice(-400))
         },
@@ -7493,18 +7649,30 @@ const ORCHESTRATOR_PLUGIN = {
           let entries
           try {
             entries = await fs.listDir(await targetOf(p))
-          } catch {
-            return []
+          } catch (error) {
+            // Absent is an ordinary answer; a denial, an I/O fault, or a
+            // malformed target is not. Collapsing them hid sandbox refusals.
+            // A directory that is absent, or whose parent is not a directory, simply
+            // has no entries. Any other failure (a sandbox denial, an I/O fault)
+            // still propagates: swallowing those is what hid refusals.
+            if (error?.code === 'FS_NOT_FOUND' || error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'FS_NOT_DIRECTORY') return []
+            throw error
           }
           return entries
             .map((entry) => ({ name: entry.name, dir: entry.type === 'directory' }))
             .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
         },
         remove: async (p) => {
+          // Prefer a backend-provided primitive when one exists (the `fs`
+          // service Definition has none, but a deployment backend may add one);
+          // otherwise fall back to the subprocess path. The sandbox policy is
+          // consulted first either way.
+          const targetPath = await checkedMutationPath(p)
+          if (typeof fs.remove === 'function') return await fs.remove(await targetOf(p))
           if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot remove lock file')
           const rm = await subprocess.resolveExecutable('/bin/rm')
           const handle = subprocess.spawn({
-            argv: [rm, '-f', p],
+            argv: [rm, '-f', targetPath],
             cwd: pathutil.normalize(baseDir),
             stdio: { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
             graceMs: 5000,
@@ -7513,14 +7681,24 @@ const ORCHESTRATOR_PLUGIN = {
         },
         removeTree: async (p) => {
           if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot remove temp tree')
+          const targetPath = await checkedMutationPath(p)
           const rm = await subprocess.resolveExecutable('/bin/rm')
-          const targetPath = typeof fs.processPath === 'function' ? await fs.processPath(await targetOf(p)) : pathutil.normalize(p)
           const result = await runSubprocess(subprocess, baseDir, [rm, '-rf', targetPath])
           if (result.exitCode !== 0) throw new Error('rm -rf failed for ' + targetPath + ': ' + result.stderr.slice(-400))
         },
         readJson: async (p) => {
+          let text
           try {
-            return JSON.parse(await fs.readText(await targetOf(p)))
+            text = await fs.readText(await targetOf(p))
+          } catch (error) {
+            // A missing file keeps the long-standing "no record" answer; a
+            // refusal or transport fault propagates instead of masquerading
+            // as an absent record.
+            if (error?.code === 'FS_NOT_FOUND' || error?.code === 'ENOENT') return undefined
+            throw error
+          }
+          try {
+            return JSON.parse(text)
           } catch {
             return undefined
           }
@@ -7618,26 +7796,29 @@ const ORCHESTRATOR_PLUGIN = {
     }
 
     // The ONE tool-schema boundary: every tool's parameter schema is the
-    // schema generated from autoresearch-core (plan §4.2 / §6.5). The third
-    // argument is a fallback only for tools absent from the generated set;
-    // no transport-specific hand copy may diverge from the generated schema
-    // (enforced by scripts/assert-canonical-schema.mjs).
+    // schema generated from autoresearch-core (plan §4.2 / §6.5). A tool whose
+    // name has no generated schema is a build error, not an open object: the
+    // previous `?? { additionalProperties: true }` fallback silently registered
+    // an unrestricted parameter surface, which is the opposite of a contract.
     const GENERATED_TOOL_SCHEMAS = core.generateToolSchemas()
     function tool(name, description, paramsSchema, executor) {
       const generated = GENERATED_TOOL_SCHEMAS[name]
-      if (paramsSchema != null && generated !== undefined) {
-        const generatedJson = JSON.stringify(generated)
-        const inlineJson = JSON.stringify(paramsSchema)
-        if (generatedJson !== inlineJson) {
-          throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core. Update the generated definition in the core, not the transport copy.')
-        }
+      if (generated === undefined) {
+        throw new Error('Tool schema missing for ' + name + ': every tool parameter schema must be generated from autoresearch-core. Add the definition to the core; do not hand-write a transport schema.')
+      }
+      if (paramsSchema != null && !core.jsonDeepEqual(generated, paramsSchema)) {
+        throw new Error('Tool schema drift for ' + name + ': the inline parameter schema does not equal the schema generated from autoresearch-core. Update the generated definition in the core, not the transport copy.')
       }
       registerTool({
         name,
         description,
-        parameters: generated ?? paramsSchema ?? { type: 'object', additionalProperties: true },
+        parameters: generated,
         output: {
-          schema: { type: 'object', additionalProperties: true },
+          // Tool results are JSON values: most tools answer with a record, but
+          // a few answer with a string and one answers with null. The schema
+          // must admit exactly those, so it is stated as the union rather than
+          // the object-only shape the wrapper used to declare.
+          schema: { oneOf: [{ type: 'object' }, { type: 'string' }] },
           render(_args, value) {
             const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
             return [{ type: 'text', text }]
@@ -7663,7 +7844,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_init_run', 'Create a resumable AutoResearch artifact directory for a Linear issue or local markdown brief. For new Project Mode runs, pass projectId+nodeId: the approved plan is loaded and node-contract.json is written with its digest, binding every role task, acceptance, and finalization to the immutable contract. issueId is required for every project run (one run per node); it names the run folder and the issue lock, so choose the node issue id deliberately.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const result = await lifecycle.initRun(fops, { ...args, baseDir }, PRESET_CONFIG_PATH)
       if (args.projectId && args.nodeId) {
         const claimPatch = {
@@ -7681,6 +7862,32 @@ const ORCHESTRATOR_PLUGIN = {
         const resolved = await resolveRolePrompt(profile, role, baseDir, fops)
         await fops.writeText(target, resolved.text)
       }
+      // Record the approval classes this node's roles declare, through the host
+      // approval service, and hand the resulting tokens back to the
+      // coordinator. Without this the coordinator has no legitimate token at
+      // all (only this plugin can issue one), so a mutation it later needs to
+      // authorize would stay unauthorized — the fail-closed direction.
+      if (args.projectId && args.nodeId && result.runDir) {
+        const runDirAbs = abs(baseDir, result.runDir)
+        const nodeContract = await loadRunContract(fops, runDirAbs)
+        if (nodeContract && Array.isArray(nodeContract.roles) && nodeContract.roles.length > 0) {
+          const declared = []
+          for (const roleName of nodeContract.roles) {
+            const entry = core.roleEntry(roleName)
+            if (entry && Array.isArray(entry.approvalClasses)) declared.push(...entry.approvalClasses)
+          }
+          if (declared.length > 0) {
+            const issued = await grantApprovals(
+              exec,
+              declared,
+              { contractDigest: nodeContract.contractDigest ?? nodeContract.digest, nodeId: args.nodeId },
+              'AutoResearch node ' + String(args.nodeId) + ' declares changes in this class',
+              'autoresearch_init_run',
+            )
+            return { ...result, approvalTokens: issued, declaredApprovalClasses: [...new Set(declared)] }
+          }
+        }
+      }
       return result
     })
 
@@ -7689,7 +7896,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_anonymize_candidates', 'Create judge-specific anonymized candidate packets and reversible maps for A/B/AB reports. Every packet is built in memory, identity-scrubbed, and scanned before any file is written; a leak fails closed with zero dispatchable artifacts. Candidate-invariant shared material must be supplied as judgeContext and is bound into every packet digest (omitting it fails with SHARED_CANDIDATE_MATERIAL). Returns per-judge flat dispatch primitives (zero-based judge, zero-based pass, judgePacketPath, judgePacketHash, judgeCount, runDigest, contextDigest).', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       return await scoring.anonymizeCandidates(fops, { ...args, runDir, baseDir })
     })
@@ -7736,7 +7943,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_validate_resume', 'Validate run.json/history.json/resume.md and infer the next missing AutoResearch step (artifact-format aware: TeX runs use .tex candidates).', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       const result = await resume.validateResume(fops, runDir)
       const contractFile = await loadRunContract(fops, runDir)
@@ -7766,7 +7973,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_regenerate_checklist', 'Recreate autoreason_loop_checklist.md for an existing run using the run stored config.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       return await lifecycle.regenerateChecklist(fops, abs(baseDir, args.runDir))
     })
 
@@ -7775,7 +7982,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_checkpoint', 'Atomically update run.json and resume.md after a completed substep, optionally appending history.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       // Deterministic degradation routing (SOD #11/#12): if the latest scored
       // pass carries a degraded scoreBorda verdict, the checkpoint nextAction
       // becomes the critic-gate directive — no further judge-spawn steps.
@@ -7809,7 +8016,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_presearch', 'Normalize search/fetch results into auditable evidence/sources packets; optionally performs the search/fetch itself when queries/fetchUrls are given.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       const cfg = await config.loadRunConfig(fops, runDir)
       const externalResearch = args.externalResearch ?? (cfg.externalResearch !== false)
@@ -7840,17 +8047,21 @@ const ORCHESTRATOR_PLUGIN = {
         }
         results = collected
         const fetched = []
+        // One retrieval policy for the whole preset: the host web service
+        // first, the direct PDF path only for what it refuses. Direct mode
+        // must not grow a second, divergent fetcher.
+        const retrieval = await import(FETCH_SOURCE_MODULE)
         for (const url of fetchUrls) {
           try {
-            const fetchedPage = await web.fetch({ url })
-            const body = fetchedPage?.body?.content ?? ''
+            const fetchedPage = await retrieval.fetchSourceDocument({ url, web, signal: exec.signal })
+            const body = typeof fetchedPage.content === 'string' ? fetchedPage.content : ''
             fetched.push({
-              url: fetchedPage?.url ?? url,
+              url: fetchedPage.url ?? url,
               title: url,
-              excerpt: typeof body === 'string' ? body.slice(0, 6000) : '',
+              excerpt: body.slice(0, 6000),
               retrievedAt: new Date().toISOString(),
-              statusCode: fetchedPage?.statusCode,
-              truncated: fetchedPage?.truncated === true,
+              statusCode: fetchedPage.statusCode,
+              truncated: fetchedPage.truncated === true,
             })
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
@@ -7883,16 +8094,126 @@ const ORCHESTRATOR_PLUGIN = {
       }
     })
 
+    // ── 8b. fetch_source (standard-first retrieval with a PDF fallback) ─────
+
+    // Standard-first policy: an ordinary page is the host `web` service's job.
+    // The host provider's body union is a closed `html | text`, so a PDF or
+    // another unsupported resource is refused there and retrieved directly,
+    // with the extracted text returned. This tool never registers a `web`
+    // provider — a second provider would make the capability ambiguous for
+    // every caller in the deployment.
+    tool('autoresearch_fetch_source', 'Retrieve source documents by URL. Ordinary pages go through the standard web service (address safety, proxy routing, decoding); a PDF or another content type the standard fetch refuses falls back to direct retrieval and returns the extracted text, page by page. Prefer the standard web_search/web_fetch tools first and call this only for a resource they cannot return. Pass renderPages with the page numbers whose FIGURES matter: each page is rasterized to a PNG under the run directory and returned in pageImages, and you must then call read_image on those paths to actually see the diagram. Text extraction and page images answer different questions — keep both. Pass each retrieved source to autoresearch_presearch (fetches[]) so it becomes an auditable evidence packet.', null, async (args, exec) => {
+      assertCallingAgent(exec)
+      const urls = util.nonEmptyStringArray(args.urls, [])
+      if (urls.length === 0) throw new Error('urls must contain at least one URL.')
+      const requestedPages = Array.isArray(args.renderPages)
+        ? [...new Set(args.renderPages.filter((page) => Number.isInteger(page) && page >= 1))].sort((a, b) => a - b)
+        : []
+      const wantsPages = requestedPages.length > 0
+      // Page images belong with the run's other artifacts, so they survive the
+      // turn and can be cited. Without a runDir they would land in a transient
+      // location the evidence tree does not cover.
+      const baseDir = sessionBaseDir(exec, args)
+      const runDir = typeof args.runDir === 'string' && args.runDir.trim() ? abs(baseDir, args.runDir) : null
+      if (wantsPages && runDir === null) throw new Error('renderPages requires runDir: page images are run artifacts and must land under the run directory.')
+      const pageDir = runDir === null ? null : pathutil.join(runDir, 'evidence', 'pages')
+      const module = await import(FETCH_SOURCE_MODULE)
+      const results = []
+      for (const url of urls) {
+        try {
+          let render = null
+          const fetched = await module.fetchSourceDocument({
+            url,
+            web,
+            signal: exec.signal,
+            forceDirect: args.forceDirect === true,
+            ...(wantsPages ? {
+              onPdfBytes: async ({ bytes, pageCount }) => {
+                render = await module.renderPdfPages({
+                  bytes,
+                  pageCount,
+                  outputDir: pageDir,
+                  pages: requestedPages,
+                  subprocess,
+                  cwd: baseDir,
+                  signal: exec.signal,
+                })
+              },
+            } : {}),
+          })
+          results.push({
+            url: fetched.url,
+            ok: true,
+            statusCode: Number.isInteger(fetched.statusCode) ? fetched.statusCode : null,
+            kind: typeof fetched.kind === 'string' ? fetched.kind : 'text',
+            via: typeof fetched.via === 'string' ? fetched.via : 'standard',
+            fallbackReason: typeof fetched.fallbackReason === 'string' ? fetched.fallbackReason : null,
+            truncated: fetched.truncated === true,
+            contentLength: typeof fetched.content === 'string' ? fetched.content.length : 0,
+            // Completeness facts for a PDF: whether the whole document was
+            // read, and how much text exists when it was not.
+            pagesRead: Number.isInteger(fetched.pagesRead) ? fetched.pagesRead : null,
+            totalPages: Number.isInteger(fetched.totalPages) ? fetched.totalPages : null,
+            availableChars: Number.isInteger(fetched.availableChars) ? fetched.availableChars : null,
+            // A page-image request is additive: the text above is still the
+            // primary result, and a rasterizer that is missing or fails
+            // degrades to `pageImages.ok === false` with a named reason.
+            pageImages: render === null
+              ? null
+              : {
+                  ok: render.ok === true,
+                  dir: pageDir,
+                  paths: Array.isArray(render.paths) ? render.paths : [],
+                  pages: Array.isArray(render.renderedPages) ? render.renderedPages : [],
+                  skipped: Array.isArray(render.skipped) ? render.skipped : [],
+                  reason: typeof render.reason === 'string' ? render.reason : null,
+                },
+            content: typeof fetched.content === 'string' ? fetched.content : '',
+            error: null,
+          })
+        } catch (error) {
+          results.push({
+            url,
+            ok: false,
+            statusCode: null,
+            kind: null,
+            via: null,
+            fallbackReason: null,
+            truncated: false,
+            contentLength: 0,
+            pagesRead: null,
+            totalPages: null,
+            availableChars: null,
+            pageImages: null,
+            content: '',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      const renderedPages = results.reduce((total, entry) => total + (entry.pageImages?.paths?.length ?? 0), 0)
+      return {
+        ok: results.every((entry) => entry.ok),
+        count: results.length,
+        direct: results.filter((entry) => entry.via !== 'standard').length,
+        renderedPages,
+        results,
+        instruction: renderedPages > 0
+          ? 'Page images were written under ' + pageDir + '. Call read_image on each pageImages path to actually see the figures, then persist every source through autoresearch_presearch (fetches[]).'
+          : 'Persist every retrieved source through autoresearch_presearch (fetches[]) so it lands under evidence/sources/ with its packet.',
+      }
+    })
+
     // ── 9. spawn_role (planner/audit only, contract-aware) ────────────────
 
     tool('autoresearch_spawn_role', 'Build a profile-aware role spawn plan/audit. Returns the recommended autoresearch_run_role call. Does not spawn. When runDir is supplied the exact node contract, workspace root, run root, artifact format, and relevant prior receipts are prepended automatically; caller task text cannot replace the contract.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
       const hasDispatch = typeof args.judgePacketPath === 'string' && args.judgePacketPath.trim() !== ''
       const capability = await loadCapabilityContext(fops, baseDir, args.runDir)
-      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
+      const availability = await makeAvailabilityLoader(llm)()
+      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, availability, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
       const runRoot = args.runDir ? abs(baseDir, args.runDir) : null
       let task = ''
       if (runRoot) {
@@ -7916,11 +8237,12 @@ const ORCHESTRATOR_PLUGIN = {
       assertCallingAgent(exec)
       if (subagents === undefined) throw new Error('subagents service unavailable')
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
       const hasDispatch = typeof args.judgePacketPath === 'string' && args.judgePacketPath.trim() !== ''
       const capability = await loadCapabilityContext(fops, baseDir, args.runDir)
-      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
+      const availability = await makeAvailabilityLoader(llm)()
+      const role = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge, attestation: capability.attestation, workspace: baseDir, nodeContract: capability.nodeContract, availability, runDir: args.runDir ? pathutil.relativePath(baseDir, abs(baseDir, args.runDir)) : null })
       const outputMode = args.outputMode === 'schema' ? 'schema' : 'text'
       if (outputMode === 'schema' && !util.isPlainObject(args.outputSchema)) throw new Error('outputSchema is required when outputMode is schema.')
       const prompt = await resolveRolePrompt(role, args.role, baseDir, fops)
@@ -7983,12 +8305,17 @@ const ORCHESTRATOR_PLUGIN = {
       let approvalTokens = []
       if (args.approvalTokens !== undefined) {
         if (!Array.isArray(args.approvalTokens)) throw new Error('approvalTokens must be an array of coordinator-approval objects.')
-        for (const token of args.approvalTokens) {
-          if (!util.isPlainObject(token) || token.kind !== 'coordinator-approval' || !core.APPROVAL_CLASSES.includes(token.approvalClass)) {
-            throw new Error('approvalTokens entries must be kind coordinator-approval with a closed approvalClass: ' + core.APPROVAL_CLASSES.join(', '))
-          }
+        // Caller-supplied tokens are matched against this run's issued
+        // approvals. A token this plugin never issued is refused outright
+        // rather than silently treated as authorization.
+        const matched = validateIssuedApprovals(args.approvalTokens, {
+          contractDigest: util.isPlainObject(args.logicalGroupKey) ? args.logicalGroupKey.contractDigest : undefined,
+          nodeId: util.isPlainObject(args.logicalGroupKey) ? args.logicalGroupKey.nodeId : undefined,
+        })
+        if (matched.length !== args.approvalTokens.length) {
+          throw new Error('approvalTokens contains ' + (args.approvalTokens.length - matched.length) + ' token(s) this plugin never issued. Approval authority comes from the host approval service, never from the caller; call autoresearch_init_run to record the plan approval and use the tokens it returns.')
         }
-        approvalTokens = args.approvalTokens
+        approvalTokens = matched
       }
       // Canonical role-task packet (plan §6.1): digests, typed inputs,
       // declared roots, capability record, route, and output contract.
@@ -8242,7 +8569,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_redact_check', 'Scan final research output for likely secrets, signed URLs, private keys, and raw transcript leakage before posting.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const root = args.runDir ? abs(baseDir, args.runDir) : baseDir
       return await redact.redactCheck(fops, { ...args, runDir: root, baseDir })
     })
@@ -8252,7 +8579,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_finalize_run', 'Mark an AutoResearch run complete and finish it with one self-consistent, exposure-driven output policy. Unbound runs publish their final deliverables under outputs/<issueId>/ as before. Contract-bound (canonical) runs never create per-issue folders: after the acceptance gate passes the state journal node entry is merged (status done, receipts; every other field preserved) and, for the integration node, the project publishes at most one folder, outputs/<projectId>/. The explicit projectContract.deliverables list is the sole exposure request (exact safe relative paths, companions included; [] with no diagnostic mappings finalizes as skipped with no folder); an exposed TeX master additionally publishes its minimal local source-support closure (missing inputs or unresolved labels fail), and rebuildable: true (TeX only) adds the accepted finalBuild recorder closure plus the parsed bibliography union, with every recorded hash re-verified. Internal evidence reaches the user only through exact projectContract.diagnosticMappings entries under audit/. Publication is transactional: owner-marked staging, hash verification, rollback journal, MANIFEST.json last, unmanaged destination files preserved and inventoried. A failed requested publish propagates as a finalize error, never a soft failure. Returns the published paths, journalSync, and projectPublish results. Contract-bound runs are rejected without a current successful acceptance receipt bound to the node-contract digest. Linear-backed projects additionally require the contextDigest from a fresh linear_get_node_context (plan §7.4).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       return await lifecycle.finalizeRun(fops, { ...args, runDir: abs(baseDir, args.runDir), baseDir })
     })
 
@@ -8261,7 +8588,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_status', 'Summarize local AutoResearch locks and the newest run state for one issue or recent issues.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       return await lifecycle.researchStatus(fops, { ...args, baseDir })
     })
 
@@ -8270,7 +8597,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_dependency_check', 'Check DSH services, artifact root, config, role templates, Linear credential readiness, the mounted build generation, and TeX toolchain availability offline.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const checks = []
       const recommendations = []
       let cfg
@@ -8461,7 +8788,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_list_role_profiles', 'List effective role profiles (model/tools/prompt source) from project or run config. Built-in tool ceilings are enforced at resolution.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
       const catalog = await liveModelCatalog()
       const rows = []
@@ -8494,7 +8821,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_get_role_profile', 'Resolve one effective role profile including prompt source and model.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const cfg = await loadConfigFor(fops, baseDir, args.runDir)
       const profile = profiles.resolveEffectiveProfile(args.role, cfg, { judgeIndex: args.judge })
       let promptSource = 'none'
@@ -8534,7 +8861,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_plan_validate', 'Validate an approved AutoResearch project plan (canonical shape only): the kind marker, closed top-level and per-node fields, unique node ids, per-kind roles with phase-fit, explicit strict budgets, object acceptance criteria with closed check types, dependsOn, acyclicity, integration coverage, and the closed project contract. Never mutates the caller plan. A non-canonical shape fails with exactly one error (not canonical; run scripts/migrate-workspace.mjs) plus the detected legacyFingerprint. Returns normalized contracts, the project contract, and the stable plan digest.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const cfg = await config.loadProjectConfig(fops, baseDir, { presetConfigPath: PRESET_CONFIG_PATH })
       let plan = util.isPlainObject(args.plan) ? args.plan : null
       let planPath = ''
@@ -8598,7 +8925,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_node_transition', 'Coordinator-only: persist one focused node lifecycle transition in state.json. Linear projection is a separate explicit step through linear_project_node. For Linear-bound projects, claim/complete/retry require contextDigest — the SHA-256 digest of the Linear issue\'s Current Node Context block from a fresh linear_get_node_context (plan §7.4); the digest is recorded on the node entry as a pointer only.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const patch = {}
       for (const key of ['causalHolds', 'leaseId', 'runDir', 'receipt', 'contextDigest']) if (args[key] !== undefined) patch[key] = args[key]
       const projectId = util.requiredString(args.projectId, 'projectId')
@@ -8613,7 +8940,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_project_status', "Reconcile the approved canonical plan.json, the state.json journal, Linear issues (optional) and local runs for one AutoResearch project. Read-only for the plan; the only mutation is the explicit per-node comment-id cursor advance (idempotent). Reports drift — including generated-spec-block drift and the deterministic Linear-state fallback source — and never rewrites the plan.", null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const projectId = util.requiredString(args.projectId, 'projectId')
       const cfg = await config.loadProjectConfig(fops, baseDir, { presetConfigPath: PRESET_CONFIG_PATH })
       const plan = await projectstate.loadPlan(fops, baseDir, projectId, cfg.artifactRoot)
@@ -8691,7 +9018,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_record_acceptance', 'Record a mechanical acceptance receipt for a contract-bound run. Every plan criterion must be accounted for (PASS/FAIL/WAIVED/NOT_APPLICABLE); waivers require a recorded user decision, rationale, scope, and plan revision. Extractor-backed expected categories must record count, bytes, and SHA-256 (zero required counts fail); command checks record command, cwd, exit code, and log hashes. Validation is dispatched from the node artifactFormat: TeX nodes run strict TeX validation (comment-aware static rules + latexmk build, never -f; a nonzero compiler exit cannot pass) — the scanner-derived declared needs are the source of truth, so a mismatch against the hand-filled contract declared list is a recorded warning, not a failure — and record the accepted artifact { path, format, sha256 } plus the verified finalBuild record (sourcePath/sourceHash/flsPath/flsHash, PDF pair when present). When the project exposes a TeX source, the exposed master\'s local inputs and labels must resolve before acceptance. Markdown/non-TeX nodes pass on the accepted artifact\'s existence, path safety, and hash (plus explicit deliverable checks) with no TeX requirement. Writes acceptance.json and mechanically derives node-output.json (the contribution ledger, idempotent on same-hash replay).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       const contractFile = await loadRunContract(fops, runDir)
       if (!contractFile) {
@@ -8833,7 +9160,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_tex_check', 'Run the strict TeX validation for a node output (static rules + latexmk build of preview.tex or output.tex, never -f). Returns the validation record without writing an acceptance receipt.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       const contractFile = await loadRunContract(fops, runDir)
       if (!contractFile) throw new Error('tex_check requires a bound run (node-contract.json).')
@@ -8849,7 +9176,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_candidate_eligibility', 'Validate B/AB candidate eligibility before judging: every non-targeted incumbent contribution (required locked units) must survive; only critic-targeted units may change, and only through a recorded revision-ledger replacement or justified removal. A candidate that loses required or untouched material is ineligible, not merely ranked lower. Judged candidates are never modified here.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       const { run, contractFile } = await readRunAndDigest(fops, runDir)
       if (!util.isPlainObject(run)) throw new Error('run.json must exist.')
@@ -8908,13 +9235,13 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_promote_artifact', 'Promote one complete role artifact through the single hash-checked publication authority. Source and destination remain inside runDir; partial outputs, symlinks, format mismatches, hash mismatches, and destination conflicts fail closed. Same-hash replays are idempotent.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      return await promoteArtifact({ ...args, baseDir, fops: makeFops(baseDir) })
+      return await promoteArtifact({ ...args, baseDir, fops: makeFops(baseDir, exec) })
     })
 
     tool('autoresearch_publish_accepted', 'Publish a coordinator-corrected artifact under a separately named accepted path with a provenance receipt. The judged candidate file is never overwritten; corrections are visible as corrections, with source and patch hashes.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = abs(baseDir, args.runDir)
       if (typeof args.sourcePath !== 'string' || !args.sourcePath.trim()) throw new Error('sourcePath is required.')
       if (typeof args.judgedPath !== 'string' || !args.judgedPath.trim()) throw new Error('judgedPath is required.')
@@ -8962,7 +9289,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_integration_preflight', 'Compute the integration input digest from the project contract and every current node contract/output/acceptance hash, classify preflight findings (editorial stays local; substantive/conflict reopen the owning node; scope blocks for user review), and advance the integration state machine.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const projectId = util.requiredString(args.projectId, 'projectId')
       const cfg = await config.loadProjectConfig(fops, baseDir, { presetConfigPath: PRESET_CONFIG_PATH })
       const plan = await projectstate.loadPlan(fops, baseDir, projectId, cfg.artifactRoot)
@@ -9012,7 +9339,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_revision_request', 'Create a canonical, idempotent revision request for a node (substantive/conflict findings). Writes the request file under the single runtime root .research-agent/projects/<id>/revision-requests/ (bare research-agent/ is migration-only input) and returns the Linear marker, comment body, and the node/integration state targets. Post the body with linear_create_comment(idempotencyMarker=marker).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (Array.isArray(args.attributions) && args.attributions.length > 0) {
         const projectConfig = await config.loadProjectConfig(fops, baseDir, { presetConfigPath: PRESET_CONFIG_PATH })
         const promptOverrides = ['research_critic', 'research_judge'].filter((role) => typeof projectConfig.roleProfiles?.[role]?.promptFile === 'string' && projectConfig.roleProfiles[role].promptFile.trim())
@@ -9051,7 +9378,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_submit_feedback', 'Coordinator-only user feedback intake (plan §8.1). Persists a hash-addressed, idempotent user-feedback record — source/authority are closed record literals, never arguments — and gates user authority against the current last-known-good by base digest match (stale digests can never bypass the judge quorum). Returns the intake evidence event to project to the Linear integration issue immediately. Exact retries converge to the existing record.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const projectId = util.requiredString(args.projectId, 'projectId')
       const feedback = util.requiredString(args.feedback, 'feedback')
       const baseInputDigest = util.requiredString(args.baseInputDigest, 'baseInputDigest')
@@ -9135,7 +9462,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_record_feedback_triage', 'Coordinator-only senior integration triage (plan §8.2). Validates the closed per-item classification against the approved plan, derives the smallest responsible closure (decision must be consistent with the items; targetNodeIds must equal the derivation), persists a hash-addressed feedback-triage record, advances the feedback to a new triaged version, and returns the Linear projection (triage comment + suggested integration context update).', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const projectId = util.requiredString(args.projectId, 'projectId')
       const feedbackId = util.requiredString(args.feedbackId, 'feedbackId')
       const decision = util.requiredString(args.decision, 'decision')
@@ -9231,7 +9558,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_close_feedback', 'Coordinator-only feedback-resolution acceptance (plan §8.4). Mechanical gate: every triage target is journal-done with a fresh, non-superseded, hash-bound acceptance receipt; every triage acceptance check is PASS in a fresh owner receipt; the integration input digest changed since intake; the supplied publish manifest digest equals the current last-known-good. On success writes a new resolved feedback record version with the closure object and returns the one concise project-republished evidence event.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const projectId = util.requiredString(args.projectId, 'projectId')
       const feedbackId = util.requiredString(args.feedbackId, 'feedbackId')
       const inputDigest = util.requiredString(args.integrationInputDigest, 'integrationInputDigest')
@@ -9343,7 +9670,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_coverage_validate', 'Validate integration-coverage.json against final.tex and every current node output ledger: every substantive span needs a claim record with resolvable sources, evidence, and transform; required contributions need explicit dispositions; unsupported sentences and silent omissions fail.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       if (typeof args.coveragePath !== 'string' || !args.coveragePath.trim()) throw new Error('coveragePath is required.')
       if (typeof args.finalTexPath !== 'string' || !args.finalTexPath.trim()) throw new Error('finalTexPath is required.')
       const resolve = (p) => resolveInput(fops, baseDir, args.runDir ? abs(baseDir, args.runDir) : '', p, { mustExist: true })
@@ -9368,7 +9695,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_tex_final_check', 'Final TeX verification for integration: citation keys resolve, labels unique and referenced, no forbidden paths, missing graphics fail, texcount enforces the project word budget, a strict latexmk build (never -f) passes, .fls inputs are workspace-local-only, and optional coverage validation runs. Records source/log/input/PDF hashes.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = args.runDir ? abs(baseDir, args.runDir) : baseDir
       const finalTexPath = pathutil.resolveInside(runDir, 'final.tex')
       const finalTexExists = await fops.exists(finalTexPath)
@@ -9575,7 +9902,7 @@ const ORCHESTRATOR_PLUGIN = {
       assertCoordinator(exec)
       if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot render the PDF.')
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const runDir = args.runDir ? abs(baseDir, args.runDir) : baseDir
       return await renderPreview(fops, subprocess, baseDir, runDir, {
         mainFile: args.mainFile ?? 'final',
@@ -9589,7 +9916,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_migration_diagnostic', 'Report the closed-catalog legacy fingerprint of a non-canonical approved plan (plan-v1 / plan-v2 / plan-v2-exposure / unknown legacy shape) and the migration action. Never rewrites the plan: execution stays blocked until the offline migrator (scripts/migrate-workspace.mjs) produces a proposed canonical revision and a human approves it. Canonical plans return their validation errors (if any) with action none or repair.', null, async (args, exec) => {
       assertCallingAgent(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       let plan = util.isPlainObject(args.plan) ? args.plan : null
       let planPath = ''
       if (!plan) {
@@ -9645,7 +9972,7 @@ const ORCHESTRATOR_PLUGIN = {
       assertCoordinator(exec)
       if (subprocess === undefined) throw new Error('subprocess service unavailable; cannot run the egress check')
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const now = Date.now()
       const ttlMs = Number.isInteger(args.ttlMs) && args.ttlMs > 0 ? args.ttlMs : 3600000
       const workRootRel = (typeof args.workRoot === 'string' && args.workRoot.trim())
@@ -9762,7 +10089,7 @@ const ORCHESTRATOR_PLUGIN = {
     tool('autoresearch_dependency_preflight', 'Coordinator-only, read-only dependency preflight: one concise report of what the next dispatch needs — model routes and judge panels (typed, fail-closed; a missing judge panel is a blocker, never a silent advisory downgrade), web provider selection (multiple usable providers is a named blocker — ambiguity is never resolved by degrading), TeX tooling + frozen templates + PDF rasterizer, bibliography declarations, image tooling for figure nodes, workspace scratch, confinement attestation status, and Linear delegation. Findings are closed-shape { severity, owner, blocked, missing, remediation }. This is tool output, not a persisted record.', null, async (args, exec) => {
       assertCoordinator(exec)
       const baseDir = sessionBaseDir(exec, args)
-      const fops = makeFops(baseDir)
+      const fops = makeFops(baseDir, exec)
       const baseCfg = await loadConfigFor(fops, baseDir, args.runDir)
       const cfg = util.isPlainObject(args.config)
         ? {
@@ -9812,7 +10139,17 @@ const ORCHESTRATOR_PLUGIN = {
           for (const provider of providers) {
             const list = (await llm.listModels(provider.id)) ?? []
             for (const m of list) {
-              models.push({ provider: typeof m.provider === 'string' ? m.provider : provider.id, model: m.id, imageCapable: false })
+              // `inputModalities` is the adapter's own statement. A model entry
+              // that declares it and omits "image" is text-only; one that
+              // declares nothing has stated nothing, so `imageCapable` is
+              // OMITTED rather than set false — the grant path treats an
+              // unstated route as unknown and keeps the declared capability.
+              const modalities = Array.isArray(m.inputModalities) ? m.inputModalities : null
+              models.push({
+                provider: typeof m.provider === 'string' ? m.provider : provider.id,
+                model: m.id,
+                ...(modalities !== null && modalities.includes('image') ? { imageCapable: true } : {}),
+              })
             }
           }
           availability = { models }

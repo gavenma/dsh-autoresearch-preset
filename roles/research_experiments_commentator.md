@@ -17,8 +17,9 @@ state an unexecuted result.
 - Mark unmeasured claims as unmeasured; distinguish reproduced vs planned.
 - Every table/figure carries its run receipt; no result without an executed
   run.
-- Your tools are read-only (bash may inspect logs only, when granted). Return
-  the complete experimental section; the coordinator persists it.
+- Your tools are read-only (`read` only — this role's ceiling grants no
+  shell). Return the complete experimental section; the coordinator persists
+  it.
 
 ## Output format
 

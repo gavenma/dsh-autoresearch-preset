@@ -4,6 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Identity hashing must not depend on locale. `localeCompare` collates by
+// language rules (punctuation weight, case folding) whose implementation varies
+// with the ICU data shipped by the Node release, so the same tree could hash to
+// a different generation on Node 20 than on Node 24 — silently re-identifying
+// the build and stranding the previous generation's bundles. Compare by UTF-16
+// code unit instead: total, locale-free, and identical everywhere.
+const byCodeUnit = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sourceDir = path.join(root, 'src')
 const toolsDir = path.join(root, 'tools')
@@ -19,7 +27,7 @@ const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex'
 const hashFile = (relativePath) => sha256(fs.readFileSync(path.join(root, relativePath)))
 const sourceText = Object.fromEntries(Object.entries(sourcePaths).map(([name, file]) => [name, fs.readFileSync(file, 'utf8')]))
 const sourceIdentity = Object.entries(sourceText)
-  .sort(([left], [right]) => left.localeCompare(right))
+  .sort(([left], [right]) => byCodeUnit(left, right))
   .map(([name, text]) => name + ':' + sha256(text))
   .join('\n')
 
@@ -47,7 +55,7 @@ const collectVendor = (dir, relative) => {
 collectVendor(path.join(root, 'tools', 'vendor'), '')
 vendorAssetPaths.sort()
 const dataAssetPaths = ['config.example.json', 'preset.yml']
-const helperPaths = ['tools/linear-client.mjs', 'tools/research-web-fetch.mjs', 'tools/byte-utils.mjs']
+const helperPaths = ['tools/linear-client.mjs', 'tools/research-web-fetch.mjs', 'tools/fetch-source.mjs', 'tools/byte-utils.mjs']
 
 // Every non-generated runtime asset participates in the generation identity:
 // changing a role prompt, skill, config, preset metadata, or vendored module
@@ -72,7 +80,7 @@ writeText(paths.core, sourceText.core)
 const aggregateScope = [paths.core, ...helperPaths, ...vendorAssetPaths].sort()
 const aggregateLines = aggregateScope
   .map((relativePath) => [relativePath, hashFile(relativePath)])
-  .sort(([left], [right]) => left.localeCompare(right))
+  .sort(([left], [right]) => byCodeUnit(left, right))
   .map(([relativePath, hash]) => relativePath + ':' + hash)
   .join('\n')
 const aggregateId = sha256(aggregateLines)

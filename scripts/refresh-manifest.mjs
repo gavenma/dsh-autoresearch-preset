@@ -4,6 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Identity hashing must not depend on locale. `localeCompare` collates by
+// language rules (punctuation weight, case folding) whose implementation varies
+// with the ICU data shipped by the Node release, so the same tree could hash to
+// a different generation on Node 20 than on Node 24 — silently re-identifying
+// the build and stranding the previous generation's bundles. Compare by UTF-16
+// code unit instead: total, locale-free, and identical everywhere.
+const byCodeUnit = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifestPath = path.join(root, 'tools', 'build-manifest.json')
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
@@ -13,7 +21,7 @@ const hashFile = (relativePath) => crypto.createHash('sha256')
 
 const scopeHashes = Object.fromEntries((manifest.aggregateScope ?? []).map((relativePath) => [relativePath, hashFile(relativePath)]))
 const aggregateId = crypto.createHash('sha256')
-  .update(Object.entries(scopeHashes).sort(([left], [right]) => left.localeCompare(right)).map(([relativePath, hash]) => `${relativePath}:${hash}`).join('\n'), 'utf8')
+  .update(Object.entries(scopeHashes).sort(([left], [right]) => byCodeUnit(left, right)).map(([relativePath, hash]) => `${relativePath}:${hash}`).join('\n'), 'utf8')
   .digest('hex')
 
 for (const [entryName, relativePath] of Object.entries(manifest.entries ?? {})) {

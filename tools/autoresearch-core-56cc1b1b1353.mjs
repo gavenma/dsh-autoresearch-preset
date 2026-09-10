@@ -115,13 +115,13 @@ export const ROLE_MANIFEST = {
     aliases: ['planner'],
     modelClass: 'contentProducing',
     promptBasename: 'research_planner.md',
-    defaultTools: ['read', 'web_search'],
-    toolCeiling: ['read', 'web_search'],
+    defaultTools: ['read', 'read_image', 'web_search'],
+    toolCeiling: ['read', 'read_image', 'web_search'],
     webPolicy: 'enabled',
     cardinality: 1,
     phases: ['planning'],
     artifactContract: 'plan-json',
-    capabilities: ['read', 'search', 'network'],
+    capabilities: ['read', 'image', 'search', 'network'],
     outputMode: 'structured',
     directFileMutation: false,
     shellMode: 'none',
@@ -134,13 +134,13 @@ export const ROLE_MANIFEST = {
     aliases: ['scout'],
     modelClass: 'supporting',
     promptBasename: 'research_scout.md',
-    defaultTools: ['read', 'web_search'],
-    toolCeiling: ['read', 'web_search'],
+    defaultTools: ['read', 'read_image', 'web_search'],
+    toolCeiling: ['read', 'read_image', 'web_search'],
     webPolicy: 'enabled',
     cardinality: 'numScouts',
     phases: ['research', 'literature'],
     artifactContract: 'evidence-packet',
-    capabilities: ['read', 'search', 'network'],
+    capabilities: ['read', 'image', 'search', 'network'],
     outputMode: 'body',
     directFileMutation: false,
     shellMode: 'none',
@@ -153,13 +153,13 @@ export const ROLE_MANIFEST = {
     aliases: ['verifier'],
     modelClass: 'supporting',
     promptBasename: 'evidence_verifier.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['research', 'literature'],
     artifactContract: 'evidence-brief',
-    capabilities: ['read', 'inspect'],
+    capabilities: ['read', 'image', 'inspect'],
     outputMode: 'structured',
     directFileMutation: false,
     shellMode: 'none',
@@ -172,13 +172,13 @@ export const ROLE_MANIFEST = {
     aliases: ['author'],
     modelClass: 'contentProducing',
     promptBasename: 'research_author.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['research', 'code', 'assembly'],
     artifactContract: 'report-candidate',
-    capabilities: ['read', 'write'],
+    capabilities: ['read', 'image', 'write'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -191,13 +191,13 @@ export const ROLE_MANIFEST = {
     aliases: ['critic'],
     modelClass: 'supporting',
     promptBasename: 'research_critic.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['planning', 'research', 'literature', 'abstract', 'figure', 'code', 'experiment', 'experiments', 'assembly'],
     artifactContract: 'critique',
-    capabilities: ['read', 'inspect'],
+    capabilities: ['read', 'image', 'inspect'],
     outputMode: 'structured',
     directFileMutation: false,
     shellMode: 'none',
@@ -210,13 +210,13 @@ export const ROLE_MANIFEST = {
     aliases: ['synthesizer'],
     modelClass: 'contentProducing',
     promptBasename: 'research_synthesizer.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['planning', 'research', 'literature', 'abstract', 'figure', 'code', 'experiment', 'experiments', 'assembly'],
     artifactContract: 'synthesis-candidate',
-    capabilities: ['read', 'write'],
+    capabilities: ['read', 'image', 'write'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -229,8 +229,8 @@ export const ROLE_MANIFEST = {
     aliases: ['judge'],
     modelClass: 'supporting',
     promptBasename: 'research_judge.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 'numJudges',
     phases: ['planning', 'research', 'literature', 'abstract', 'figure', 'code', 'experiment', 'experiments', 'assembly'],
@@ -248,13 +248,13 @@ export const ROLE_MANIFEST = {
     aliases: ['reporter'],
     modelClass: 'contentProducing',
     promptBasename: 'research_reporter.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['research', 'literature', 'abstract', 'figure', 'code', 'experiment', 'experiments', 'assembly'],
     artifactContract: 'final-report',
-    capabilities: ['read', 'write'],
+    capabilities: ['read', 'image', 'write'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -267,13 +267,13 @@ export const ROLE_MANIFEST = {
     aliases: ['implementation_worker'],
     modelClass: 'contentProducing',
     promptBasename: 'research_coder.md',
-    defaultTools: ['read', 'write', 'edit', 'bash'],
-    toolCeiling: ['read', 'write', 'edit', 'bash'],
+    defaultTools: ['read', 'read_image', 'write', 'edit', 'bash'],
+    toolCeiling: ['read', 'read_image', 'write', 'edit', 'bash'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['code', 'experiment', 'experiments', 'assembly', 'figure'],
     artifactContract: 'code-and-run-receipts',
-    capabilities: ['read', 'write', 'execute'],
+    capabilities: ['read', 'image', 'write', 'execute'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -286,14 +286,14 @@ export const ROLE_MANIFEST = {
     aliases: ['review_worker'],
     modelClass: 'supporting',
     promptBasename: 'research_unit_tester.md',
-    defaultTools: ['read', 'bash'],
-    toolCeiling: ['read', 'bash'],
+    defaultTools: ['read', 'read_image', 'bash'],
+    toolCeiling: ['read', 'read_image', 'bash'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['code', 'experiment', 'experiments', 'assembly'],
     artifactContract: 'test-and-non-vacuity-receipts',
     note: 'bash capability is workspace-capable, never read-only.',
-    capabilities: ['read', 'write', 'execute'],
+    capabilities: ['read', 'image', 'write', 'execute'],
     outputMode: 'structured',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -306,13 +306,13 @@ export const ROLE_MANIFEST = {
     aliases: ['literature_writer'],
     modelClass: 'contentProducing',
     promptBasename: 'research_literature_writer.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled-after-evidence-lock',
     cardinality: 1,
     phases: ['literature'],
     artifactContract: 'related-work-narrative',
-    capabilities: ['read', 'write', 'search', 'network'],
+    capabilities: ['read', 'image', 'write', 'search', 'network'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -325,13 +325,13 @@ export const ROLE_MANIFEST = {
     aliases: ['abstract_writer'],
     modelClass: 'contentProducing',
     promptBasename: 'research_abstract_writer.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['abstract'],
     artifactContract: 'abstract-and-claim-trace',
-    capabilities: ['read', 'write'],
+    capabilities: ['read', 'image', 'write'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -344,13 +344,13 @@ export const ROLE_MANIFEST = {
     aliases: ['experiments_commentator'],
     modelClass: 'contentProducing',
     promptBasename: 'research_experiments_commentator.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['experiment', 'experiments'],
     artifactContract: 'experiments-section',
-    capabilities: ['read', 'write'],
+    capabilities: ['read', 'image', 'write'],
     outputMode: 'body',
     directFileMutation: true,
     shellMode: 'scoped-mutate',
@@ -382,8 +382,8 @@ export const ROLE_MANIFEST = {
     aliases: ['integration_verifier'],
     modelClass: 'supporting',
     promptBasename: 'research_integration_verifier.md',
-    defaultTools: ['read'],
-    toolCeiling: ['read'],
+    defaultTools: ['read', 'read_image'],
+    toolCeiling: ['read', 'read_image'],
     webPolicy: 'disabled',
     cardinality: 1,
     phases: ['integration'],
@@ -581,6 +581,47 @@ function broadGrantSet(entry, nodeContract) {
   return set
 }
 
+// `read_image` is only useful when the model that runs the role accepts image
+// input: the tool returns the image itself, and a text-only adapter rejects the
+// call with UNSUPPORTED_CONTENT_TYPE. Granting it to a role whose resolved route
+// cannot accept images is a tool that always fails, so the grant follows the
+// route.
+//
+// Capability is deliberately three-valued. An adapter model entry reports
+// `inputModalities`, and its absence means the adapter declares nothing — which
+// is NOT the same as declaring text-only. Only a route whose modalities are
+// known and exclude "image" withholds the tool; a route that states nothing
+// keeps the declared grant rather than silently dropping a capability the
+// deployment may well have.
+function imageToolAllowed(entry, nodeContract, opts) {
+  // An explicit capability flag is authoritative in both directions: the caller
+  // stating it knows the route, and route inspection must not overturn it.
+  if (opts.imageCapable === true) return true
+  if (opts.imageCapable === false) return false
+  const declared = entry.capabilities.includes('image') || declaresVisualEvidence(nodeContract)
+  const routes = Array.isArray(opts.routes) ? opts.routes.filter((route) => isPlainObject(route)) : []
+  if (routes.length === 0) return declared
+  const available = isPlainObject(opts.availability) ? availabilityIndex(opts.availability) : null
+  let stated = 0
+  for (const route of routes) {
+    if (route.imageCapable === true) return true
+    if (route.imageCapable === false) { stated += 1; continue }
+    if (available === null) continue
+    const known = available.get(String(route.provider) + '/' + String(route.model))
+    // A listed route IS a capability statement: every installed adapter
+    // resolves `inputModalities` for each model it serves (pi-ai fills a model
+    // that declares nothing from its provider's `defaultInput`, then `["text"]`;
+    // deepseek defaults to `["text"]`). So a listed model that does not report
+    // image input is text-only, not unknown.
+    if (known === undefined) continue
+    if (known.imageCapable) return true
+    stated += 1
+  }
+  // Withhold only when EVERY route stated text-only. A chain whose routes are
+  // all absent from the listing states nothing, and keeps the declared grant.
+  return stated === routes.length ? false : declared
+}
+
 export function resolveRoleToolGrant(roleName, nodeContract = null, attestation = null, opts = {}) {
   const entry = roleEntry(roleName)
   if (!entry) throw new Error('unknown role: ' + roleName)
@@ -597,10 +638,22 @@ export function resolveRoleToolGrant(roleName, nodeContract = null, attestation 
   }
   let tools = base
   let narrowed = false
+  const imageAllowed = imageToolAllowed(entry, nodeContract, opts)
+  if (!imageAllowed) {
+    // Withhold from BOTH the grant and the ceiling: a tool the route cannot
+    // serve must not be reachable by an explicit config narrowing either, or
+    // the ceiling would admit a call that always fails.
+    base = base.filter((tool) => tool !== 'read_image')
+    ceiling = ceiling.filter((tool) => tool !== 'read_image')
+    tools = tools.filter((tool) => tool !== 'read_image')
+  }
   if (Array.isArray(opts.tools) && opts.tools.length > 0) {
     const unknown = opts.tools.filter((tool) => !ceiling.includes(tool))
     if (unknown.length > 0) {
-      throw new Error('role ' + entry.id + ': tools [' + unknown.join(', ') + '] exceed the ceiling [' + ceiling.join(', ') + ']')
+      const note = unknown.includes('read_image') && !imageAllowed
+        ? ' (read_image is withheld: the resolved route does not accept image input)'
+        : ''
+      throw new Error('role ' + entry.id + ': tools [' + unknown.join(', ') + '] exceed the ceiling [' + ceiling.join(', ') + ']' + note)
     }
     tools = [...opts.tools]
     narrowed = true
@@ -613,6 +666,8 @@ export function resolveRoleToolGrant(roleName, nodeContract = null, attestation 
     narrowed,
     gated: attested,
     confinement: attested ? 'attested' : (attestation === null ? 'confinement-unattested' : 'attestation-invalid'),
+    // Why a declared capability is absent from this grant, for the spawn audit.
+    imageToolWithheld: !imageAllowed,
   }
 }
 
@@ -631,7 +686,14 @@ function availabilityIndex(availability) {
   const byRef = new Map()
   for (const entry of models) {
     if (!isPlainObject(entry) || typeof entry.provider !== 'string' || typeof entry.model !== 'string') continue
-    byRef.set(entry.provider + '/' + entry.model, { provider: entry.provider, model: entry.model, imageCapable: entry.imageCapable === true })
+    // Omitted `imageCapable` means the route stated nothing about modalities.
+    // It must not collapse to false, which would read as "text-only".
+    byRef.set(entry.provider + '/' + entry.model, {
+      provider: entry.provider,
+      model: entry.model,
+      imageCapable: entry.imageCapable === true,
+      imageCapableStated: typeof entry.imageCapable === 'boolean',
+    })
   }
   return byRef
 }
@@ -671,8 +733,15 @@ export function resolveRoleRoutes(plan, config = {}, availability = {}, opts = {
         tried.push(candidate.ref + ' (not in availability)')
         continue
       }
-      if (requireImage && !known.imageCapable) {
-        tried.push(candidate.ref + ' (not image-capable)')
+      // A route that states text-only cannot serve a visual node. A route that
+      // states nothing is unknown, and refusing it here would fail closed on a
+      // deployment whose adapter simply does not report modalities.
+      if (requireImage && known.imageCapableStated && !known.imageCapable) {
+        tried.push(candidate.ref + ' (declared text-only)')
+        continue
+      }
+      if (requireImage && !known.imageCapable && !known.imageCapableStated) {
+        tried.push(candidate.ref + ' (image capability unstated)')
         continue
       }
       routes.push({ nodeId, role: role, provider: known.provider, model: known.model, source: candidate.source })
@@ -788,6 +857,13 @@ export function makeApprovalToken(fields = {}) {
 
 export function approvalTokenValid(token, check = {}) {
   if (!isPlainObject(token) || token.kind !== 'coordinator-approval') return false
+  // The declared digest must cover the token's own fields. Without this the
+  // digest was decorative: a caller could assemble every visible field by hand
+  // and present any string as the digest, and the check would pass. Recomputing
+  // it makes the token self-consistent, so a fabricated one cannot validate.
+  if (typeof token.digest !== 'string' || !token.digest) return false
+  const { digest: _declared, ...fields } = token
+  if (recordDigest(fields) !== token.digest) return false
   if (!APPROVAL_CLASSES.includes(token.approvalClass)) return false
   if (token.approvalClass !== check.approvalClass) return false
   if (typeof token.contractDigest !== 'string' || token.contractDigest !== check.contractDigest) return false
@@ -2175,6 +2251,7 @@ const TOOL_PARAM_TYPES = {
   boolean: () => ({ type: 'boolean' }),
   stringArray: () => ({ type: 'array', items: { type: 'string' } }),
   numberArray: () => ({ type: 'array', items: { type: 'number' } }),
+  integerArray: () => ({ type: 'array', items: { type: 'integer' } }),
   objectArray: () => ({ type: 'array', items: { type: 'object', additionalProperties: true } }),
   blindPacket: () => ({
     type: 'object',
@@ -2410,6 +2487,14 @@ export const TOOL_PARAMETER_DEFINITIONS = {
       ["externalResearch", "boolean", false, "Override the externalResearch flag."],
     ],
   },
+  autoresearch_fetch_source: {
+    params: [
+      ["urls", "stringArray", true, "Source URLs to retrieve. Use the standard `web_fetch` first; call this for a PDF or another resource `web_fetch` refuses."],
+      ["baseDir", "string", false, "Workspace root. Defaults to the calling session workspace."],
+      ["forceDirect", "boolean", false, "Skip the standard web service and retrieve directly (diagnostics only)."],
+      ["renderPages", "integerArray", false, "PDF page numbers to rasterize to PNG for read_image (for example [3,7]). Omit for text only."],
+    ],
+  },
   autoresearch_spawn_role: {
     params: [
       ["role", "string", false, "Role name, e.g. research_scout or scout."],
@@ -2565,7 +2650,7 @@ export const TOOL_PARAMETER_DEFINITIONS = {
       ["baseDir", "string", false, "Workspace root. Defaults to the calling session workspace."],
       ["pass", "integer", false, "Zero-based loop pass number."],
       ["incumbentPath", "string", false, "Incumbent artifact path (default pass_00/A.<ext>)."],
-      ["candidatePaths", "stringMap", false, "Candidate paths keyed by id (default pass_N/B.<ext>, pass_N/AB.<ext>)."],
+      ["candidatePaths", "stringMap", false, "Candidate paths keyed by id (default pass_NN/B.<ext>, pass_NN/AB.<ext>)."],
       ["requiredUnits", "lockedUnitArray", false, "Required locked units: {id, anchor} (anchor text that must survive)."],
       ["criticTargets", "stringArray", false, "Contribution ids the critic explicitly targeted."],
       ["revisionLedger", "revisionLedgerArray", false, "Recorded ledger entries: {unitId, action: replaced|removed, reason, approved: true}."],
@@ -4609,7 +4694,9 @@ export function scoreBorda(params) {
   if (validRankings.length < quorumJudges) degradedReasons.push('only ' + validRankings.length + ' usable judge ranking(s); quorum requires ' + quorumJudges)
   const degraded = degradedReasons.length > 0
   return {
-    pass: params.pass,
+    // Omit an unbound pass entirely: a tool result must stay lossless JSON, and
+    // the 0.1.5 registry rejects an `undefined`-valued key with ToolOutputError.
+    ...params.pass === undefined ? {} : { pass: params.pass },
     candidateScores: scores,
     winner,
     tieBreakApplied,
@@ -5911,5 +5998,126 @@ export function validateCandidateEligibility(opts) {
   }
   report.ok = Object.values(report.candidates).every((entry) => entry.eligible)
   return report
+}
+
+/**
+ * Structural equality for JSON data, independent of object key order.
+ *
+ * The generated tool schemas and any inline copy are semantically equal when
+ * their structure matches; comparing `JSON.stringify` output made the check
+ * depend on key insertion order, so a reordered but identical schema reported
+ * false drift.
+ *
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {boolean} true when both sides are the same JSON value.
+ */
+export function jsonDeepEqual(a, b) {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+  const aIsArray = Array.isArray(a)
+  if (aIsArray !== Array.isArray(b)) return false
+  if (aIsArray) {
+    if (a.length !== b.length) return false
+    return a.every((item, index) => jsonDeepEqual(item, b[index]))
+  }
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false
+    if (!jsonDeepEqual(a[key], b[key])) return false
+  }
+  return true
+}
+
+// ── sandbox mutation gate (shared by the orchestrator and Linear facets) ───
+/**
+ * Build the one place either facet is allowed to decide whether a mutation is
+ * permitted by the CURRENT sandbox policy.
+ *
+ * The `fs` service exposes no create-directory, copy, or remove primitive —
+ * its entire mutation surface is writeText/editText, and those are the only
+ * methods a backend fences. Those three verbs therefore cannot route through
+ * `fs`, and they must not reach `subprocess` unchecked either, because
+ * `dsh-subprocess-local` never consults the sandbox policy. This gate closes
+ * that seam: the resolved per-call mode is consulted first (`read-only`
+ * refuses), then the mutated location must sit inside the policy's workspace
+ * root.
+ *
+ * The check is narrow by design. It bounds the verbs that cannot use `fs`; it
+ * is NOT a general path guard, and the preset's path/operation guard remains a
+ * post-attempt audit rather than a preventive control.
+ *
+ * Pure: every platform capability arrives as an injected dependency, so the
+ * core keeps its no-filesystem/no-network contract.
+ *
+ * @param {object} deps
+ * @param {object} deps.fs resolved `ctx.fs` (resolve + processPath required).
+ * @param {object|undefined} deps.sandboxPolicy resolved `ctx.sandboxPolicy`.
+ * @param {object} deps.pathutil the preset's pure path helper.
+ * @param {string} deps.baseDir the calling tool's base directory.
+ * @param {object|undefined} deps.exec the tool execution context (for its session).
+ * @returns {(target: unknown) => Promise<string|null>} `checked(target)` returns
+ *   the process path to mutate, or `null` when no policy service is composed
+ *   (the caller must then refuse rather than mutate unverified). Throws an
+ *   error carrying `code: 'FS_SANDBOX_DENIED'` when the policy refuses.
+ */
+export function makeMutationGate({ fs, sandboxPolicy, pathutil, baseDir, exec }) {
+  if (!fs || typeof fs.resolve !== 'function') throw new Error('makeMutationGate: the fs service is required')
+  if (!pathutil || typeof pathutil.normalize !== 'function') throw new Error('makeMutationGate: pathutil is required')
+
+  const normalize = (value) => pathutil.normalize(String(value))
+
+  function resolveRequest() {
+    const session = exec?.agent?.session
+    return session === undefined ? {} : { session }
+  }
+
+  function sandboxFor() {
+    if (sandboxPolicy === undefined || typeof sandboxPolicy.resolve !== 'function') return null
+    try {
+      return sandboxPolicy.resolve(resolveRequest())
+    } catch {
+      // An unresolvable policy is not an absent one: fail closed.
+      return { mode: 'read-only', workspaceRoot: normalize(baseDir) }
+    }
+  }
+
+  function isWithin(candidate, root) {
+    const normalizedRoot = normalize(root)
+    if (candidate === normalizedRoot) return true
+    return candidate.startsWith(normalizedRoot === '/' ? '/' : normalizedRoot + '/')
+  }
+
+  function denial(message) {
+    const error = new Error(message)
+    error.code = 'FS_SANDBOX_DENIED'
+    return error
+  }
+
+  async function checked(target) {
+    const resolved = await fs.resolve(target, { cwd: normalize(baseDir) })
+    const label = typeof fs.processPath === 'function'
+      ? fs.processPath(resolved)
+      : normalize(target)
+    const policy = sandboxFor()
+    // No policy service composed: this deployment runs no fence at all, which
+    // is exactly the bare-`fs` posture (`dsh-fs-local` ignores a policy it is
+    // never given). The web profile always composes `dsh-sandbox-policy`, so
+    // this branch is the unwrapped/SDK case, not an escape.
+    if (policy === null) return label
+    if (policy.mode === 'danger-full-access') return label
+    if (policy.mode === 'read-only') {
+      throw denial('cannot modify "' + label + '": file access denied under read-only mode')
+    }
+    const root = pathutil.resolve(normalize(policy.workspaceRoot ?? baseDir), '')
+    if (!isWithin(label, root)) {
+      throw denial('cannot modify "' + label + '": file access denied under ' + policy.mode + ' mode; the location is outside the workspace root ' + root)
+    }
+    return label
+  }
+
+  return checked
 }
 

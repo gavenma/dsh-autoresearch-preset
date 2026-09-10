@@ -245,7 +245,7 @@ function assertClosedShape(result) {
   }
   const result = await preflight.execute({ ...argsBase, projectId: 'pf-figure', availability: figureAvailability, config: figureConfig }, exec)
   assert.equal(result.blocked, true)
-  const imageBlocker = result.findings.filter((f) => f.missing === 'model route' && /not image-capable/.test(f.remediation))
+  const imageBlocker = result.findings.filter((f) => f.missing === 'model route' && /declared text-only/.test(f.remediation))
   assert.equal(imageBlocker.length, 1, JSON.stringify(result.findings.filter((f) => f.missing === 'model route')))
   assert.equal(imageBlocker[0].severity, 'blocker')
   assert.match(imageBlocker[0].remediation, /image-capable route is required/)

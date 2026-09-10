@@ -105,9 +105,9 @@ A JSON object with:
   sentence of the span; must be at least 20 normalized chars and match
   final.tex verbatim or by sentence/paragraph containment), paragraph
   anchor, span, sourceContributionIds ("<nodeId>:<unitId>" — the contribution
-  unit ids from each node's node-output.json ledger; see the "Contribution
-  IDs and the node-output.json ledger" section of skills/research-project/
-  SKILL.md), evidenceReferences, transform
+  unit ids from each node's node-output.json ledger; see the `node-output.json`
+  bullet under "TeX acceptance rules (nodes and integration)" in
+  skills/research-project/SKILL.md), evidenceReferences, transform
   (verbatim|paraphrase|merge|derived-synthesis).
 - "dispositions": for every required contribution — contributionId
   ("<nodeId>:<unitId>") and one of included|merged|superseded|waived.
@@ -145,8 +145,9 @@ directory before acceptance AND listed in the contract. There is no
 declared list is not published, and the project's format is whatever the
 contract exposes — a Markdown or PDF-only product has no TeX requirement.
 
-Finalize applies the exposure policy (see the "Output policy (finalize, v8)"
-section of skills/research-project/SKILL.md): the declared list goes to
+Finalize applies the exposure policy (see the "Output policy (finalize —
+single source of truth)" section of skills/research-project/SKILL.md): the
+declared list goes to
 `outputs/<projectId>/` at its exact declared paths; an exposed TeX master
 pulls its minimal local source-support closure (inputs, graphics, labels —
 missing ones fail publication), so stage every fragment the master

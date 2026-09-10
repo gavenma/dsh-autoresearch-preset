@@ -99,13 +99,14 @@ npm run install:preset -- "$HOME/.dsh/.agent-presets/research"
 - `tools/` — the generated runtime: orchestrator, core engine, Linear
   adapter, bounded web/PDF fetcher.
 - `src/` — editable source; `scripts/` builds/verifies/installs; `tests/`
-  holds the 33-target regression suite.
+  holds the regression suite (`npm test`).
 - `briefs/demo-brief.md` — a synthetic brief for an end-to-end demo.
 
 ## Requirements
 
 - A compatible DSH installation (recorded and tested with
-  `@deepseek-ai/dsh` `0.1.2-rc.1`).
+  `@deepseek-ai/dsh` `0.1.5-rc.1`; the composition uses the split
+  `prefix`+`suffix` persona shape introduced in 0.1.5).
 - Node.js 20 or later for build/verify/install scripts (CI runs Node 24).
 - Optional: `LINEAR_API_KEY` in the DSH credentials store for Linear
   workflows; local-only projects never call Linear.

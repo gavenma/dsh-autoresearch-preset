@@ -4,6 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Identity hashing must not depend on locale. `localeCompare` collates by
+// language rules (punctuation weight, case folding) whose implementation varies
+// with the ICU data shipped by the Node release, so the same tree could hash to
+// a different generation on Node 20 than on Node 24 — silently re-identifying
+// the build and stranding the previous generation's bundles. Compare by UTF-16
+// code unit instead: total, locale-free, and identical everywhere.
+const byCodeUnit = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const destination = process.argv[2]
 const replaceConfig = process.argv.includes('--replace-config')
@@ -107,7 +115,7 @@ for (const [relativePath, expectedHash] of Object.entries(deployedManifest.files
 }
 if (mismatches.length > 0) throw new Error('installed runtime verification failed: ' + mismatches.join('; '))
 const aggregateHashes = Object.fromEntries((deployedManifest.aggregateScope ?? []).map((relativePath) => [relativePath, sha256File(path.join(target, relativePath))]))
-const installedAggregateId = crypto.createHash('sha256').update(Object.entries(aggregateHashes).sort(([a], [b]) => a.localeCompare(b)).map(([relativePath, hash]) => relativePath + ':' + hash).join('\n')).digest('hex')
+const installedAggregateId = crypto.createHash('sha256').update(Object.entries(aggregateHashes).sort(([a], [b]) => byCodeUnit(a, b)).map(([relativePath, hash]) => relativePath + ':' + hash).join('\n')).digest('hex')
 if (installedAggregateId !== deployedManifest.aggregateId) throw new Error('installed immutable aggregate mismatch: expected ' + deployedManifest.aggregateId + ', actual ' + installedAggregateId)
 const installReceipt = {
   schemaVersion: 1,
