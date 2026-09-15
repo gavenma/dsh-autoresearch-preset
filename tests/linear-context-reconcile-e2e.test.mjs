@@ -342,18 +342,29 @@ try {
       'the tool fails closed when the commit response is lost',
     )
     assert.equal(remote.descriptionMutations, mutationsBefore + 1, 'the description mutation landed remotely')
-    // The crash left a pending recovery cache and a replayable outbox record.
+    // The crash left a recovery cache entry and a replayable outbox record. The
+    // read path RECONCILES it: the live block already carries the intent digest
+    // (the write landed before the response was lost), so reading the context
+    // confirms and clears the entry instead of reporting a settled write as
+    // outstanding forever. That is the read path's job — nothing else reconciles
+    // it on read, and a lingering `pending` is what made a later CAS fail against
+    // a digest that was never live.
     const pending = await invoke('linear_get_node_context', { issueId: 'ISS-1', projectId, nodeId: 'alpha', baseDir })
-    assert.equal(pending.recoveryCache?.status, 'pending')
-    // Reconciliation confirms the intent from read-back without re-mutating
-    // (the write already landed, so the live block already carries the
-    // intent digest — no duplicate description mutation).
+    assert.equal(pending.recoveryCache?.status, 'confirmed', 'a pending entry whose digest matches the live block is confirmed by the read')
+    // Reconciliation still confirms the outbox intent from read-back without
+    // re-mutating: the write already landed, so replay adds no description
+    // mutation.
     const mutationsAtCrash = remote.descriptionMutations
     const reconcile = await invoke('linear_sync_reconcile', { projectId, baseDir, maxAttempts: 5 })
     const entry = reconcile.results.at(-1)
     assert.equal(entry.status, 'confirmed')
     assert.equal(entry.readBack, true, 'confirmed from a Linear read-back')
-    assert.equal(entry.recoveryCache, 'cleared', 'the recovery cache settles on confirmation and is deleted')
+    // The cache settled at the READ (above), so the replay finds nothing left to
+    // clear and reports the field as absent rather than claiming a second settle.
+    // What matters is that it settled exactly once and the replay stayed
+    // idempotent: asserting a `cleared` here would require the read NOT to
+    // reconcile, which is the behaviour this change removes.
+    assert.equal(entry.recoveryCache ?? null, null, 'the recovery cache was already settled by the read and is gone')
     assert.equal(remote.descriptionMutations, mutationsAtCrash, 'no duplicate description mutation on replay')
     const reparsed = core.parseContextBlock(descriptionOf('ISS-1'))
     assert.equal(reparsed.ok, true)

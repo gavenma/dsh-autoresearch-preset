@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'tools', 'build-manifest.json'), 'utf8'))
 const { createLibraries } = await import(pathToFileURL(path.join(root, manifest.entries.linear)).href)
 const linear = createLibraries.linearCore
+const core = createLibraries.core
 
 const queryHashes = Object.fromEntries(Object.entries(linear.QUERIES).map(([name, query]) => [name, createHash('sha256').update(query).digest('hex')]))
 assert.deepEqual(queryHashes, {
@@ -107,7 +108,26 @@ const noCasEvent = linear.makeSyncEvent({ prevDigest: nextEvent.digest, projectI
 const noCasFops = { ...syncFops }; delete noCasFops.statInfo
 await assert.rejects(() => linear.persistSyncEvent(noCasFops, syncDir, 'p1', noCasEvent), /requires versioned CAS support/)
 const statePath = path.join(syncDir, '.research-agent/projects/p1/state.json')
-await syncFops.writeJson(statePath, { nodes: { n1: { status: 'done', projectionStatus: 'pending', linearProjection: { status: 'done' } } } })
+// A CANONICAL journal, because markProjectionConfirmed now validates before it
+// writes: acknowledging a projection must not be able to persist a journal that a
+// later read would reject.
+// Written THROUGH the versioned fake fs so `statInfo` knows the file: the
+// projection acknowledgement CASes against that version.
+await syncFops.writeJson(statePath, { kind: 'project-state',
+  projectId: 'p1',
+  marker: core.projectMarker('p1'),
+  createdAt: '2026-09-14T00:00:00.000Z',
+  updatedAt: '2026-09-14T00:00:00.000Z',
+  project: { linearProjectId: '', url: '', createdAt: '' },
+  integrationRevision: 1,
+  nodes: { n1: { status: 'done', issueId: '', identifier: '', url: '', linearState: '', runDir: '', runStatus: '', currentStep: '', currentPass: null, hasFinal: false, finalCommentId: '', receipts: [], causalHolds: [], nodeRevision: 1, leaseId: '', failureReason: '', contextDigest: null, contextDigestAt: null, linearProjection: { projectId: 'p1', nodeId: 'n1', status: 'done', blockedBy: [], reason: '', updatedAt: '2026-09-14T00:00:00.000Z' }, projectionStatus: 'pending', updatedAt: '' } },
+  commentCursors: {},
+  integration: { epoch: 1, inputDigest: null, lastKnownGood: null, feedback: [] },
+  lastError: '',
+  // No `digest`: a persisted journal is the record body, and the projection
+  // acknowledgement below mutates it, so a frozen constructor digest would be
+  // stale by definition.
+}, { kind: 'createIfAbsent' })
 const nodeEvent = linear.makeSyncEvent({ projectId: 'p1', nodeId: 'n1', operation: 'node.project', payload: { issueId: 'I1', stateId: 'S1', status: 'done' } })
 const nodeRecord = linear.makeOutboxRecord({ event: nodeEvent, mutation: { operation: 'node.project', payload: nodeEvent.payload } })
 assert.equal((await linear.markProjectionConfirmed(syncFops, syncDir, 'p1', nodeRecord, { remoteId: 'I1' })).ok, true)

@@ -233,4 +233,132 @@ const richState = {
   assert.ok(!core.isContextDigest(digest64('a').slice(0, 63)))
 }
 
+// ── 11. Linear storage normalization: stored `* ` bullets still parse ───────
+// Linear normalizes list bullets to `* ` in stored issue descriptions while
+// GFM task-list items (`- [ ]` / `- [x]`) survive. A block read back from
+// Linear is therefore a MIX of both tokens. Accepting only `- ` made every
+// stored block block-malformed, which failed the read-back/digest
+// confirmation and left linear_get_node_context reporting context-missing
+// even though the issue carried a well-formed block. The bullet token is not
+// owned content, so both forms must rebuild the same state and digest — and
+// that tolerance must not weaken the tamper gates.
+{
+  const rendered = core.renderContextBlock(richState)
+  // Exactly what Linear does: list bullets become `* `, task-list items stay.
+  const stored = rendered.replace(/^- (?!\[[ x]\])/gm, '* ')
+  assert.notEqual(stored, rendered, 'fixture sanity: the stored form uses `* ` bullets')
+  assert.ok(stored.includes('* Status: In progress'), 'visible headers arrive with `* `')
+  assert.ok(stored.includes('- [ ] w2: Run the sensitivity analysis'), 'GFM task-list items survive verbatim')
+
+  const parsed = core.parseContextBlock(stored)
+  assert.equal(parsed.ok, true, 'a block stored by Linear must parse: ' + (parsed.reason ?? ''))
+  assert.deepEqual(parsed.state, core.normalizeContextState(richState), 'the bullet token is not owned content')
+  assert.equal(core.contextBlockDigest(parsed.state), core.contextBlockDigest(richState), 'the digest is unchanged by the bullet token')
+  assert.equal(core.renderContextBlock(parsed.state), rendered, 're-rendering restores the canonical `- ` form')
+
+  // Mixed tokens inside one block parse the same way: the gate is per line.
+  const mixed = rendered.replace('- Status: In progress', '* Status: In progress').replace('- beta (meta: issue: ISS-9; relation: blocks): needs the base rate', '* beta (meta: issue: ISS-9; relation: blocks): needs the base rate')
+  assert.notEqual(mixed, rendered, 'fixture sanity: two stored-form lines were rewritten')
+  assert.equal(core.parseContextBlock(mixed).ok, true, 'mixed `- `/`* ` tokens parse')
+  assert.equal(core.contextBlockDigest(core.parseContextBlock(mixed).state), core.contextBlockDigest(richState))
+
+  // Placeholder and next-action sentinels are recognized in the stored form.
+  const emptyState = core.normalizeContextState({
+    ...richState, completed: [], findings: [], requiredRevisions: [], remaining: [], dependencies: [], nextAction: null,
+  })
+  const storedEmpty = core.renderContextBlock(emptyState).replace(/^- /gm, '* ')
+  assert.ok(storedEmpty.includes('* (none yet)') && storedEmpty.includes('* (none)') && storedEmpty.includes('* (none recorded)'))
+  const parsedEmpty = core.parseContextBlock(storedEmpty)
+  assert.equal(parsedEmpty.ok, true, 'an empty stored block parses')
+  assert.equal(parsedEmpty.state.nextAction, null, '`* (none recorded)` is the empty next action, not an item')
+  assert.deepEqual(parsedEmpty.state.completed, [], '`* (none yet)` is the empty placeholder, not an item')
+
+  // The tolerance must not weaken the gates: tamper is still rejected in the
+  // stored form as well.
+  const tamperedVisible = stored.replace('* Objective: Deliver the analysis section', '* Objective: Deliver a different analysis section')
+  assert.notEqual(tamperedVisible, stored, 'fixture sanity: the objective was rewritten')
+  assert.equal(core.parseContextBlock(tamperedVisible).reason, 'digest-mismatch', 'stored-form tamper is not absorbed by the tolerance')
+  const tamperedItem = stored.replace('* f1: Source A disagrees on the rate', '* f1: Source A disagrees on the rate\n* zz: added by someone else')
+  const itemResult = core.parseContextBlock(tamperedItem)
+  assert.equal(itemResult.reason, 'digest-mismatch', 'an added stored-form bullet rotates the digest')
+  assert.ok(itemResult.state.findings.some((item) => item.id === 'zz'), 'the conflicting item is visible for inspection')
+  assert.equal(core.parseContextBlock(stored.replace('* beta (meta: issue: ISS-9; relation: blocks): needs the base rate', 'beta without a bullet')).reason, 'block-malformed', 'a non-bullet section line stays malformed')
+  assert.equal(core.parseContextBlock(storedEmpty.replace('* (none yet)', 'a stray prose line')).reason, 'block-malformed', 'a non-bullet line in a placeholder section stays malformed')
+  assert.equal(core.parseContextBlock(stored.replace('* Status: In progress', 'Status: In progress')).reason, 'block-malformed', 'a header without its bullet stays malformed')
+  assert.equal(core.parseContextBlock(stored.replace('- [ ] w2: Run the sensitivity analysis', '* [x] w2: Run the sensitivity analysis')).reason, 'block-malformed', 'a stored checkbox toggle still invalidates the block')
+}
+
+// ── 12. a verbatim stored block (mix of both bullet tokens) ─────────────────
+// Test 11 derives the stored form from the renderer, so it would keep passing
+// if the tolerance regressed together with the renderer. This block is written
+// out literally in the shape Linear stores — `* ` bullets, GFM `- [ ]`
+// task-list items that survive normalization, `* (none)` placeholders — and is
+// SELF-VALIDATING: the signed digest is checked against the rebuilt state and
+// the block is checked against its canonical render, so a fixture that stopped
+// matching the grammar (or a parser that stopped accepting `* `) fails loudly
+// instead of quietly testing nothing.
+{
+  const storedText = [
+    '<!-- autoresearch-context-block:start -->',
+    'node: alpha',
+    'context-digest: 78261b0116c7171d32e97f9cdfd8dad7a242425e82df4946ee6c5b4949ae84ab',
+    'watermark: 2026-09-01T00:00:00.000Z',
+    'last-verified: 2026-09-01T01:00:00.000Z ' + digest64('b'),
+    'contract-plan-revision: 1',
+    'contract-node-revision: 2',
+    'contract-digest: ' + digest64('c'),
+    'evidence-refs: [{"hash":"' + digest64('a') + '","kind":"file","ref":"out/draft.md"}]',
+    '',
+    '## AutoResearch Current Node Context',
+    '',
+    '* Status: In progress',
+    '* Objective: Deliver the analysis section',
+    '* Contract revision: plan 1 / node 2 (digest ' + digest64('c').slice(0, 12) + '...)',
+    '* Last verified: 2026-09-01T01:00:00.000Z',
+    '',
+    '### Completed',
+    '',
+    '* [x] w1: Draft outline - evidence: draft.md (run-1)',
+    '',
+    '### Current Findings',
+    '',
+    '* f1: Source A disagrees on the rate - evidence: user:c-123',
+    '',
+    '### Required Revisions',
+    '',
+    '* rev-1: Missing error bars (meta: source: user; affected: accuracy; change: add confidence intervals)',
+    '',
+    '### Remaining Work',
+    '',
+    '- [ ] w2: Run the sensitivity analysis',
+    '',
+    '### Dependencies and Holds',
+    '',
+    '* beta (meta: issue: ISS-9; relation: blocks): needs the base rate',
+    '',
+    '### Next Action',
+    '',
+    '* Finish sensitivity analysis (meta: owner: research_author; expected output: sensitivity.md; acceptance: table present)',
+    '<!-- autoresearch-context-block:end -->',
+  ].join('\n')
+  const result = core.parseContextBlock(storedText)
+  assert.equal(result.ok, true, 'the stored fixture must parse: ' + (result.reason ?? ''))
+  // Self-validation, two ways: the digest that was signed is the digest of the
+  // rebuilt state, and the block is the canonical render of that state modulo
+  // the bullet token. A hand-edited fixture cannot satisfy both.
+  assert.equal(core.contextBlockDigest(result.state), '78261b0116c7171d32e97f9cdfd8dad7a242425e82df4946ee6c5b4949ae84ab', 'the fixture digest must match the rebuilt state')
+  const structural = (text) => text.split('\n').map((line) => line.trim().replace(/^\* /, '- ')).filter((line) => line !== '').join('\n')
+  assert.equal(structural(storedText), structural(core.renderContextBlock(result.state)), 'the fixture is the canonical block rendered with `* ` bullets')
+  // Both tokens are one grammar: `* [x]` completed items and the interleaved
+  // GFM `- [ ]` remaining items both contribute real items.
+  assert.equal(result.state.completed[0].id, 'w1', 'a `* [x]` completed item parses')
+  assert.equal(result.state.remaining[0].id, 'w2', 'a `- [ ]` remaining item parses')
+  assert.equal(result.state.findings[0].evidence, 'user:c-123', 'evidence survives the stored form')
+  assert.deepEqual(result.state.requiredRevisions[0].affectedCriteria, ['accuracy'], 'the meta group survives the stored form')
+  assert.equal(result.state.dependencies[0].relation, 'blocks', 'a dependency with a meta group parses')
+  assert.equal(result.state.nextAction.expectedOutput, 'sensitivity.md', 'the next-action meta group parses')
+  // A write → store → read cycle keeps signing the same digest.
+  assert.ok(core.renderContextBlock(result.state).includes('context-digest: 78261b0116c7171d32e97f9cdfd8dad7a242425e82df4946ee6c5b4949ae84ab'))
+}
+
 console.log('linear node context core tests passed for generation ' + manifest.generation)

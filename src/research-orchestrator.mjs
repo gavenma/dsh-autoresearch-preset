@@ -901,9 +901,16 @@ function makeScoring(pathutil, util, config) {
   scoring.parseRanking = function (text, allowedLabels, anonymizedToOriginal) {
     const errors = []
     const labels = util.nonEmptyStringArray(allowedLabels, [])
+    // Fail closed on an empty label set. Extraction is by label index, so no
+    // labels cannot yield a ranking - returning valid:true with an empty ranking
+    // is a silent success that reads as "the judge ranked nothing", which is
+    // indistinguishable from a real all-empty verdict downstream.
+    if (labels.length === 0) {
+      return { valid: false, ranking: [], originalRanking: null, errors: ['allowedLabels is required: ranking extraction is by label index, so an empty label set cannot produce a ranking.'] }
+    }
     const rankingLine = extractRankingLine(text)
     if (!rankingLine) {
-      return { valid: false, ranking: [], errors: ['Missing RANKING: line.'] }
+      return { valid: false, ranking: [], originalRanking: null, errors: ['Missing RANKING: line.'] }
     }
 
     const positions = labels
@@ -2229,7 +2236,7 @@ function makeRoleRunner(deps = {}) {
     return { signal: controller.signal, state }
   }
 
-  function classify({ result, resultError, startError, timeoutState, outputMode }) {
+  function classify({ result, resultError, startError, timeoutState, outputMode, expectedPayload = null }) {
     if (timeoutState.timedOut) return { outcomeClass: 'timeout', retryable: false, stopReason: 'timeout', diagnostic: 'role timeout elapsed' }
     if (timeoutState.aborted) return { outcomeClass: 'aborted', retryable: false, stopReason: 'aborted', diagnostic: 'caller cancellation requested' }
     if (startError) return { outcomeClass: 'infrastructure-start', retryable: true, stopReason: 'error', diagnostic: bounded(errorMessage(startError)) }
@@ -2240,6 +2247,7 @@ function makeRoleRunner(deps = {}) {
     if (stopReason === 'completed') {
       if (outputMode === 'schema' && result?.structured === undefined) return { outcomeClass: 'schema-miss', retryable: false, stopReason, diagnostic: diagnostic ?? 'structured result was not captured' }
       if (outputMode !== 'schema' && output.length === 0) return { outcomeClass: 'empty-output', retryable: false, stopReason, diagnostic: diagnostic ?? 'completed child returned no assistant output' }
+      if (!core.payloadIsComplete(output, expectedPayload)) return { outcomeClass: 'output-contract-miss', retryable: true, stopReason, diagnostic: 'the attempt stopped before its declared payload (' + expectedPayload + ') was complete' }
       return { outcomeClass: 'success', retryable: false, stopReason, diagnostic }
     }
     if (stopReason === 'error') {
@@ -2330,7 +2338,15 @@ function makeRoleRunner(deps = {}) {
       try { combined.state.dispose() } catch {}
     }
 
-    const classified = classify({ result, resultError, startError, timeoutState: combined.state, outputMode })
+    // The declared payload rides on the role task, which is the one record that
+    // already crosses this boundary; `expectedPayload` is optional, so a task that
+    // declares nothing keeps exactly today's behaviour.
+    const classified = classify({
+      result, resultError, startError, timeoutState: combined.state, outputMode,
+      expectedPayload: util.isPlainObject(params.roleTask) && typeof params.roleTask.expectedPayload === 'string' && params.roleTask.expectedPayload
+        ? params.roleTask.expectedPayload
+        : null,
+    })
     const rawOutput = outputText(result?.output)
     const structured = result?.structured
     const content = outputMode === 'schema' && structured !== undefined
@@ -2338,9 +2354,25 @@ function makeRoleRunner(deps = {}) {
       : rawOutput
     const complete = classified.outcomeClass === 'success'
     let outputRef = null
-    if (params.runDir) {
+    // Persist the attempt output in EVERY mode. A bound run writes under its run
+    // dir; an unbound run has no run dir, so it writes under the artifact root at
+    // the mirror path, keyed by the same logical group id. Without this an unbound
+    // run returned `outputRef: null` and the coordinator had to mine decompressed
+    // session logs to recover a long output that the 4000-char preview truncated.
+    const declaredOutput = core.attemptOutputPath({
+      runDir: params.runDir,
+      baseDir: params.baseDir,
+      artifactRoot: params.artifactRoot,
+      logicalGroupId: groupId,
+      attemptId: attemptId(attemptNumber),
+      outputMode,
+    })
+    if (declaredOutput) {
+      const outputPath = declaredOutput.kind === 'bound'
+        ? pathutil.resolveInside(params.runDir, declaredOutput.relative)
+        : pathutil.resolveInside(pathutil.join(params.baseDir, declaredOutput.root), declaredOutput.relative)
       outputRef = {
-        path: outputRefPath(pathutil, params.runDir, groupId, attemptId(attemptNumber), outputMode),
+        path: outputPath,
         hash: core.sha256Text(content),
         length: content.length,
         complete,
@@ -2376,6 +2408,9 @@ function makeRoleRunner(deps = {}) {
       output: rawOutput.slice(0, previewLimit),
       outputPreview: rawOutput.slice(0, previewLimit),
       outputLength: rawOutput.length,
+      // Report what actually happened: a reader who sees a short `output` must not
+      // have to guess whether the child produced little or the preview cut it.
+      outputTruncated: rawOutput.length > previewLimit,
       outputRef,
       structured: structured === undefined ? null : structured,
       cleanupDegraded: cleanupError !== null,
@@ -2401,7 +2436,15 @@ function makeRoleRunner(deps = {}) {
     const logicalGroupKey = params.logicalGroupKey
       ? { ...params.logicalGroupKey, route: { ...(util.isPlainObject(params.logicalGroupKey.route) ? params.logicalGroupKey.route : {}), ...routeIdentity } }
       : null
-    const groupId = logicalGroupKey ? logicalId(logicalGroupKey) : 'lg-' + core.sha256Text(JSON.stringify({ role: params.role, task: params.task ?? '', route: routeIdentity })).slice(0, 24)
+    // The unbound key must carry `pass`, or two planning passes dispatching the
+    // same role with byte-identical task text collide on ONE group id - and that id
+    // is the attempt identity, so they would share an attempt directory and output
+    // filenames. `pass` comes from `params.roleTask`, NOT the local `roleTask`:
+    // the local is declared further down, so reading it here is a temporal dead
+    // zone error. The fallback of 0 matches today's behaviour for a call that
+    // supplies no role task.
+    const unboundPass = Number.isInteger(params.roleTask?.pass) ? params.roleTask.pass : 0
+    const groupId = logicalGroupKey ? logicalId(logicalGroupKey) : 'lg-' + core.sha256Text(JSON.stringify({ role: params.role, task: params.task ?? '', pass: unboundPass, route: routeIdentity })).slice(0, 24)
     if (contractBound && !params.logicalGroupKey) throw new Error('logicalGroupKey is required for contract-bound role calls.')
     // Typed handoff (plan §6.1): contract-bound calls carry the full run
     // identity, and the coordinator may supply the canonical role-task record
@@ -2409,15 +2452,23 @@ function makeRoleRunner(deps = {}) {
     let identity = null
     if (contractBound) {
       const key = params.logicalGroupKey
+      // A planning run is bound to its RUN, not to a node: it is project-scoped and
+      // has no node contract, because there is no node. Requiring node-scoped
+      // identity of it is the same category error as requiring the node contract,
+      // one gate later. The declared scope - the run's own `planning` flag, carried
+      // in the handoff - decides which identity is required.
+      const planning = key.scope === 'planning'
       identity = {
+        scope: planning ? 'planning' : 'execution',
         runDigest: typeof key.runDigest === 'string' ? key.runDigest : '',
         projectId: typeof key.projectId === 'string' ? key.projectId : '',
         nodeId: typeof key.nodeId === 'string' ? key.nodeId : '',
         contractDigest: typeof key.contractDigest === 'string' ? key.contractDigest : '',
         pass: Number.isInteger(key.pass) ? key.pass : 0,
       }
-      for (const field of ['runDigest', 'projectId', 'nodeId', 'contractDigest']) {
-        if (!identity[field]) throw new Error('logicalGroupKey.' + field + ' is required for contract-bound role calls (typed handoff).')
+      const requiredIdentity = planning ? ['projectId'] : ['runDigest', 'projectId', 'nodeId', 'contractDigest']
+      for (const field of requiredIdentity) {
+        if (!identity[field]) throw new Error('logicalGroupKey.' + field + ' is required for ' + (planning ? 'planning' : 'contract-bound execution') + ' role calls (typed handoff).')
       }
       if (identity.pass < 0) throw new Error('logicalGroupKey.pass must be a zero-based non-negative integer.')
     }
@@ -2432,7 +2483,11 @@ function makeRoleRunner(deps = {}) {
       delete incoming.digest
       roleTask = core.makeRecord('role-task', { ...incoming, logicalGroupId: groupId })
       if (contractBound) {
-        for (const field of ['runDigest', 'projectId', 'nodeId', 'contractDigest']) {
+        // Only the fields this kind of run actually has: a planning role-task
+        // declares no node identity, so comparing them would compare '' to '' and
+        // assert nothing while implying it had.
+        const boundFields = identity.scope === 'planning' ? ['projectId'] : ['runDigest', 'projectId', 'nodeId', 'contractDigest']
+        for (const field of boundFields) {
           if (roleTask[field] !== identity[field]) throw new Error('roleTask.' + field + ' does not match the bound run identity.')
         }
       }
@@ -3343,21 +3398,26 @@ function makeProjectState(pathutil, util, planvalidate) {
     // artifact root; there is no bare-root fallback.
     const path = projectstate.statePath(baseDir, projectId, artifactRoot)
     if (!await fops.exists(path)) {
+      // A missing journal is the one case where a plan-derived template is
+      // correct rather than a lie: there is nothing to lose.
       const state = projectstate.emptyState(plan)
-      return { state, path, missing: true, invalid: false }
+      return { state, path, missing: true, invalid: false, health: 'missing', errors: [] }
     }
     const raw = await fops.readJson(path)
+    // `state: null` on a present-but-invalid journal, NOT a substituted template.
+    // Returning the plan-derived empty state here was the erase: a caller merged
+    // into it and wrote the emptiness back as the whole journal, which is how
+    // node entries and `createdAt` were silently lost. Absent and invalid are
+    // different facts and now carry different values - a caller cannot use a
+    // projection by forgetting to check a flag.
     if (!util.isPlainObject(raw)) {
-      const state = projectstate.emptyState(plan)
-      return { state, path, missing: false, invalid: true }
+      return { state: null, path, missing: false, invalid: true, health: 'invalid', errors: [path + ' is not a JSON object; the journal is unreadable.'] }
     }
     // Canonical boundary: a journal carrying a schemaVersion is an old shape.
-    // It is replayable (the journal reconciles from plan + Linear) but is
-    // rejected here; the offline migrator writes a reviewed migrated workspace
-    // without treating this runtime load as migration authority.
+    // It is rejected here; the offline migrator writes a reviewed migrated
+    // workspace without treating this runtime load as migration authority.
     if ('schemaVersion' in raw) {
-      const state = projectstate.emptyState(plan)
-      return { state, path, missing: false, invalid: true, error: core.NOT_CANONICAL_ERROR }
+      return { state: null, path, missing: false, invalid: true, health: 'invalid', error: core.NOT_CANONICAL_ERROR, errors: [core.NOT_CANONICAL_ERROR] }
     }
     // Heal node drift silently: ensure every plan node has an entry.
     const nodes = { ...(util.isPlainObject(raw.nodes) ? raw.nodes : {}) }
@@ -3377,9 +3437,72 @@ function makeProjectState(pathutil, util, planvalidate) {
     // plan-derived empty template and is never migrated in place.
     const canonical = core.validateRecord(state)
     if (!canonical.ok) {
-      return { state: projectstate.emptyState(plan), path, missing: false, invalid: true, error: canonical.errors.join(' ') }
+      return { state: null, path, missing: false, invalid: true, health: 'invalid', errors: canonical.errors, error: canonical.errors.join(' ') }
     }
-    return { state, path, missing: false, invalid: false }
+    return { state, path, missing: false, invalid: false, health: 'valid', errors: [] }
+  }
+
+  // The ONE write entry point for the journal. It re-reads and validates before
+  // writing and REFUSES an invalid journal rather than repairing it, because a
+  // write is where a projection would become truth. `mutation` is a pure
+  // transform of the freshly-read state plus its own arguments - it must not
+  // close over a pre-read snapshot or perform side effects, so a CAS retry can
+  // re-apply it safely.
+  projectstate.mutateState = async function (fops, baseDir, projectId, plan, mutation, artifactRoot = '.research-agent') {
+    if (typeof mutation !== 'function') throw new Error('mutateState requires a mutation function (state, context) => void.')
+    const statePath = projectstate.statePath(baseDir, projectId, artifactRoot)
+    const conflict = (detail) => Object.assign(new Error('PROJECT_STATE_CONFLICT: ' + detail + ' Nothing was written; re-read the journal and re-apply.'), { code: 'PROJECT_STATE_CONFLICT', path: statePath })
+    // Probe the version BEFORE the read and CAS against that probe. A writer that
+    // changes the journal while we are reading therefore loses the CAS instead of
+    // being overwritten by a snapshot taken mid-change. A lost CAS is a REFUSAL,
+    // not a silent retry: the caller re-reads and re-applies deliberately, which
+    // is what makes a conflict legible rather than invisible.
+    const versionBefore = typeof fops.statInfo === 'function' ? (await fops.statInfo(statePath))?.version : undefined
+    const loaded = await projectstate.loadState(fops, baseDir, projectId, plan, artifactRoot)
+    if (loaded.health === 'invalid') {
+      throw Object.assign(new Error('PROJECT_STATE_INVALID: the journal at ' + loaded.path + ' failed validation and was NOT written. ' + loaded.errors.join(' ')
+        + ' Repair it offline or re-derive it; this write was refused so a read failure cannot become durable.'), { code: 'PROJECT_STATE_INVALID', path: loaded.path, errors: loaded.errors })
+    }
+    // The READ must be atomic with respect to the version probe: if the file moved
+    // while it was being read, what we hold is a torn view of somebody else's
+    // write and nothing derived from it may be persisted.
+    if (versionBefore !== undefined && typeof fops.statInfo === 'function') {
+      const versionAfter = (await fops.statInfo(statePath))?.version
+      if (versionAfter !== undefined && versionAfter !== versionBefore) throw conflict('the journal at ' + statePath + ' changed while it was being read.')
+    }
+    const state = loaded.state
+    mutation(state, { plan, projectId, artifactRoot })
+    state.updatedAt = new Date().toISOString()
+    const check = core.validateRecord(state)
+    if (!check.ok) {
+      throw Object.assign(new Error('PROJECT_STATE_INVALID: the mutation produced an invalid journal, so nothing was written. ' + check.errors.join(' ')), { code: 'PROJECT_STATE_INVALID', path: statePath, errors: check.errors })
+    }
+    // Three cases, and the distinction matters: an existing file is replaced only
+    // if its version still matches the probe; a file that does not exist is
+    // CREATED, so a plan-derived template can never replace one that was merely
+    // unreadable; and where the filesystem reports no version at all (the test
+    // doubles, and any adapter without version support) the write is a plain
+    // replace, because a created path here would collide with the file we just
+    // read.
+    const writeMode = versionBefore !== undefined
+      ? { kind: 'replaceIfVersion', version: versionBefore }
+      : (loaded.health === 'missing' ? { kind: 'createIfAbsent' } : undefined)
+    try {
+      await projectstate.saveState(fops, baseDir, projectId, state, artifactRoot, statePath, writeMode)
+    } catch (error) {
+      if (isStaleVersionError(error)) throw conflict('the journal at ' + statePath + ' changed while this write was in flight.')
+      throw error
+    }
+    return { state, path: statePath }
+  }
+
+  // The host reports a lost compare-and-swap as a stale-version filesystem error.
+  // Matched on the structured code where available, with the message as a
+  // fallback, so a rename of the code does not silently disable the retry.
+  function isStaleVersionError(error) {
+    const code = error?.code ?? error?.cause?.code ?? ''
+    if (String(code).includes('STALE_VERSION')) return true
+    return /STALE_VERSION|version mismatch|changed since it was read/i.test(String(error?.message ?? ''))
   }
 
   projectstate.saveState = async function (fops, baseDir, projectId, state, artifactRoot = '.research-agent', statePathOverride = '', writeMode = undefined) {
@@ -3393,20 +3516,16 @@ function makeProjectState(pathutil, util, planvalidate) {
   projectstate.patchNode = async function (fops, baseDir, projectId, nodeId, patch) {
     const plan = await projectstate.loadPlan(fops, baseDir, projectId)
     if (!plan.ok) throw new Error(plan.error)
-    const statePath = projectstate.statePath(baseDir, projectId, plan.artifactRoot)
-    const stateStat = typeof fops.statInfo === 'function' ? await fops.statInfo(statePath) : null
-    const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
-    const { state } = loaded
-    const entry = state.nodes[nodeId]
-    if (!entry) throw new Error(`Unknown node id: ${nodeId}`)
-    Object.assign(entry, patch)
-    if (Array.isArray(patch.receipts)) {
-      const seen = new Set(entry.receipts ?? [])
-      entry.receipts = [...seen, ...patch.receipts.filter((receipt) => !seen.has(receipt))]
-    }
-    entry.updatedAt = new Date().toISOString()
-    const writeMode = stateStat?.version ? { kind: 'replaceIfVersion', version: stateStat.version } : undefined
-    await projectstate.saveState(fops, baseDir, projectId, state, plan.artifactRoot, loaded.path, writeMode)
+    const { state } = await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (next) => {
+      const entry = next.nodes[nodeId]
+      if (!entry) throw new Error(`Unknown node id: ${nodeId}`)
+      Object.assign(entry, patch)
+      if (Array.isArray(patch.receipts)) {
+        const seen = new Set(entry.receipts ?? [])
+        entry.receipts = [...seen, ...patch.receipts.filter((receipt) => !seen.has(receipt))]
+      }
+      entry.updatedAt = new Date().toISOString()
+    }, plan.artifactRoot)
     return state
   }
 
@@ -3415,62 +3534,64 @@ function makeProjectState(pathutil, util, planvalidate) {
     if (!allowed[transition]) throw new Error('unknown node transition: ' + transition)
     const plan = await projectstate.loadPlan(fops, baseDir, projectId)
     if (!plan.ok) throw new Error(plan.error)
-    const statePath = projectstate.statePath(baseDir, projectId, plan.artifactRoot)
-    const stateStat = typeof fops.statInfo === 'function' ? await fops.statInfo(statePath) : null
-    const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
-    const entry = loaded.state.nodes?.[nodeId]
-    if (!entry) throw new Error('Unknown node id: ' + nodeId)
-    if (entry.status === 'blocked' && transition !== 'hold') throw new Error('user-decision blocked node cannot be transitioned automatically: ' + nodeId)
+    // No pre-read here: mutateState reads the journal and refuses an invalid one,
+    // so a read taken first would (a) duplicate that work and (b) consume the
+    // version probe before the write, hiding an interleaved change instead of
+    // failing on it. The per-transition requirements below are pure argument
+    // checks and need no journal.
     const next = { ...patch, status: allowed[transition], updatedAt: new Date().toISOString() }
     if (transition === 'hold' && !Array.isArray(patch.causalHolds)) throw new Error('hold transition requires causalHolds')
     if (transition === 'fail' && typeof patch.failureReason !== 'string' || transition === 'fail' && !patch.failureReason.trim()) throw new Error('fail transition requires failureReason')
     if (transition === 'complete') next.causalHolds = []
-    const linearProjectId = loaded.state.project?.linearProjectId
-    const linearBound = typeof linearProjectId === 'string' && linearProjectId.trim() !== ''
-    if (linearBound) {
-      // Plan §7.4: claim/resume(retry)/complete on a Linear-backed project
-      // require the digest of the freshly queried Linear Current Node
-      // Context block. The digest is stored as a pointer/checksum only —
-      // state.json never carries a narrative context copy (plan §7.1).
-      if (typeof patch.contextDigest === 'string' && !core.isContextDigest(patch.contextDigest)) {
-        throw new Error('contextDigest must be a 64-hex SHA-256 digest of the Linear Current Node Context block (plan §7.4)')
-      }
-      if (['claim', 'complete', 'retry'].includes(transition) && !core.isContextDigest(patch.contextDigest)) {
-        throw new Error('linear-bound ' + transition + ' requires contextDigest: read the Linear issue with linear_get_node_context and pass the current Current Node Context block digest (plan §7.4).')
-      }
-      if (core.isContextDigest(patch.contextDigest)) {
-        next.contextDigest = patch.contextDigest
-        next.contextDigestAt = next.updatedAt
-      }
-    }
-    if (linearBound) {
-      next.projectionStatus = 'pending'
-      next.linearProjection = {
-        projectId,
-        nodeId,
-        status: next.status,
-        blockedBy: (next.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []),
-        reason: (next.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; '),
-        updatedAt: next.updatedAt,
-      }
-    }
-    Object.assign(entry, next)
-    if (transition === 'complete') {
-      for (const [otherId, other] of Object.entries(loaded.state.nodes ?? {})) {
-        if (otherId === nodeId || !Array.isArray(other?.causalHolds)) continue
-        const before = core.stableStringify(other.causalHolds)
-        other.causalHolds = other.causalHolds.map((hold) => ({ ...hold, blockedBy: (hold.blockedBy ?? []).filter((id) => id !== nodeId) })).filter((hold) => hold.blockedBy.length > 0)
-        if (core.stableStringify(other.causalHolds) === before) continue
-        other.updatedAt = next.updatedAt
-        if (typeof linearProjectId === 'string' && linearProjectId.trim()) {
-          other.projectionStatus = 'pending'
-          other.linearProjection = { projectId: linearProjectId, nodeId: otherId, status: other.status, blockedBy: other.causalHolds.flatMap((hold) => hold.blockedBy ?? []), reason: other.causalHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: next.updatedAt }
+    let latest = null
+    await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (state) => {
+      const entry = state.nodes?.[nodeId]
+      if (!entry) throw new Error('Unknown node id: ' + nodeId)
+      if (entry.status === 'blocked' && transition !== 'hold') throw new Error('user-decision blocked node cannot be transitioned automatically: ' + nodeId)
+      const linearProjectId = state.project?.linearProjectId
+      const linearBound = typeof linearProjectId === 'string' && linearProjectId.trim() !== ''
+      if (linearBound) {
+        // Plan §7.4: claim/resume(retry)/complete on a Linear-backed project
+        // require the digest of the freshly queried Linear Current Node Context
+        // block. The digest is stored as a pointer/checksum only - state.json
+        // never carries a narrative context copy (plan §7.1).
+        if (typeof patch.contextDigest === 'string' && !core.isContextDigest(patch.contextDigest)) {
+          throw new Error('contextDigest must be a 64-hex SHA-256 digest of the Linear Current Node Context block (plan §7.4)')
+        }
+        if (['claim', 'complete', 'retry'].includes(transition) && !core.isContextDigest(patch.contextDigest)) {
+          throw new Error('linear-bound ' + transition + ' requires contextDigest: read the Linear issue with linear_get_node_context and pass the current Current Node Context block digest (plan §7.4).')
+        }
+        if (core.isContextDigest(patch.contextDigest)) {
+          next.contextDigest = patch.contextDigest
+          next.contextDigestAt = next.updatedAt
+        }
+        next.projectionStatus = 'pending'
+        next.linearProjection = {
+          projectId,
+          nodeId,
+          status: next.status,
+          blockedBy: (next.causalHolds ?? []).flatMap((hold) => hold.blockedBy ?? []),
+          reason: (next.causalHolds ?? []).map((hold) => hold.reason).filter(Boolean).join('; '),
+          updatedAt: next.updatedAt,
         }
       }
-    }
-    const writeMode = stateStat?.version ? { kind: 'replaceIfVersion', version: stateStat.version } : undefined
-    await projectstate.saveState(fops, baseDir, projectId, loaded.state, plan.artifactRoot, loaded.path, writeMode)
-    return { nodeId, transition, state: loaded.state }
+      Object.assign(entry, next)
+      if (transition === 'complete') {
+        for (const [otherId, other] of Object.entries(state.nodes ?? {})) {
+          if (otherId === nodeId || !Array.isArray(other?.causalHolds)) continue
+          const before = core.stableStringify(other.causalHolds)
+          other.causalHolds = other.causalHolds.map((hold) => ({ ...hold, blockedBy: (hold.blockedBy ?? []).filter((id) => id !== nodeId) })).filter((hold) => hold.blockedBy.length > 0)
+          if (core.stableStringify(other.causalHolds) === before) continue
+          other.updatedAt = next.updatedAt
+          if (typeof linearProjectId === 'string' && linearProjectId.trim()) {
+            other.projectionStatus = 'pending'
+            other.linearProjection = { projectId: linearProjectId, nodeId: otherId, status: other.status, blockedBy: other.causalHolds.flatMap((hold) => hold.blockedBy ?? []), reason: other.causalHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: next.updatedAt }
+          }
+        }
+      }
+      latest = state
+    }, plan.artifactRoot)
+    return { nodeId, transition, state: latest }
   }
 
   // Machine causal holds are an overlay, separate from user-decision blocked.
@@ -3569,17 +3690,22 @@ function makeProjectState(pathutil, util, planvalidate) {
   projectstate.advanceCommentCursor = async function (fops, baseDir, projectId, nodeId, commentIds, artifactRoot = '.research-agent') {
     const plan = await projectstate.loadPlan(fops, baseDir, projectId, artifactRoot)
     if (!plan.ok) throw new Error(plan.error)
-    const { state, path: statePath } = await projectstate.loadState(fops, baseDir, projectId, plan.plan, artifactRoot)
-    if (!state.nodes[nodeId]) throw new Error(`Unknown node id: ${nodeId}`)
-    const cursors = state.commentCursors
-    const seen = Array.isArray(cursors[nodeId]?.seen) ? cursors[nodeId].seen : []
-    const existing = new Set(seen)
-    const added = (Array.isArray(commentIds) ? commentIds.map(String) : [])
-      .filter((id) => id && !existing.has(id))
-    const next = [...seen, ...added].slice(-projectstate.MAX_CURSOR_IDS)
-    cursors[nodeId] = { seen: next, updatedAt: new Date().toISOString() }
-    await projectstate.saveState(fops, baseDir, projectId, state, artifactRoot, statePath)
-    return { nodeId, added, total: next.length, updatedAt: cursors[nodeId].updatedAt }
+    let added = []
+    let total = 0
+    let updatedAt = ''
+    await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (state) => {
+      if (!state.nodes[nodeId]) throw new Error(`Unknown node id: ${nodeId}`)
+      const cursors = state.commentCursors
+      const seen = Array.isArray(cursors[nodeId]?.seen) ? cursors[nodeId].seen : []
+      const existing = new Set(seen)
+      added = (Array.isArray(commentIds) ? commentIds.map(String) : [])
+        .filter((id) => id && !existing.has(id))
+      const next = [...seen, ...added].slice(-projectstate.MAX_CURSOR_IDS)
+      cursors[nodeId] = { seen: next, updatedAt: new Date().toISOString() }
+      total = next.length
+      updatedAt = cursors[nodeId].updatedAt
+    }, artifactRoot)
+    return { nodeId, added, total, updatedAt }
   }
 
   // Parse canonical plan-id markers and, for migration visibility, the legacy
@@ -5014,11 +5140,11 @@ function preflightReadyNodes(plan, journal, nodeStates) {
 // (plan §4.5 revision routing): statuses reset to todo, run receipts cleared.
 // The helper is the single source of truth: it loads the journal itself.
 async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
-  const loaded = await projectstate.loadState(fops, baseDir, plan.projectId, plan, options.artifactRoot ?? '.research-agent')
-  if (!util.isPlainObject(loaded) || !util.isPlainObject(loaded.state)) {
-    throw new Error('Cannot reset downstream state: state journal unavailable for ' + plan.projectId)
-  }
-  const state = loaded.state
+  // The dependent closure is a pure function of the PLAN, so it is computed once
+  // outside the mutation. Everything else re-applies to the state mutateState
+  // reads, so a concurrent writer loses the CAS instead of being overwritten by
+  // this handler's snapshot - which is what let a reopen silently erase a
+  // sibling's freshly written `done` entry.
   const dependents = new Set([nodeId])
   let changed = true
   while (changed) {
@@ -5030,42 +5156,41 @@ async function resetDownstreamState(fops, baseDir, plan, nodeId, options = {}) {
       }
     }
   }
-  const nodes = { ...(util.isPlainObject(state.nodes) ? state.nodes : {}) }
   const resetNodeIds = []
-  for (const id of dependents) {
-    const entry = util.isPlainObject(nodes[id]) ? nodes[id] : {}
-    const isUserBlocked = entry.status === 'blocked'
-    const isDependent = id !== nodeId
-    const nextStatus = isUserBlocked ? 'blocked' : 'todo'
-    const nextHolds = isDependent && !isUserBlocked
-      ? [{ kind: 'causal-hold', nodeId: id, blockedBy: [nodeId], reason: 'upstream revision requested; await fresh acceptance', sourceEventDigest: options.metadata?.sourceEventDigest ?? null }]
-      : (Array.isArray(entry.causalHolds) ? entry.causalHolds : [])
-    nodes[id] = {
-      ...entry,
-      status: nextStatus,
-      runDir: '',
-      runStatus: '',
-      currentStep: '',
-      currentPass: null,
-      hasFinal: false,
-      finalCommentId: '',
-      receipts: [],
-      nodeRevision: id === nodeId && options.metadata?.created === true ? (Number(entry.nodeRevision) || 1) + 1 : (Number(entry.nodeRevision) || 1),
-      causalHolds: nextHolds,
-      updatedAt: new Date().toISOString(),
+  const written = await projectstate.mutateState(fops, baseDir, plan.projectId, plan, (state) => {
+    const nodes = { ...(util.isPlainObject(state.nodes) ? state.nodes : {}) }
+    for (const id of dependents) {
+      const entry = util.isPlainObject(nodes[id]) ? nodes[id] : {}
+      const isUserBlocked = entry.status === 'blocked'
+      const isDependent = id !== nodeId
+      const nextStatus = isUserBlocked ? 'blocked' : 'todo'
+      const nextHolds = isDependent && !isUserBlocked
+        ? [{ kind: 'causal-hold', nodeId: id, blockedBy: [nodeId], reason: 'upstream revision requested; await fresh acceptance', sourceEventDigest: options.metadata?.sourceEventDigest ?? null }]
+        : (Array.isArray(entry.causalHolds) ? entry.causalHolds : [])
+      nodes[id] = {
+        ...entry,
+        status: nextStatus,
+        runDir: '',
+        runStatus: '',
+        currentStep: '',
+        currentPass: null,
+        hasFinal: false,
+        finalCommentId: '',
+        receipts: [],
+        nodeRevision: id === nodeId && options.metadata?.created === true ? (Number(entry.nodeRevision) || 1) + 1 : (Number(entry.nodeRevision) || 1),
+        causalHolds: nextHolds,
+        updatedAt: new Date().toISOString(),
+      }
+      if (typeof state.project?.linearProjectId === 'string' && state.project.linearProjectId.trim()) {
+        nodes[id].projectionStatus = 'pending'
+        nodes[id].linearProjection = { projectId: state.project.linearProjectId, nodeId: id, status: nextStatus, blockedBy: nextHolds.flatMap((hold) => hold.blockedBy ?? []), reason: nextHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: nodes[id].updatedAt }
+      }
+      if (!resetNodeIds.includes(id)) resetNodeIds.push(id)
     }
-    if (typeof state.project?.linearProjectId === 'string' && state.project.linearProjectId.trim()) {
-      nodes[id].projectionStatus = 'pending'
-      nodes[id].linearProjection = { projectId: state.project.linearProjectId, nodeId: id, status: nextStatus, blockedBy: nextHolds.flatMap((hold) => hold.blockedBy ?? []), reason: nextHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: nodes[id].updatedAt }
-    }
-    resetNodeIds.push(id)
-  }
-  state.nodes = nodes
-  if (typeof options.mergeState === 'function') options.mergeState(state, { loaded, resetNodeIds: [...resetNodeIds].sort(), ...(util.isPlainObject(options.metadata) ? options.metadata : {}) })
-  state.updatedAt = new Date().toISOString()
-  const statePath = loaded.path ?? projectstate.statePath(baseDir, plan.projectId)
-  await fops.writeJson(statePath, state)
-  return { state, path: statePath, resetNodeIds: [...resetNodeIds].sort() }
+    state.nodes = nodes
+    if (typeof options.mergeState === 'function') options.mergeState(state, { loaded: { state, path: projectstate.statePath(baseDir, plan.projectId, options.artifactRoot ?? '.research-agent') }, resetNodeIds: [...resetNodeIds].sort(), ...(util.isPlainObject(options.metadata) ? options.metadata : {}) })
+  }, options.artifactRoot ?? '.research-agent')
+  return { state: written.state, path: written.path, resetNodeIds: [...resetNodeIds].sort() }
 }
 
 // ── feedback records (plan §8.1/§8.2/§8.4) ─────────────────────────────────
@@ -5415,25 +5540,33 @@ async function requestRevision(fops, baseDir, args) {
           nodes[id].linearProjection = { projectId: state.project.linearProjectId, nodeId: id, status: nextStatus, blockedBy: nextHolds.flatMap((hold) => hold.blockedBy ?? []), reason: nextHolds.map((hold) => hold.reason).filter(Boolean).join('; '), updatedAt: now }
         }
       }
-      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
-      // Monotonic: a stale caller-supplied epoch can never rewind the
-      // integration epoch (plan §8.3: new epoch = current + 1).
-      integration.epoch = Math.max(Number(state.integration?.epoch) || 0, baseEpoch) + 1
+      // Every status change writes a NEW immutable version (phase-5 discipline):
+      // the journal pointer advances to a real `resolving` record, never a status
+      // the record does not carry. Written BEFORE the journal mutation and
+      // idempotently, so the journal never points at a record that is not there.
+      let resolvingDigest = ''
       if (effectiveFeedbackDigest && linkedFeedbackRecord) {
-        // Every status change writes a NEW immutable version (phase-5
-        // discipline): the journal pointer advances to a real `resolving`
-        // record, never a status the record does not carry.
         const resolving = core.makeRecord('user-feedback', core.feedbackVersion(linkedFeedbackRecord, { status: 'resolving' }))
+        resolvingDigest = resolving.digest
         await writeFeedbackRecord(fops, feedbackDir(baseDir, projectId, plan.artifactRoot), resolving, resolving.digest + '.json')
-        const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === effectiveFeedbackDigest ? { feedbackId: resolving.digest, status: 'resolving' } : entry))
-        if (!pointers.some((entry) => entry?.feedbackId === resolving.digest)) pointers.push({ feedbackId: resolving.digest, status: 'resolving' })
-        integration.feedback = pointers
       }
-      state.integration = integration
-      state.nodes = nodes
-      state.updatedAt = now
-      await fops.writeJson(loaded.path, state)
-      reset = { state, path: loaded.path, resetNodeIds: resetClosure.closure }
+      // One CAS. The mutation re-applies to the journal mutateState reads, so a
+      // concurrent writer loses the CAS rather than being overwritten by the
+      // snapshot this handler built.
+      const written = await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (fresh) => {
+        const integration = { ...(util.isPlainObject(fresh.integration) ? fresh.integration : {}) }
+        // Monotonic: a stale caller-supplied epoch can never rewind the
+        // integration epoch (plan §8.3: new epoch = current + 1).
+        integration.epoch = Math.max(Number(fresh.integration?.epoch) || 0, baseEpoch) + 1
+        if (resolvingDigest) {
+          const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === effectiveFeedbackDigest ? { feedbackId: resolvingDigest, status: 'resolving' } : entry))
+          if (!pointers.some((entry) => entry?.feedbackId === resolvingDigest)) pointers.push({ feedbackId: resolvingDigest, status: 'resolving' })
+          integration.feedback = pointers
+        }
+        fresh.integration = integration
+        fresh.nodes = nodes
+      }, plan.artifactRoot)
+      reset = { state: written.state, path: written.path, resetNodeIds: resetClosure.closure }
     }
   } else {
     const fresh = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot)
@@ -6824,19 +6957,20 @@ async function syncJournalNode(fops, baseDir, contractFile, runDirAbs, acceptanc
 // journal after a successful integration publish. Operational digests and
 // identifiers only — never a narrative copy of any Linear context.
 async function recordLastKnownGood(fops, baseDir, loadedPlan, { manifestDigest, inputDigest, runId }) {
-  const loaded = await projectstate.loadState(fops, baseDir, loadedPlan.plan.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
-  const state = loaded.state
-  const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
-  integration.lastKnownGood = {
-    manifestDigest: String(manifestDigest ?? ''),
-    inputDigest: typeof inputDigest === 'string' && inputDigest ? inputDigest : null,
-    publishedAt: new Date().toISOString(),
-    runId: String(runId ?? ''),
-  }
-  state.integration = integration
-  state.updatedAt = new Date().toISOString()
-  await fops.writeJson(loaded.path, state)
-  return integration.lastKnownGood
+  // The mutation is re-applied to the state mutateState reads, so a concurrent
+  // writer loses the CAS instead of being overwritten by this snapshot.
+  await projectstate.mutateState(fops, baseDir, loadedPlan.plan.projectId, loadedPlan.plan, (state) => {
+    const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
+    integration.lastKnownGood = {
+      manifestDigest: String(manifestDigest ?? ''),
+      inputDigest: typeof inputDigest === 'string' && inputDigest ? inputDigest : null,
+      publishedAt: new Date().toISOString(),
+      runId: String(runId ?? ''),
+    }
+    state.integration = integration
+  }, loadedPlan.artifactRoot)
+  const settled = await projectstate.loadState(fops, baseDir, loadedPlan.plan.projectId, loadedPlan.plan, loadedPlan.artifactRoot)
+  return settled.state.integration.lastKnownGood
 }
 
 // ── finalize_run override: contract acceptance gate + output policy ────────
@@ -7827,7 +7961,27 @@ const ORCHESTRATOR_PLUGIN = {
         async execute(args, exec) {
           try {
             const result = await executor(args ?? {}, exec)
-            return result === undefined ? null : result
+            const value = result === undefined ? null : result
+            // The ONE transport boundary: a value the harness cannot round-trip
+            // through JSON is rejected here, at the source, rather than surfacing
+            // to the model as "returned invalid output: value is not lossless
+            // JSON" with no indication of which field was at fault. That opaque
+            // form cost six role dispatches in the log, whose work was safe and
+            // whose durable envelope was already on disk - so the failure carries
+            // the tool, the offending path, and any identity the handler put in
+            // the result, and never replaces the result silently.
+            const lossless = core.checkLosslessJson(value)
+            if (!lossless.ok) {
+              return {
+                kind: 'unavailable',
+                tool: name,
+                code: 'result-not-lossless-json',
+                message: 'the result of ' + name + ' cannot cross the tool boundary: ' + lossless.reason + ' at ' + lossless.path + '. Fix the handler that builds this value; the boundary does not repair it.',
+                fieldPath: lossless.path,
+                identity: (util.isPlainObject(value) && util.isPlainObject(value.identity)) ? value.identity : null,
+              }
+            }
+            return value
           } catch (error) {
             throw error instanceof Error ? error : new Error(String(error))
           }
@@ -8268,8 +8422,31 @@ const ORCHESTRATOR_PLUGIN = {
         } else if (args.task) {
           task += '\n\n' + args.task
         }
-        if (!logicalGroupKey) {
-          const { run, contractFile, runDigest } = await readRunAndDigest(fops, runRoot)
+        const { run, contractFile, runDigest } = await readRunAndDigest(fops, runRoot)
+        if (run?.planning === true) {
+          // A PLANNING directory is a real runDir - it has run.json - but it is not
+          // an execution run: it is project-scoped, has no node and no node
+          // contract, so demanding node-scoped identity of it failed every planning
+          // dispatch closed. `run.json` already carries the discriminator
+          // (`planning: true`, written by the planning scaffold and read in three
+          // other places), so the gate follows that rather than a new field.
+          const planningProjectId = typeof args.projectId === 'string' && args.projectId.trim()
+            ? args.projectId.trim()
+            : String(run?.projectId ?? '')
+          if (!planningProjectId) throw new Error('a planning role dispatch requires projectId: the project-scoped handoff is (projectId, pass, role, route) and the planning run carries no node identity.')
+          logicalGroupKey = {
+            // `scope` is what keeps a planning group distinct: logicalId hashes key
+            // MEMBERSHIP, so without it a planning handoff would hash identically to
+            // an execution handoff for the same project, pass and role and the two
+            // would share one attempt group, owner marker and claim file.
+            scope: 'planning',
+            projectId: planningProjectId,
+            runId: typeof run?.runId === 'string' ? run.runId : '',
+            pass: Number.isInteger(args.pass) ? args.pass : (Number.isInteger(run?.pass) ? run.pass : 0),
+            role: role.role,
+            route: { provider: agentOptions.provider ?? null, model: agentOptions.model ?? null, reasoningEffort: agentOptions.reasoningEffort ?? null },
+          }
+        } else if (!logicalGroupKey) {
           logicalGroupKey = {
             runDigest,
             runId: run?.runId ?? '',
@@ -8484,6 +8661,12 @@ const ORCHESTRATOR_PLUGIN = {
         fallbackCooldownMs: Number.isInteger(execution.modelFallbackCooldownMs) && execution.modelFallbackCooldownMs > 0 ? execution.modelFallbackCooldownMs : undefined,
         outputSchema: args.outputSchema,
         outputMode,
+        // The runner needs the base dir and artifact root to persist an UNBOUND
+        // attempt output, since an unbound run has no run dir to write under. Both
+        // are already resolved in this handler; `cfg.artifactRoot` is the same
+        // value the journal path is built from a few lines above.
+        baseDir,
+        artifactRoot: cfg.artifactRoot ?? '.research-agent',
         runDir: runRoot,
         logicalGroupKey,
         maxTokens: role.maxTokens,
@@ -9436,13 +9619,13 @@ const ORCHESTRATOR_PLUGIN = {
           instruction: 'Feedback already recorded (concurrent intake). Project via linear_post_evidence_event with the returned event (idempotent by event digest).',
         }
       }
-      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
-      const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).filter((entry) => entry?.feedbackId !== record.digest)
-      pointers.push({ feedbackId: record.digest, status: record.status })
-      integration.feedback = pointers
-      state.integration = integration
-      state.updatedAt = new Date().toISOString()
-      await fops.writeJson(loaded.path, state)
+      await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (fresh) => {
+        const integration = { ...(util.isPlainObject(fresh.integration) ? fresh.integration : {}) }
+        const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).filter((entry) => entry?.feedbackId !== record.digest)
+        pointers.push({ feedbackId: record.digest, status: record.status })
+        integration.feedback = pointers
+        fresh.integration = integration
+      }, plan.artifactRoot)
       return {
         ok: true,
         created: true,
@@ -9517,15 +9700,14 @@ const ORCHESTRATOR_PLUGIN = {
       }
       const triagedVersion = core.makeRecord('user-feedback', core.feedbackVersion(feedback, { status: 'triaged', triageDigest: triage.digest }))
       await writeFeedbackRecord(fops, dir, triagedVersion, triagedVersion.digest + '.json')
-      const loaded = await projectstate.loadState(fops, baseDir, projectId, plan.plan, plan.artifactRoot ?? root.relativeRoot)
-      const state = loaded.state
-      const integration = { ...(util.isPlainObject(state.integration) ? state.integration : {}) }
-      const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === feedback.digest ? { feedbackId: triagedVersion.digest, status: 'triaged' } : entry))
-      if (!pointers.some((entry) => entry?.feedbackId === triagedVersion.digest)) pointers.push({ feedbackId: triagedVersion.digest, status: 'triaged' })
-      integration.feedback = pointers
-      state.integration = integration
-      state.updatedAt = new Date().toISOString()
-      await fops.writeJson(loaded.path, state)
+      const triageWrite = await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (fresh) => {
+        const integration = { ...(util.isPlainObject(fresh.integration) ? fresh.integration : {}) }
+        const pointers = (Array.isArray(integration.feedback) ? integration.feedback : []).map((entry) => (entry?.feedbackId === feedback.digest ? { feedbackId: triagedVersion.digest, status: 'triaged' } : entry))
+        if (!pointers.some((entry) => entry?.feedbackId === triagedVersion.digest)) pointers.push({ feedbackId: triagedVersion.digest, status: 'triaged' })
+        integration.feedback = pointers
+        fresh.integration = integration
+      }, plan.artifactRoot ?? root.relativeRoot)
+      const state = triageWrite.state
       const integrationId = plan.plan.integrationId ?? 'integration'
       const integrationNode = util.isPlainObject(state.nodes?.[integrationId]) ? state.nodes[integrationId] : {}
       const marker = 'autoresearch-feedback-triage:' + triage.digest
@@ -9647,10 +9829,15 @@ const ORCHESTRATOR_PLUGIN = {
       if (!pointers.some((entry) => entry?.feedbackId === resolved.digest)) pointers.push({ feedbackId: resolved.digest, status: 'resolved' })
       integration.feedback = pointers
       state.integration = integration
-      state.updatedAt = new Date().toISOString()
-      await fops.writeJson(loaded.path, state)
+      // `pointers` was derived from reads of the SAME state this write persists,
+      // so the mutation is a pure assignment re-applied to a freshly read journal.
+      const closed = await projectstate.mutateState(fops, baseDir, projectId, plan.plan, (fresh) => {
+        fresh.integration = { ...(util.isPlainObject(fresh.integration) ? fresh.integration : {}), feedback: pointers }
+      }, plan.artifactRoot ?? root.relativeRoot)
+      // Downstream fields read the state the WRITE settled on, not the snapshot
+      // this handler loaded before it.
       const integrationId = plan.plan.integrationId ?? 'integration'
-      const integrationNode = util.isPlainObject(state.nodes?.[integrationId]) ? state.nodes[integrationId] : {}
+      const integrationNode = util.isPlainObject(closed.state.nodes?.[integrationId]) ? closed.state.nodes[integrationId] : {}
       const event = core.republishedEvidenceEvent({ projectId, integrationNodeId: integrationId, feedback: resolved, closure, at: resolvedAt })
       return {
         ok: true,

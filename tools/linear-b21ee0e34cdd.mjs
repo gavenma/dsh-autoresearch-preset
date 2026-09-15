@@ -1,5 +1,5 @@
-// AUTO-GENERATED Linear entry, generation 56cc1b1b1353. Source: src/linear.mjs.
-import * as autoresearchCore from "./autoresearch-core-56cc1b1b1353.mjs"
+// AUTO-GENERATED Linear entry, generation b21ee0e34cdd. Source: src/linear.mjs.
+import * as autoresearchCore from "./autoresearch-core-b21ee0e34cdd.mjs"
 // ── lib/pathutil.js ──
 'use strict'
 // Pure POSIX-style path utilities. No node:path dependency, so the same code
@@ -757,6 +757,17 @@ function makeLinearCore(util) {
     entry.projectionStatus = 'confirmed'
     entry.linearProjection = { ...entry.linearProjection, confirmedAt, mutationKey: record.mutationKey, receipt }
     state.updatedAt = confirmedAt
+    // Validate before writing, exactly as the orchestrator's mutateState does.
+    // This is the ONE journal writer that lives outside the orchestrator (it
+    // builds the state path itself, so a `projectstate.*` search cannot see it),
+    // and it is reached from outbox replay. Without this check a projection
+    // acknowledgement could persist a journal that a later read rejects, which is
+    // how the journal silently reset: the invalid file was replayed as a
+    // plan-derived template and the next merge made that emptiness durable.
+    const canonical = autoresearchCore.validateRecord(state)
+    if (!canonical.ok) {
+      return { ok: false, skipped: false, nodeId: record.nodeId, error: 'PROJECT_STATE_INVALID: the journal at ' + statePath + ' failed validation, so the projection acknowledgement was NOT written. ' + canonical.errors.join(' ') }
+    }
     await fops.writeJson(statePath, state, { kind: 'replaceIfVersion', version: stat.version })
     return { ok: true, skipped: false, nodeId: record.nodeId, confirmedAt }
   }
@@ -1224,8 +1235,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = makeLinear
 // block projection (plan §4.5), idempotent revision-request comments, and the
 // runtime build probe.
 
-export const EMBEDDED_GENERATION = '56cc1b1b1353'
-export const EMBEDDED_BUILD_ID = 'f89e3591559c154726c8ece17f50434b5fd573ed3534344937f53fe262c29145'
+export const EMBEDDED_GENERATION = 'b21ee0e34cdd'
+export const EMBEDDED_BUILD_ID = '12aecd61e9f21ea97d241037bc3acdde3552e74ec9da33ee0a15badd867a79f3'
 
 const LINEAR_HELPER_PATH = decodeURIComponent(new URL('./linear-client.mjs', import.meta.url).pathname)
 const MANIFEST_PATH = decodeURIComponent(new URL('./build-manifest.json', import.meta.url).pathname)
@@ -2139,7 +2150,31 @@ const LINEAR_PLUGIN = {
       const result = { ...composed, nodeIdMismatch, issue: { id: snapshot.id, identifier: snapshot.identifier ?? '', title: snapshot.title ?? '', url: snapshot.url ?? '', state: snapshot.state?.name ?? snapshot.state?.id ?? '' } }
       if (args.projectId && nodeId && fops) {
         const cache = await linearCore.readRecoveryCache(fops, baseDir, String(args.projectId), nodeId)
-        if (cache && cache.status === 'pending') result.recoveryCache = { nodeId: cache.nodeId, issueId: cache.issueId, expectedContextDigest: cache.expectedContextDigest, contextDigest: cache.contextDigest, createdAt: cache.createdAt, status: cache.status }
+        if (cache && cache.status === 'pending') {
+          // Reconcile the pending intent against what is actually live, here on the
+          // read path every lifecycle action already calls. A confirmation that
+          // failed (a ~97s propagation lag, or a CAS that lost) leaves the entry
+          // `pending` forever otherwise - nothing else reconciles it on read, since
+          // markRecoveryCacheConfirmed is reachable only from outbox replay and the
+          // explicit update tool. A later CAS then fails against a digest that was
+          // never live. A recovery cache is INTENT-only and never authorizes
+          // anything, so confirming it on a matching live digest adds no authority;
+          // it just stops a settled write from looking unsettled.
+          const liveDigest = contextBlock.ok && autoresearchCore.contextBlockDigest(contextBlock.state)
+          if (liveDigest && liveDigest === cache.contextDigest) {
+            const settled = await linearCore.markRecoveryCacheConfirmed(fops, baseDir, String(args.projectId), nodeId, cache.updatedAt ?? null)
+            if (settled?.ok) {
+              await linearCore.clearRecoveryCache(fops, baseDir, String(args.projectId), nodeId)
+              result.recoveryCache = { nodeId: cache.nodeId, issueId: cache.issueId, expectedContextDigest: cache.expectedContextDigest, contextDigest: cache.contextDigest, createdAt: cache.createdAt, status: 'confirmed', reconciledBy: 'read' }
+            } else {
+              result.recoveryCache = { nodeId: cache.nodeId, issueId: cache.issueId, expectedContextDigest: cache.expectedContextDigest, contextDigest: cache.contextDigest, createdAt: cache.createdAt, status: 'pending', reconcileError: settled?.error ?? 'confirmation failed' }
+            }
+          } else {
+            // Digest does not match the live block: the intent is genuinely
+            // outstanding. Leave it pending and REPORT it as pending.
+            result.recoveryCache = { nodeId: cache.nodeId, issueId: cache.issueId, expectedContextDigest: cache.expectedContextDigest, contextDigest: cache.contextDigest, createdAt: cache.createdAt, status: cache.status }
+          }
+        }
       }
       if (!contextBlock.ok) result.repairHint = 'No valid owned Current Node Context block: repair it with linear_update_node_context from the latest verified Linear comments and the node contract before any node work starts (plan §7.4).'
       return result

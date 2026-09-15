@@ -75,9 +75,12 @@ try {
   assert.deepEqual(recovered.state.nodes.integration.causalHolds, [])
   assert.equal(recovered.state.nodes.merge.projectionStatus, 'pending')
   assert.deepEqual(projectstate.readySet(plan, recovered.state), ['merge'])
+  // Contention is injected by advancing the file version DURING the journal read.
+  // The write must therefore refuse rather than persist a torn snapshot; the
+  // conflict is reported as PROJECT_STATE_CONFLICT naming the path.
   let injectedContention = false
   const contendedFops = { ...fops, async readJson(file) { const value = await fops.readJson(file); if (!injectedContention && file.endsWith('/state.json')) { injectedContention = true; versions.set(file, (versions.get(file) ?? 0) + 1) } return value } }
-  await assert.rejects(projectstate.transitionNode(contendedFops, baseDir, projectId, 'merge', 'claim', { leaseId: 'losing-writer', contextDigest: ctxDigestC }), /version mismatch/)
+  await assert.rejects(projectstate.transitionNode(contendedFops, baseDir, projectId, 'merge', 'claim', { leaseId: 'losing-writer', contextDigest: ctxDigestC }), /PROJECT_STATE_CONFLICT/)
   assert.equal((await fops.readJson(path.join(projectDir, 'state.json'))).nodes.merge.status, 'todo')
   const merged = await projectstate.transitionNode(fops, baseDir, projectId, 'merge', 'complete', { receipts: ['merge-receipt'], contextDigest: ctxDigestC })
   assert.equal(projectstate.integrationStatus(plan, merged.state).allLeavesDone, true)

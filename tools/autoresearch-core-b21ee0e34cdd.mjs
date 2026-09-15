@@ -1952,6 +1952,9 @@ const RECORD_DEFINITIONS = {
     ['digest', 'nonEmptyString', false],
   ],
   'role-task': [
+    // Optional by design: this field was added after role-task records were already
+    // persisted as task.json, and a required field would invalidate every one.
+    ['expectedPayload', 'nullableString', false],
     ['runDigest', 'nonEmptyString', true],
     ['projectId', 'nonEmptyString', true],
     ['planDigest', 'nonEmptyString', true],
@@ -2199,8 +2202,16 @@ export function validateRecord(record) {
   }
   const errors = []
   for (const [name, typeToken, required] of spec) {
-    if (record[name] === undefined) {
+    // `Object.hasOwn`, not a value test: an own key holding `undefined` is a value
+    // the wire cannot carry, and the field loop must see it exactly as the
+    // unknown-field loop below does — the two halves of one function disagreeing
+    // is what let a non-transportable record validate clean.
+    if (!Object.hasOwn(record, name)) {
       if (required) errors.push(kind + '.' + name + ' is required.')
+      continue
+    }
+    if (record[name] === undefined) {
+      errors.push(kind + '.' + name + ' carries an undefined value: an absent value is omitted or explicit (null), never smuggled through as a hole.')
       continue
     }
     const check = RECORD_FIELD_CHECKS[typeToken]
@@ -2223,8 +2234,110 @@ export function validateRecord(record) {
 }
 
 // Constructor: validate the closed shape, bind the digest, and freeze.
+// The first nested `undefined` in a record body, as a dotted/indexed path, or
+// null when there is none. A record is frozen and digest-bound, and a value that
+// JSON cannot carry must never enter one: `{ a: undefined }` and `{}` serialize
+// identically, so a hole inside a record is a silently-dropped value — for a
+// guard finding that means an unauthorized change reported as success. Depth is
+// bounded because a record is data, not an arbitrary object graph.
+function firstUndefinedPath(value, path, depth) {
+  if (depth > 32 || value === null || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      if (!Object.hasOwn(value, i)) return path + '[' + i + ']'
+      if (value[i] === undefined) return path + '[' + i + ']'
+      const nested = firstUndefinedPath(value[i], path + '[' + i + ']', depth + 1)
+      if (nested) return nested
+    }
+    return null
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    const childPath = path + '.' + key
+    if (entry === undefined) return childPath
+    const nested = firstUndefinedPath(entry, childPath, depth + 1)
+    if (nested) return nested
+  }
+  return null
+}
+
+// The lossless-JSON criterion, in one place: a value crosses a tool boundary only
+// if `JSON.parse(JSON.stringify(v))` reproduces it exactly, key sets included. The
+// harness rejects a result that fails this, so the boundary asserts it at the
+// source rather than letting the model receive a transport error. Returns
+// `{ ok: true }` or `{ ok: false, path, reason }` naming the first offending leaf.
+export function checkLosslessJson(value, path = '$', depth = 0) {
+  if (depth > 64) return { ok: false, path, reason: 'nesting exceeds 64 levels' }
+  if (value === null) return { ok: true }
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return { ok: true }
+  if (type === 'number') return Number.isFinite(value) ? { ok: true } : { ok: false, path, reason: 'non-finite number (JSON turns it into null)' }
+  if (type === 'undefined') return { ok: false, path, reason: 'undefined (JSON drops the key or the array slot)' }
+  if (type === 'bigint' || type === 'function' || type === 'symbol') return { ok: false, path, reason: type + ' has no JSON form' }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      if (!Object.hasOwn(value, i)) return { ok: false, path: path + '[' + i + ']', reason: 'sparse array slot (JSON turns it into null)' }
+      const nested = checkLosslessJson(value[i], path + '[' + i + ']', depth + 1)
+      if (!nested.ok) return nested
+    }
+    return { ok: true }
+  }
+  if (type === 'object') {
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) return { ok: false, path, reason: 'not a plain object (a class instance does not survive JSON)' }
+    for (const [key, entry] of Object.entries(value)) {
+      const nested = checkLosslessJson(entry, path + '.' + key, depth + 1)
+      if (!nested.ok) return nested
+    }
+    return { ok: true }
+  }
+  return { ok: false, path, reason: 'value has no JSON form' }
+}
+
+// Whether an attempt's output finished arriving. `stopReason: 'completed'` with
+// non-empty output used to be success, so a model that stopped mid-JSON-fence at
+// ~18.5k chars was recorded as a completed attempt and its truncated output was
+// promoted as whole. Only COMPLETENESS is checked, never the format: an answer
+// written in an unexpected shape is still accepted, because the declaration is
+// that a payload had to finish, not that it had to be punctuated a certain way.
+// A null/absent declaration means "no declared payload", which is always complete.
+export function payloadIsComplete(output, expectedPayload) {
+  if (typeof expectedPayload !== 'string' || !expectedPayload) return true
+  const text = typeof output === 'string' ? output : ''
+  if (expectedPayload.startsWith('```')) {
+    const first = text.indexOf(expectedPayload)
+    if (first === -1) return false
+    // The closing fence is COUNTED, not assumed: an unclosed opening fence is
+    // exactly the truncation this exists to catch.
+    return text.indexOf('```', first + expectedPayload.length) !== -1
+  }
+  return text.includes(expectedPayload)
+}
+
+// Where an attempt's output is persisted. A bound run writes under its own run
+// directory; an unbound run has no run directory, so it writes at the mirror path
+// under the artifact root, keyed by the same logical group id. One function owns
+// the convention so the writer and any reader agree on it, and so it can be
+// asserted without dispatching a role.
+export function attemptOutputPath({ runDir, baseDir, artifactRoot, logicalGroupId, attemptId, outputMode }) {
+  const ext = outputMode === 'schema' ? 'json' : 'txt'
+  if (typeof runDir === 'string' && runDir) return { kind: 'bound', relative: 'packets/role-attempts/' + logicalGroupId + '/' + attemptId + '.output.' + ext }
+  if (typeof baseDir !== 'string' || !baseDir || typeof artifactRoot !== 'string' || !artifactRoot) return null
+  return { kind: 'unbound', root: artifactRoot, relative: 'packets/role-attempts/' + logicalGroupId + '/' + attemptId + '.output.' + ext }
+}
+
 export function makeRecord(kind, fields) {
-  const record = { kind, ...(isPlainObject(fields) ? fields : {}) }
+  const source = isPlainObject(fields) ? fields : {}
+  // A TOP-LEVEL `undefined` is dropped: an absent key and a key whose value is
+  // `undefined` are the same value by JSON's own reading, so the constructor must
+  // not create a distinction the wire cannot carry. Anything deeper cannot be
+  // dropped without guessing which absence was intended, so it is a construction
+  // error naming the exact path.
+  const record = { kind }
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined) record[key] = value
+  }
+  const nested = firstUndefinedPath(record, kind, 0)
+  if (nested) throw new Error('record ' + kind + ' carries an undefined value at ' + nested + ': an absent value is omitted or explicit (null), never smuggled through as a hole.')
   // The constructor owns this derived field; replayed caller metadata cannot
   // override the digest bound to the normalized record body.
   delete record.digest
@@ -2426,7 +2539,7 @@ export const TOOL_PARAMETER_DEFINITIONS = {
   autoresearch_parse_ranking: {
     params: [
       ["text", "string", false, "Judge response text containing a RANKING: line."],
-      ["allowedLabels", "stringArray", false, "Expected labels (anonymized or original)."],
+      ["allowedLabels", "stringArray", true, "Expected labels (anonymized or original). Required: extraction is by label index, so an empty set cannot yield a ranking - it would return a silent empty success."],
       ["blindPacket", "blindPacket", false, "The blind-packet map record (judge_NN_map.json) this ranking was built from; its digest is validated before its label maps are trusted."],
       ["pass", "integer", false, "Optional zero-based pass the ranking belongs to (recorded for cross-pass reuse detection)."],
       ["judge", "integer", false, "Optional zero-based judge index the ranking belongs to (recorded for cross-judge reuse detection)."],
@@ -3260,7 +3373,11 @@ export function decideUpstreamReopen(params = {}) {
   const quorum = [...groups.values()].filter((group) => group.judges.size >= config.quorumJudges || (group.judges.size >= 1 && group.critic))
   if (quorum.length === 0) return { decision: 'advisory', valid, stale, groups: [...groups.values()].map((group) => ({ ...group, judges: [...group.judges] })) }
   if (quorum.length > 1) return { decision: 'abstain-ambiguous', valid, stale, quorum: quorum.map((group) => group.key) }
-  const winning = quorum[0]
+  // Normalize ONCE, at the source. The internal group holds `judges: Set` and a
+  // Set has no JSON form — `JSON.stringify` turns it into `{}`, silently dropping
+  // the quorum. The three early returns below used to hand the caller that raw
+  // group, so a budget escalation reported no judges at all.
+  const winning = { ...quorum[0], judges: [...quorum[0].judges].map(Number).filter(Number.isFinite).sort((left, right) => left - right) }
   const open = new Set(Array.isArray(params.openKeys) ? params.openKeys : [])
   if (open.has(winning.key + '::' + contextDigest)) return { decision: 'already-open', winning }
   const budget = isPlainObject(params.budget) ? params.budget : {}
@@ -3271,10 +3388,10 @@ export function decideUpstreamReopen(params = {}) {
   if (upstreamCount >= config.maxReopensPerUpstream || pairCount >= config.maxReopensPerPair || epoch >= config.maxEpochs) {
     return { decision: 'escalate-budget', winning, upstreamCount, pairCount, epoch }
   }
-  const judges = [...winning.judges].map(Number).filter(Number.isFinite).sort((left, right) => left - right)
+  const judges = winning.judges
   return {
     decision: config.mode === 'enforce' ? 'reopen' : 'observe',
-    winning: { ...winning, judges },
+    winning,
     quorum: { judges, criticConcord: winning.critic, mode: judges.length >= config.quorumJudges ? 'two-judge' : 'judge-critic' },
   }
 }
@@ -3657,7 +3774,36 @@ export function renderContextBlock(rawState) {
   return lines.join('\n')
 }
 
+// The owned block is written with `- ` bullets, but Linear normalizes list
+// bullets to `* ` in stored issue descriptions (GFM task-list items `- [ ]` /
+// `- [x]` survive). Both tokens are therefore legal wherever the renderer
+// writes a bullet. See parseContextBlock for why this is pure parse tolerance.
+const BULLET_MATCH = /^[*-]/
+const VISIBLE_HEADER = /^[*-] (?:Status|Objective|Contract revision|Last verified): /
+const HEADER_PREFIX = { Status: /^[*-] Status: /, Objective: /^[*-] Objective: /, 'Contract revision': /^[*-] Contract revision: /, 'Last verified': /^[*-] Last verified: / }
+
+// Drop the leading bullet token; the item text starts after it. A non-bullet
+// line is returned trimmed (callers only reach it after the bullet gate).
+function stripBullet(line) {
+  return line.replace(BULLET_MATCH, '').trim()
+}
+
+// The visible header value for `field`, or undefined when the line is not that
+// header. The value is the raw remainder (trimmed by the caller).
+function matchVisibleHeader(line, field) {
+  const prefix = HEADER_PREFIX[field]
+  if (!prefix || !prefix.test(line)) return undefined
+  return line.replace(prefix, '')
+}
+
 export function parseContextBlock(text) {
+  // Both bullet tokens are accepted everywhere the renderer writes `- `:
+  // Linear stores `* ` instead, so accepting only `- ` parses every block it
+  // wrote as block-malformed and the read-back/digest confirmation fails even
+  // though the stored block is well-formed. A bullet marker is not owned
+  // content — the item text starts after it — so this is parse tolerance, not
+  // a grammar change: the rebuilt state, and therefore the digest, is
+  // identical.
   if (typeof text !== 'string' || !text) return { ok: false, reason: 'block-missing', state: null, blockText: '' }
   const start = text.indexOf(CONTEXT_BLOCK_START)
   const end = text.indexOf(CONTEXT_BLOCK_END)
@@ -3688,13 +3834,13 @@ export function parseContextBlock(text) {
         // Every owned section line is a bullet; an unknown non-empty line is
         // tamper and invalidates the block (the digest must bind ALL visible
         // owned content).
-        if (!line.startsWith('-')) return { ok: false, reason: 'block-malformed', state: null, blockText }
+        if (!BULLET_MATCH.test(line)) return { ok: false, reason: 'block-malformed', state: null, blockText }
         sectionLines[section].push(line)
         continue
       }
       // Between headings: only the renderer-owned visible header lines are
       // legal; anything else is tamper.
-      if (line.startsWith('- Status: ') || line.startsWith('- Objective: ') || line.startsWith('- Contract revision: ') || line.startsWith('- Last verified: ')) {
+      if (VISIBLE_HEADER.test(line)) {
         visibleLines.push(line)
         continue
       }
@@ -3720,7 +3866,7 @@ export function parseContextBlock(text) {
         else section = null
         continue
       }
-      if (line.startsWith('- Status: ') || line.startsWith('- Objective: ') || line.startsWith('- Contract revision: ') || line.startsWith('- Last verified: ')) {
+      if (VISIBLE_HEADER.test(line)) {
         visibleLines.push(line)
         continue
       }
@@ -3774,17 +3920,17 @@ export function parseContextBlock(text) {
   }
   // Every renderer-owned visible header line is validated: the digest must
   // bind ALL owned visible content, not only Status/Objective.
-  const statusMatch = visibleLines.find((line) => line.startsWith('- Status: '))
-  const objectiveMatch = visibleLines.find((line) => line.startsWith('- Objective: '))
-  const contractLine = visibleLines.find((line) => line.startsWith('- Contract revision: '))
-  const lastVerifiedLine = visibleLines.find((line) => line.startsWith('- Last verified: '))
+  const statusMatch = visibleLines.find((line) => matchVisibleHeader(line, 'Status') !== undefined)
+  const objectiveMatch = visibleLines.find((line) => matchVisibleHeader(line, 'Objective') !== undefined)
+  const contractLine = visibleLines.find((line) => matchVisibleHeader(line, 'Contract revision') !== undefined)
+  const lastVerifiedLine = visibleLines.find((line) => matchVisibleHeader(line, 'Last verified') !== undefined)
   if (!statusMatch || !objectiveMatch || !contractLine || !lastVerifiedLine) return { ok: false, reason: 'block-malformed', state: null, blockText }
-  const statusByLabel = Object.entries(CONTEXT_STATUS_LABELS).find(([, label]) => label === statusMatch.replace(/^- Status: /, '').trim())
-  if (!statusByLabel) return { ok: false, reason: 'field-invalid', state: null, blockText, error: 'invalid node context field status: unknown status label ' + statusMatch.replace(/^- Status: /, '').trim() }
+  const statusByLabel = Object.entries(CONTEXT_STATUS_LABELS).find(([, label]) => label === statusMatch.replace(/^[-*] Status: /, '').trim())
+  if (!statusByLabel) return { ok: false, reason: 'field-invalid', state: null, blockText, error: 'invalid node context field status: unknown status label ' + statusMatch.replace(/^[-*] Status: /, '').trim() }
   parsed.status = statusByLabel[0]
-  parsed.objective = objectiveMatch.replace(/^- Objective: /, '').trim()
+  parsed.objective = objectiveMatch.replace(/^[-*] Objective: /, '').trim()
   // Contract revision line must agree with the machine header fields.
-  const contractMatch = contractLine.match(/^- Contract revision: plan (\d+) \/ node (\d+)(?: \(digest ([0-9a-f]{12})\.\.\.\))?$/)
+  const contractMatch = contractLine.match(/^[-*] Contract revision: plan (\d+) \/ node (\d+)(?: \(digest ([0-9a-f]{12})\.\.\.\))?$/)
   if (!contractMatch) return { ok: false, reason: 'block-malformed', state: null, blockText }
   const expectedPlanRevision = parsed.contract?.planRevision ?? 0
   const expectedNodeRevision = parsed.contract?.nodeRevision ?? 0
@@ -3795,20 +3941,27 @@ export function parseContextBlock(text) {
     return { ok: false, reason: 'digest-mismatch', state: parsed, blockText, actual: null, expected: fields['context-digest'] }
   }
   // Last verified line must agree with the machine field.
-  const lvVisible = lastVerifiedLine.replace(/^- Last verified: /, '').trim()
+  const lvVisible = lastVerifiedLine.replace(/^[-*] Last verified: /, '').trim()
   const lvMachine = fields['last-verified'] ?? 'never'
   const lvAt = lvMachine === 'never' ? 'never' : (lvMachine.lastIndexOf(' ') > 0 ? lvMachine.slice(0, lvMachine.lastIndexOf(' ')) : lvMachine)
   if (lvVisible !== lvAt) return { ok: false, reason: 'digest-mismatch', state: parsed, blockText, actual: null, expected: fields['context-digest'] }
 
   function parseItemLine(line, requireCheckbox) {
-    let body = line.slice(1).trim()
+    let body = stripBullet(line)
     if (requireCheckbox) {
       // Strict token by section: Completed items render `[x] `, Remaining
       // items render `[ ] `. Any visible toggle inside the owned block
       // (checked->unchecked, case change) must invalidate the block instead
       // of silently keeping the digest stable.
       const token = typeof requireCheckbox === 'string' ? requireCheckbox : '[x] '
-      if (!body.startsWith(token)) return null
+      // Case-insensitive by design. Linear uppercases GFM task-list tokens in
+      // stored descriptions, so a block the renderer wrote as `- [x] id: text`
+      // comes back as `- [X] id: text` and used to parse as `block-malformed`,
+      // failing the read-back digest confirmation. The two tokens are the same
+      // length and case-insensitively equal, so the body starts at the same
+      // offset: the rebuilt state, and therefore the digest, is unchanged. This
+      // is tolerance for an external mutation, not a grammar change.
+      if (body.slice(0, token.length).toLowerCase() !== token.toLowerCase()) return null
       body = body.slice(token.length)
     }
     const colon = body.indexOf(': ')
@@ -3820,7 +3973,7 @@ export function parseContextBlock(text) {
     if (evidenceMatch) { text = evidenceMatch[1].trim(); evidence = evidenceMatch[2].trim() }
     return { id, text, evidence }
   }
-  const PLACEHOLDERS = new Set(['- (none yet)', '- (none)'])
+  const PLACEHOLDERS = new Set(['- (none yet)', '- (none)', '* (none yet)', '* (none)'])
   // Trailing `(key: value; ...)` metadata group. A group is only treated as
   // machine metadata when EVERY `; `-separated part starts with a known key
   // followed by `: ` (values are split on the FIRST `: ` only, so prose
@@ -3859,7 +4012,7 @@ export function parseContextBlock(text) {
   }
   for (const line of sectionLines.requiredRevisions) {
     if (PLACEHOLDERS.has(line)) continue
-    let body = line.slice(1).trim()
+    let body = stripBullet(line)
     const colon = body.indexOf(': ')
     if (colon <= 0) return { ok: false, reason: 'block-malformed', state: null, blockText }
     const id = body.slice(0, colon).trim()
@@ -3885,7 +4038,7 @@ export function parseContextBlock(text) {
   }
   for (const line of sectionLines.dependencies) {
     if (PLACEHOLDERS.has(line)) continue
-    let body = line.slice(1).trim()
+    let body = stripBullet(line)
     let nodeId = body
     let issueId = ''
     let relation = ''
@@ -3911,9 +4064,9 @@ export function parseContextBlock(text) {
   }
   if (sectionLines.nextAction.length > 0) {
     const line = sectionLines.nextAction[0]
-    if (line === '- (none recorded)') parsed.nextAction = null
+    if (line === '- (none recorded)' || line === '* (none recorded)') parsed.nextAction = null
     else {
-      let body = line.slice(1).trim()
+      let body = stripBullet(line)
       // Prose + optional trailing `(meta: ...)` group.
       const group = parseMetaGroup(body, ['owner', 'expected output', 'acceptance'])
       let owner = ''
@@ -4056,7 +4209,20 @@ export function newerThan(candidate, baseline) {
   return String(candidate) > String(baseline)
 }
 
-const AUTORESEARCH_COMMENT_MARKER = /(^|\n)\s*autoresearch-(causal|evidence|scope-note|spec-block|node|project|context):/
+// Two independent things have to be right here, and an earlier version got both
+// wrong: the VOCABULARY must cover every marker a producer emits, and the SHAPE must
+// accept the way bodies actually carry it. Every builder prepends a literal
+// `Marker: ` (`revisionCommentBody`, `triageCommentBody`), so a line-start anchor
+// alone never reached the token - `causal-event` and `feedback-triage` comments were
+// classified HUMAN, which then raised LINEAR_CONTEXT_STALE on the preset's own
+// comment and removed those bodies from a child's `## Unresolved Human Input`.
+//
+// The anchor STAYS, and it is load-bearing rather than decorative: this regex is also
+// the human filter (it builds `newHumanComments`), so matching the token anywhere
+// would let a human comment that merely QUOTES a marker be swallowed as machine and
+// vanish from the node's context. Optional `Marker:` inside a line-start anchor keeps
+// both properties: produced comments are recognised, quoted ones stay human.
+const AUTORESEARCH_COMMENT_MARKER = /(^|\n)\s*(?:Marker:\s*)?autoresearch-(causal-event|causal|evidence|feedback-triage|scope-note|spec-block|node|project):/
 
 export function reduceNodeContext(priorRaw, updates = {}) {
   const prior = normalizeContextState(priorRaw)

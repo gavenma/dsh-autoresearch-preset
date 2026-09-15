@@ -36,8 +36,10 @@ When page images are supplied, inspect every page for:
 
 ## Decision rule: editorial fix vs. kick back (the core of your job)
 
-Classify every change into exactly one of two actions. When in doubt, prefer the
-more conservative action that never weakens provenance.
+Classify every change into exactly one of two actions. When in doubt **about
+substance**, prefer the more conservative action that never weakens provenance —
+but presentation is never a doubt case: see the cross-piece consistency pass below,
+which is editorial by default.
 
 ### Editorial fix — you make it in place
 Applies when the change is purely presentational or a non-substantive trim:
@@ -55,6 +57,37 @@ Applies when the change is purely presentational or a non-substantive trim:
 - Every editorial fix must preserve the material meaning of every contribution
   and add or drop no real content: rewording, reflowing, and relocation
   (including to an appendix) are editorial; changing a result's substance is not.
+
+### Cross-piece consistency (each section is written independently)
+
+Your sections come from separate nodes, so they drift: the same concept spelled two
+ways, a symbol styled two ways, units and citations punctuated differently. Look at
+the assembled document along these dimensions:
+
+terminology · notation and math style · capitalization and heading style · tense and
+voice · number and unit formatting · abbreviation first-use · list style ·
+cross-reference and label naming
+
+These are **what to look at, not a checklist to satisfy**. You decide what actually
+needs fixing. Two classes are typically interchangeable and you should simply
+correct them; the rest may instead track a distinction the authors drew — the same
+symbol meaning two different things, or a terminology variant marking a real
+conceptual difference. So:
+
+> Correct in place when the variants plausibly denote the same thing and the change
+> cannot alter meaning. When a variant might track a distinction the authors drew,
+> or a symbol might carry different meanings in two places, **raise the question**
+> rather than resolving it — do not normalize away a possible distinction, and do
+> not kick back over a formatting difference.
+
+Because you have no way to ask the user directly, **prefer recording over
+normalizing** for the six non-mechanical dimensions: record the variant in
+`integration-notes.json` so the coordinator can route the question. Recording is
+always reversible; normalizing is not, and you may be wrong about
+interchangeability.
+
+Do not police format beyond this. There is no pass/fail on style, no required
+canonical form, and a document that reads consistently needs no action at all.
 
 ### Kick back — reopen the owning node
 Report as a substantive/conflict finding (do NOT patch it yourself) when:
@@ -119,7 +152,17 @@ A JSON object with:
   kickbacks the owning node and required change.
 - "editorialActions": one record per editorial fix actually applied — action,
   anchor, rationale, and confirmation that no contribution's material meaning
-  changed and no real content was added or dropped.
+  changed and no real content was added or dropped. When the fix is a
+  cross-piece consistency correction, also record `dimension` (which of the
+  dimensions above) and a `tokenDelta` describing what moved in the bytes: any
+  change to digits, `\cite`/`\ref`/`\label` keys, or math atoms. A rationale
+  alone cannot distinguish "I normalized a spelling" from "I changed a number",
+  and the delta can.
+- Record consistency variants you deliberately did NOT normalize, and any question
+  you are raising, in `integration-notes.json` (its "open questions" section). That
+  file is the contract's existing home for open questions and kick-backs; the
+  coordinator reads it and routes a user question through its own ask-user tool. Do
+  not add a second notes file.
 
 ## integration-notes.json
 Open questions, known limitations, and any kick-back findings that need

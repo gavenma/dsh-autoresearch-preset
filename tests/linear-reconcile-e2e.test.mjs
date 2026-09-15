@@ -107,7 +107,10 @@ const invoke = (name, args) => tools.get(name).execute(args, exec)
 
 try {
   await fs.mkdir(projectDir, { recursive: true })
-  const state = { kind: 'project-state', projectId, project: { linearProjectId: 'LP-1' }, nodes: { accepted: { status: 'done', projectionStatus: 'pending', linearProjection: { projectId, nodeId: 'accepted', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid' } } } }
+  // A CANONICAL journal: the projection acknowledgement validates before it
+  // writes, so a fixture that could not validate would be refused (correctly)
+  // instead of exercised.
+  const state = { kind: 'project-state', projectId, marker: core.projectMarker(projectId), createdAt: '2026-09-14T00:00:00.000Z', updatedAt: '2026-09-14T00:00:00.000Z', project: { linearProjectId: 'LP-1', url: '', createdAt: '' }, integrationRevision: 1, commentCursors: {}, integration: { epoch: 1, inputDigest: null, lastKnownGood: null, feedback: [] }, lastError: '', nodes: { accepted: { status: 'done', issueId: '', identifier: '', url: '', linearState: '', runDir: '', runStatus: '', currentStep: '', currentPass: null, hasFinal: false, finalCommentId: '', receipts: [], causalHolds: [], nodeRevision: 1, leaseId: '', failureReason: '', contextDigest: null, contextDigestAt: null, projectionStatus: 'pending', updatedAt: '2026-09-14T00:00:00.000Z', linearProjection: { projectId, nodeId: 'accepted', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid', updatedAt: '2026-09-14T00:00:00.000Z' } } } }
   await fileService.writeText(statePath, JSON.stringify(state, null, 2) + '\n')
   await assert.rejects(invoke('linear_project_node', { projectId, nodeId: 'accepted', issueId: 'ISS-1', stateId: 'done', blockedLabelId: 'autoresearch-blocked', status: 'done', blockedBy: ['upstream'], reason: 'upstream receipt invalid', contextDigest, baseDir }), /simulated Linear outage/)
   assert.equal(remote.mutations, 0)
